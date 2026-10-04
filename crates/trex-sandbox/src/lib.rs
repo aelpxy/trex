@@ -24,6 +24,12 @@ pub enum ExecEvent {
 
 pub struct ExecStream(Streaming<proto::ExecSandboxEvent>);
 
+pub struct Output {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: Option<i32>,
+}
+
 impl OpenShell {
     // the sdk has no mtls support, so we build the channel ourselves
     pub async fn connect(endpoint: &str, tls_dir: &Path) -> anyhow::Result<Self> {
@@ -78,13 +84,13 @@ impl OpenShell {
         &self,
         sandbox: &str,
         command: Vec<String>,
-        workdir: Option<String>,
+        stdin: Vec<u8>,
     ) -> anyhow::Result<ExecStream> {
         let request = proto::ExecSandboxRequest {
             sandbox: sandbox.to_owned(),
             workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
             command,
-            workdir: workdir.unwrap_or_default(),
+            stdin,
             no_login_shell: true,
             ..Default::default()
         };
@@ -95,6 +101,28 @@ impl OpenShell {
             .await?
             .into_inner();
         Ok(ExecStream(stream))
+    }
+
+    pub async fn output(
+        &self,
+        sandbox: &str,
+        command: Vec<String>,
+        stdin: Vec<u8>,
+    ) -> anyhow::Result<Output> {
+        let mut stream = self.exec(sandbox, command, stdin).await?;
+        let mut output = Output {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: None,
+        };
+        while let Some(event) = stream.next().await? {
+            match event {
+                ExecEvent::Stdout(data) => output.stdout.extend(data),
+                ExecEvent::Stderr(data) => output.stderr.extend(data),
+                ExecEvent::Exit(code) => output.exit_code = Some(code),
+            }
+        }
+        Ok(output)
     }
 
     pub async fn delete(&self, sandbox: &str) -> anyhow::Result<()> {
@@ -141,7 +169,7 @@ mod tests {
 
         let command = ["sh", "-c", "echo hello && echo oops >&2 && exit 3"];
         let mut stream = openshell
-            .exec(&sandbox, command.map(String::from).to_vec(), None)
+            .exec(&sandbox, command.map(String::from).to_vec(), Vec::new())
             .await
             .unwrap();
 
@@ -154,10 +182,17 @@ mod tests {
             }
         }
 
+        let echoed = openshell
+            .output(&sandbox, vec!["cat".into()], b"from stdin".to_vec())
+            .await
+            .unwrap();
+
         openshell.delete(&sandbox).await.unwrap();
 
         assert_eq!(stdout, b"hello\n");
         assert_eq!(stderr, b"oops\n");
         assert_eq!(exit, Some(3));
+        assert_eq!(echoed.stdout, b"from stdin");
+        assert_eq!(echoed.exit_code, Some(0));
     }
 }

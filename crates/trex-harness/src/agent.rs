@@ -172,7 +172,7 @@ mod tests {
     use super::*;
     use crate::{
         model::{ModelConfig, Models},
-        tool::Bash,
+        tool::Tools,
     };
 
     // needs the openshell gateway tunnel, <workspace>/certs/openshell, and LOCAL_API_KEY for the local responses api
@@ -190,7 +190,7 @@ mod tests {
             .await
             .unwrap();
         let sandbox = openshell.create(None).await.unwrap();
-        let tools = Tools::new(vec![Box::new(Bash)]);
+        let tools = Tools::standard();
 
         let agent = Agent {
             model: models.get("gpt-6.1-sol").unwrap(),
