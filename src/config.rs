@@ -1,10 +1,12 @@
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, bail};
 
 pub struct Config {
     pub addr: SocketAddr,
     pub log_format: LogFormat,
+    pub openshell_endpoint: String,
+    pub openshell_tls_dir: PathBuf,
 }
 
 #[derive(Clone, Copy)]
@@ -26,6 +28,18 @@ impl Config {
             Ok(other) => bail!("invalid TREX_LOG_FORMAT: {other} (expected text or json)"),
         };
 
-        Ok(Self { addr, log_format })
+        let openshell_endpoint = env::var("TREX_OPENSHELL_ENDPOINT")
+            .unwrap_or_else(|_| "https://127.0.0.1:17670".into());
+
+        let openshell_tls_dir = PathBuf::from(
+            env::var("TREX_OPENSHELL_TLS_DIR").unwrap_or_else(|_| "certs/openshell".into()),
+        );
+
+        Ok(Self {
+            addr,
+            log_format,
+            openshell_endpoint,
+            openshell_tls_dir,
+        })
     }
 }
