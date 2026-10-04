@@ -15,14 +15,17 @@ anyhow = "1.0.104"
 async-openai = { version = "0.42.1", default-features = false }
 axum = "0.8.9"
 futures = "0.3"
+object_store = { version = "0.14.2", default-features = false }
 openshell-sdk = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.2" }
 redis = { version = "1.7.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sqlx = { version = "0.9.0", default-features = false }
+tar = "0.4.46"
 tokio = "1.53.2"
 toml = "1.1.6"
 tonic = "0.14"
 tower-http = "0.7.1"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+uuid = { version = "1.27.0", features = ["v7"] }

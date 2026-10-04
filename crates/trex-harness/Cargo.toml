@@ -5,14 +5,17 @@ edition.workspace = true
 
 [dependencies]
 trex-sandbox.workspace = true
+trex-store.workspace = true
 
 anyhow.workspace = true
 async-openai = { workspace = true, features = ["responses", "rustls"] }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tar.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

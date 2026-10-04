@@ -5,8 +5,11 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+futures.workspace = true
+object_store = { workspace = true, features = ["aws", "fs"] }
 redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "migrate", "macros"] }
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

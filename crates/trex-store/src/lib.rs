@@ -1,3 +1,5 @@
+pub mod library;
+
 use std::time::Duration;
 
 use anyhow::Context;

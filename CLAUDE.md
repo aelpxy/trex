@@ -12,7 +12,7 @@ Backend and agent harness for a web UI. trex owns sessions, the model catalog th
 
 - `crates/trex-harness`: the brain. Agent loop, runs, events, tools, model catalog (`model::Models`). Current focus.
 - `crates/trex-sandbox`: OpenShell client (`OpenShell`): create, streaming exec, delete.
-- `crates/trex-store`: Postgres (sqlx, migrations in `crates/trex-store/migrations`, applied on startup) and Redis (connection manager). Users, sessions and the credit ledger will live here.
+- `crates/trex-store`: Postgres (sqlx, migrations in `crates/trex-store/migrations`, applied on startup), Redis (connection manager), and the per-user file library (`object_store`, any S3-compatible provider, keyed `users/{uuid}/library/...`). Users, sessions and the credit ledger will live here.
 - `crates/trex-server`: the `trex` binary. Config loading, logging, axum API. Stays thin; logic belongs in the harness.
 
 Shared dependency versions live in the root `[workspace.dependencies]`; crates opt into features.

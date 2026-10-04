@@ -1,9 +1,10 @@
 use std::{fs, path::Path, time::Duration};
 
 use anyhow::Context;
+use futures::stream;
 use openshell_sdk::{
     DeleteOptions, EdgeAuthInterceptor, OpenShellClient, SandboxSpec,
-    raw::proto::{self, exec_sandbox_event::Payload},
+    raw::proto::{self, exec_sandbox_event::Payload, exec_sandbox_input},
 };
 use tonic::{
     Streaming,
@@ -11,6 +12,8 @@ use tonic::{
 };
 
 const WORKSPACE: &str = "default";
+// the gateway rejects grpc messages over 1 MiB, so stdin is streamed in smaller chunks
+const STDIN_CHUNK_BYTES: usize = 256 * 1024;
 
 pub struct OpenShell {
     client: OpenShellClient,
@@ -80,24 +83,36 @@ impl OpenShell {
         Ok(sandbox.name)
     }
 
+    // uses the interactive rpc because dropping its stream kills the remote process,
+    // and the end of the input stream closes stdin without ending output
     pub async fn exec(
         &self,
         sandbox: &str,
         command: Vec<String>,
         stdin: Vec<u8>,
     ) -> anyhow::Result<ExecStream> {
-        let request = proto::ExecSandboxRequest {
+        let start = proto::ExecSandboxRequest {
             sandbox: sandbox.to_owned(),
             workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
             command,
-            stdin,
             no_login_shell: true,
             ..Default::default()
         };
+        let mut input = vec![proto::ExecSandboxInput {
+            payload: Some(exec_sandbox_input::Payload::Start(start)),
+        }];
+        input.extend(
+            stdin
+                .chunks(STDIN_CHUNK_BYTES)
+                .map(|chunk| proto::ExecSandboxInput {
+                    payload: Some(exec_sandbox_input::Payload::Stdin(chunk.to_vec())),
+                }),
+        );
+
         let stream = self
             .client
             .raw_grpc()
-            .exec_sandbox(request)
+            .exec_sandbox_interactive(stream::iter(input))
             .await?
             .into_inner();
         Ok(ExecStream(stream))
@@ -187,8 +202,35 @@ mod tests {
             .await
             .unwrap();
 
+        let script = "echo started; sleep 3; touch /tmp/survived";
+        let mut cancelled = openshell
+            .exec(
+                &sandbox,
+                ["sh", "-c", script].map(String::from).to_vec(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let first = cancelled.next().await.unwrap();
+        drop(cancelled);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let survived = openshell
+            .output(
+                &sandbox,
+                ["test", "-e", "/tmp/survived"].map(String::from).to_vec(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
         openshell.delete(&sandbox).await.unwrap();
 
+        assert!(matches!(first, Some(ExecEvent::Stdout(data)) if data == b"started\n"));
+        assert_eq!(
+            survived.exit_code,
+            Some(1),
+            "dropping the exec stream must kill the process"
+        );
         assert_eq!(stdout, b"hello\n");
         assert_eq!(stderr, b"oops\n");
         assert_eq!(exit, Some(3));
