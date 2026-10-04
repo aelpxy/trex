@@ -2,3 +2,4 @@
 /certs
 /.env
 /trex.toml
+/data

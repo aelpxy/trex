@@ -1,6 +1,6 @@
 use std::{fs, path::Path as FsPath, sync::Arc};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use futures::TryStreamExt;
 use object_store::{
     ObjectStore, ObjectStoreExt, aws::AmazonS3Builder, local::LocalFileSystem, memory::InMemory,
@@ -117,6 +117,30 @@ impl Library {
     }
 }
 
+#[derive(Debug)]
+pub struct InvalidPath(String);
+
+impl std::fmt::Display for InvalidPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidPath {}
+
+pub fn is_invalid_path(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<InvalidPath>())
+}
+
+pub fn is_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<object_store::Error>(),
+            Some(object_store::Error::NotFound { .. })
+        )
+    })
+}
+
 fn root(user: Uuid) -> Path {
     Path::from_iter(["users", &user.to_string(), "library"])
 }
@@ -124,12 +148,12 @@ fn root(user: Uuid) -> Path {
 // library paths come from users and models, so anything that could escape the user's prefix is rejected
 fn key(user: Uuid, path: &str) -> anyhow::Result<Path> {
     if path.is_empty() || path.len() > 1024 {
-        bail!("library path must be 1 to 1024 bytes");
+        return Err(InvalidPath("library path must be 1 to 1024 bytes".into()).into());
     }
     let mut segments = Vec::new();
     for segment in path.split('/') {
         if segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\') {
-            bail!("invalid library path {path:?}");
+            return Err(InvalidPath(format!("invalid library path {path:?}")).into());
         }
         segments.push(segment);
     }
@@ -206,7 +230,11 @@ mod tests {
         assert_eq!(library.get(bob, "b.txt").await.unwrap(), b"bob");
 
         library.delete(alice, "b.txt").await.unwrap();
-        assert!(library.get(alice, "b.txt").await.is_err());
+        assert!(is_not_found(
+            &library.get(alice, "b.txt").await.unwrap_err()
+        ));
+        let escaped = library.get(alice, "../x").await.unwrap_err();
+        assert!(is_invalid_path(&escaped) && !is_not_found(&escaped));
         assert_eq!(library.list(alice).await.unwrap().len(), 1);
         assert_eq!(library.list(bob).await.unwrap().len(), 1);
     }

@@ -11,7 +11,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash ca-certificates curl wget git git-lfs openssh-client gnupg \
         build-essential cmake ninja-build pkg-config libssl-dev \
-        python3 python3-dev python3-pip python3-venv \
+        python3 python3-dev python3-pip python3-venv python-is-python3 \
         iproute2 nftables \
         jq ripgrep fd-find sqlite3 unzip zip xz-utils bzip2 file less tree procps \
         rsync patch bc netcat-openbsd \

@@ -2,6 +2,8 @@ use std::{env, fs, net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, bail};
 use trex_harness::model::Models;
+use trex_sandbox::Policy;
+use trex_store::library::{Library, S3Config};
 
 pub struct Config {
     pub addr: SocketAddr,
@@ -11,6 +13,9 @@ pub struct Config {
     pub database_url: String,
     pub redis_url: String,
     pub models: Models,
+    pub sandbox_image: String,
+    pub sandbox_policy: Policy,
+    pub library: Library,
 }
 
 #[derive(Clone, Copy)]
@@ -49,6 +54,18 @@ impl Config {
         let database_url = env::var("TREX_DATABASE_URL").context("TREX_DATABASE_URL is not set")?;
         let redis_url = env::var("TREX_REDIS_URL").context("TREX_REDIS_URL is not set")?;
 
+        let sandbox_image = env::var("TREX_SANDBOX_IMAGE")
+            .unwrap_or_else(|_| "localhost/trex-sandbox:latest".into());
+
+        let policy_path =
+            env::var("TREX_SANDBOX_POLICY").unwrap_or_else(|_| "sandbox-policy.yaml".into());
+        let policy_yaml = fs::read_to_string(&policy_path)
+            .with_context(|| format!("failed to read {policy_path}"))?;
+        let sandbox_policy =
+            Policy::from_yaml(&policy_yaml).with_context(|| format!("invalid {policy_path}"))?;
+
+        let library = load_library()?;
+
         let path = env::var("TREX_CONFIG").unwrap_or_else(|_| "trex.toml".into());
         let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {path}"))?;
         let models = Models::from_toml(&raw).with_context(|| format!("invalid {path}"))?;
@@ -61,6 +78,31 @@ impl Config {
             database_url,
             redis_url,
             models,
+            sandbox_image,
+            sandbox_policy,
+            library,
         })
     }
+}
+
+// s3 is used when a bucket is configured; otherwise files live in a local directory for development
+fn load_library() -> anyhow::Result<Library> {
+    let Ok(bucket) = env::var("TREX_S3_BUCKET") else {
+        let dir = env::var("TREX_LIBRARY_DIR").unwrap_or_else(|_| "data/library".into());
+        return Library::local(&PathBuf::from(dir));
+    };
+    let required = |name: &str| env::var(name).with_context(|| format!("{name} is not set"));
+    let force_path_style = match env::var("TREX_S3_FORCE_PATH_STYLE").as_deref() {
+        Err(_) | Ok("false") => false,
+        Ok("true") => true,
+        Ok(other) => bail!("invalid TREX_S3_FORCE_PATH_STYLE: {other} (expected true or false)"),
+    };
+    Library::s3(S3Config {
+        endpoint: env::var("TREX_S3_ENDPOINT").ok(),
+        region: env::var("TREX_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
+        bucket,
+        access_key_id: required("TREX_S3_ACCESS_KEY_ID")?,
+        secret_access_key: required("TREX_S3_SECRET_ACCESS_KEY")?,
+        force_path_style,
+    })
 }

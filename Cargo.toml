@@ -30,6 +30,7 @@ sha2 = "0.11.0"
 sqlx = { version = "0.9.0", default-features = false }
 tar = "0.4.46"
 tokio = "1.53.2"
+tokio-util = "0.7"
 toml = "1.1.6"
 tonic = "0.14"
 tower-http = "0.7.1"

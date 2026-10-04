@@ -1,4 +1,6 @@
+pub mod events;
 pub mod library;
+pub mod sessions;
 
 use std::time::Duration;
 
@@ -9,6 +11,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 pub struct Store {
     pub pg: PgPool,
     pub redis: ConnectionManager,
+    redis_client: redis::Client,
 }
 
 impl Store {
@@ -26,13 +29,17 @@ impl Store {
             .await
             .context("failed to run database migrations")?;
 
-        let redis = redis::Client::open(redis_url)
-            .context("invalid redis url")?
+        let redis_client = redis::Client::open(redis_url).context("invalid redis url")?;
+        let redis = redis_client
             .get_connection_manager()
             .await
             .context("failed to connect to redis")?;
 
-        Ok(Self { pg, redis })
+        Ok(Self {
+            pg,
+            redis,
+            redis_client,
+        })
     }
 
     pub async fn ping(&self) -> anyhow::Result<()> {

@@ -52,6 +52,12 @@ struct ModelEntry {
     upstream: Option<String>,
 }
 
+// accepts the effort names the responses api uses, e.g. low, medium, high
+pub fn parse_effort(effort: &str) -> anyhow::Result<ReasoningEffort> {
+    serde_json::from_value(serde_json::Value::String(effort.to_owned()))
+        .with_context(|| format!("unknown reasoning effort {effort}"))
+}
+
 impl Models {
     pub fn from_toml(raw: &str) -> anyhow::Result<Self> {
         let catalog: Catalog = toml::from_str(raw)?;

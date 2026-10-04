@@ -16,8 +16,12 @@ trex-store.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 dotenvy.workspace = true
+futures.workspace = true
 serde.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net", "sync", "time"] }
+tokio-util.workspace = true
 tower-http = { workspace = true, features = ["trace", "request-id"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+uuid.workspace = true

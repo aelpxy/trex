@@ -3278,6 +3278,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
  "webpki-roots",
 ]
 
@@ -3311,7 +3312,9 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx-core",
+ "sqlx-mysql",
  "sqlx-postgres",
+ "sqlx-sqlite",
  "syn 2.0.119",
  "thiserror 2.0.21",
  "tokio",
@@ -3342,6 +3345,7 @@ dependencies = [
  "sqlx-core",
  "thiserror 2.0.21",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3376,6 +3380,7 @@ dependencies = [
  "stringprep",
  "thiserror 2.0.21",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -3401,6 +3406,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -4023,14 +4029,18 @@ dependencies = [
  "anyhow",
  "axum",
  "dotenvy",
+ "futures",
  "serde",
+ "serde_json",
  "tokio",
+ "tokio-util",
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
  "trex-harness",
  "trex-sandbox",
  "trex-store",
+ "uuid",
 ]
 
 [[package]]
@@ -4042,6 +4052,7 @@ dependencies = [
  "futures",
  "object_store",
  "redis",
+ "serde_json",
  "sqlx",
  "tokio",
  "uuid",

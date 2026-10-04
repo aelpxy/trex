@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod event;
+pub mod history;
 pub mod library;
 pub mod model;
 pub mod question;

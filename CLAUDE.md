@@ -60,11 +60,30 @@ Env vars:
 - `TREX_ADDR` (default `127.0.0.1:8080`)
 - `TREX_LOG_FORMAT` = `text` | `json`; `RUST_LOG` overrides filters
 - `TREX_CONFIG` (default `trex.toml`)
+- `TREX_SANDBOX_IMAGE` (default `localhost/trex-sandbox:latest`), `TREX_SANDBOX_POLICY` (default `sandbox-policy.yaml`)
+- `TREX_LIBRARY_DIR` (default `data/library`, gitignored) or `TREX_S3_BUCKET` + `TREX_S3_ENDPOINT`/`_REGION`/`_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY`/`_FORCE_PATH_STYLE` for any S3-compatible provider
 - `TREX_DATABASE_URL`, `TREX_REDIS_URL` (required; contain credentials, so never log them or put them in `trex.toml`)
 - `TREX_OPENSHELL_ENDPOINT` (default `https://127.0.0.1:17670`)
 - `TREX_OPENSHELL_TLS_DIR` (default `certs/openshell`, relative to the working dir, containing `ca.crt`, `tls.crt`, `tls.key`; `certs/` is gitignored)
 
 Dev setup: the gateway on `fedora-server` only listens on loopback; tunnel with `ssh -fN -L 17670:127.0.0.1:17670 fedora-server`.
+
+## HTTP API (v1)
+
+Auth is temporary: every `/v1` request names its user in `X-Trex-User: <uuid>` until registration and api keys exist.
+
+- `GET /v1/models`
+- `POST /v1/sessions` `{model, reasoning_effort?}`, `GET /v1/sessions?limit&starting_after`, `GET|DELETE /v1/sessions/{id}`
+- `GET /v1/sessions/{id}/items`: the conversation as trex items (`message`, `tool_call`, `tool_result`, `reasoning`)
+- `POST /v1/sessions/{id}/messages` `{content}` and `POST .../answers` `{answers: [{selected, text}]}` start a run (202); 409 while one is running
+- `POST /v1/sessions/{id}/cancel`
+- `GET /v1/sessions/{id}/access_requests`, `POST .../access_requests/{request_id}/approve|reject`
+- `GET /v1/sessions/{id}/events`: SSE; resumes from `Last-Event-ID`, `?from=start` replays retained events, otherwise starts at the live tail
+- `GET /v1/library`, `GET|PUT|DELETE /v1/library/files/{path}`
+
+Events (`event:` equals the payload `type`): `run.started`, `sandbox.creating`, `sandbox.ready`, `text.delta`, `reasoning.delta`, `tool.call`, `tool.output`, `tool.result`, `usage`, `access.requested`, `question`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
+
+Runs are spawned per session (`crates/trex-server/src/runs.rs`): one at a time, enforced by a conditional update in Postgres; history is saved even when a run fails or is cancelled; runs left `running` by a restart are marked failed on startup.
 
 ## Rust practices
 
@@ -115,6 +134,13 @@ Dev setup: the gateway on `fedora-server` only listens on loopback; tunnel with 
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 - Tests that need external services (OpenShell, OpenAI) are `#[ignore]` with a comment saying what they need.
 - Test behavior through public functions; assert on concrete values, not just `is_ok()`.
+
+### SQL
+
+- UPPERCASE keywords and types (`CREATE TABLE`, `SELECT ... FROM ... WHERE`, `UUID NOT NULL`), lowercase identifiers.
+- No comments inside SQL, in migrations or query strings.
+- Migrations live in `crates/trex-store/migrations`, are never edited once committed, and are applied on startup.
+- Every query on user data filters by `user_id`.
 
 ### Style
 

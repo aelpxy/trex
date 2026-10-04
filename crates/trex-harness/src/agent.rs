@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     event::{Event, Usage},
+    history,
     model::{Model, Turn},
     question::{self, ASK_USER},
     tool::{ToolContext, Tools},
@@ -57,7 +58,7 @@ impl Agent<'_> {
         history: &mut Vec<InputItem>,
         events: &mpsc::Sender<Event>,
     ) -> anyhow::Result<RunOutcome> {
-        question::close_unanswered(history);
+        history::close_dangling_calls(history);
 
         for turn in 0..self.max_turns {
             tracing::debug!(turn, model = self.model.id(), "starting turn");
