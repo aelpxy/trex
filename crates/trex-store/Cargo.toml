@@ -12,4 +12,5 @@ sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", 
 uuid.workspace = true
 
 [dev-dependencies]
+dotenvy.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

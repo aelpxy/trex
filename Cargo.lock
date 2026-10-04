@@ -3561,6 +3561,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tokio",
+ "toml",
  "tracing",
  "trex-sandbox",
  "trex-store",
@@ -3584,9 +3585,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "dotenvy",
  "serde",
  "tokio",
- "toml",
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
@@ -3600,6 +3601,7 @@ name = "trex-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dotenvy",
  "futures",
  "object_store",
  "redis",

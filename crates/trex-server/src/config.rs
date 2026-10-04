@@ -1,13 +1,7 @@
-use std::{
-    collections::{HashMap, HashSet},
-    env, fs,
-    net::SocketAddr,
-    path::PathBuf,
-};
+use std::{env, fs, net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, bail};
-use serde::Deserialize;
-use trex_harness::model::ModelConfig;
+use trex_harness::model::Models;
 
 pub struct Config {
     pub addr: SocketAddr,
@@ -16,7 +10,7 @@ pub struct Config {
     pub openshell_tls_dir: PathBuf,
     pub database_url: String,
     pub redis_url: String,
-    pub models: Vec<ModelConfig>,
+    pub models: Models,
 }
 
 #[derive(Clone, Copy)]
@@ -25,32 +19,15 @@ pub enum LogFormat {
     Json,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct File {
-    #[serde(default)]
-    providers: HashMap<String, ProviderEntry>,
-    #[serde(default)]
-    models: Vec<ModelEntry>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderEntry {
-    base_url: String,
-    api_key_env: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModelEntry {
-    id: String,
-    provider: String,
-    upstream: Option<String>,
-}
-
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
+        // variables already set in the environment take precedence over .env
+        match dotenvy::dotenv() {
+            Ok(_) => {}
+            Err(error) if error.not_found() => {}
+            Err(error) => return Err(error).context("invalid .env file"),
+        }
+
         let addr = env::var("TREX_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:8080".into())
             .parse()
@@ -74,8 +51,7 @@ impl Config {
 
         let path = env::var("TREX_CONFIG").unwrap_or_else(|_| "trex.toml".into());
         let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {path}"))?;
-        let file: File = toml::from_str(&raw).with_context(|| format!("invalid {path}"))?;
-        let models = resolve(file)?;
+        let models = Models::from_toml(&raw).with_context(|| format!("invalid {path}"))?;
 
         Ok(Self {
             addr,
@@ -87,40 +63,4 @@ impl Config {
             models,
         })
     }
-}
-
-fn resolve(file: File) -> anyhow::Result<Vec<ModelConfig>> {
-    let mut ids = HashSet::new();
-    let mut models = Vec::new();
-    for entry in file.models {
-        let Some(provider) = file.providers.get(&entry.provider) else {
-            bail!("model {}: unknown provider {}", entry.id, entry.provider);
-        };
-        if !ids.insert(entry.id.clone()) {
-            bail!("duplicate model id {}", entry.id);
-        }
-
-        let api_key = match &provider.api_key_env {
-            Some(var) => Some(env::var(var).with_context(|| {
-                format!(
-                    "provider {}: environment variable {var} is not set",
-                    entry.provider
-                )
-            })?),
-            None => None,
-        };
-
-        models.push(ModelConfig {
-            upstream: entry.upstream.unwrap_or_else(|| entry.id.clone()),
-            id: entry.id,
-            base_url: provider.base_url.trim_end_matches('/').to_owned(),
-            api_key,
-        });
-    }
-
-    if models.is_empty() {
-        bail!("no models configured");
-    }
-
-    Ok(models)
 }

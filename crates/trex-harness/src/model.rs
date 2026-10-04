@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use async_openai::{
     Client,
     config::OpenAIConfig,
@@ -9,13 +9,7 @@ use async_openai::{
         ReasoningSummary, ResponseStream, Tool,
     },
 };
-
-pub struct ModelConfig {
-    pub id: String,
-    pub upstream: String,
-    pub base_url: String,
-    pub api_key: Option<String>,
-}
+use serde::Deserialize;
 
 pub struct Model {
     id: String,
@@ -34,13 +28,56 @@ pub struct Turn {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Catalog {
+    #[serde(default)]
+    providers: HashMap<String, ProviderEntry>,
+    #[serde(default)]
+    models: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderEntry {
+    base_url: String,
+    api_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelEntry {
+    id: String,
+    provider: String,
+    upstream: Option<String>,
+}
+
 impl Models {
-    pub fn new(configs: Vec<ModelConfig>) -> Self {
-        let models = configs
-            .into_iter()
-            .map(|config| (config.id.clone(), Model::new(config)))
-            .collect();
-        Self { models }
+    pub fn from_toml(raw: &str) -> anyhow::Result<Self> {
+        let catalog: Catalog = toml::from_str(raw)?;
+
+        let mut ids = HashSet::new();
+        let mut models = HashMap::new();
+        for entry in catalog.models {
+            let Some(provider) = catalog.providers.get(&entry.provider) else {
+                bail!("model {}: unknown provider {}", entry.id, entry.provider);
+            };
+            if !ids.insert(entry.id.clone()) {
+                bail!("duplicate model id {}", entry.id);
+            }
+            let model = Model::new(
+                entry.id.clone(),
+                entry.upstream.unwrap_or_else(|| entry.id.clone()),
+                provider.base_url.trim_end_matches('/'),
+                provider.api_key.as_deref(),
+            );
+            models.insert(entry.id, model);
+        }
+
+        if models.is_empty() {
+            bail!("no models configured");
+        }
+        Ok(Self { models })
     }
 
     pub fn get(&self, id: &str) -> Option<&Model> {
@@ -53,15 +90,15 @@ impl Models {
 }
 
 impl Model {
-    fn new(config: ModelConfig) -> Self {
-        let mut openai = OpenAIConfig::new().with_api_base(config.base_url);
-        if let Some(key) = config.api_key {
+    fn new(id: String, upstream: String, base_url: &str, api_key: Option<&str>) -> Self {
+        let mut openai = OpenAIConfig::new().with_api_base(base_url);
+        if let Some(key) = api_key {
             openai = openai.with_api_key(key);
         }
 
         Self {
-            id: config.id,
-            upstream: config.upstream,
+            id,
+            upstream,
             client: Client::with_config(openai),
         }
     }
@@ -95,6 +132,18 @@ impl Model {
     }
 }
 
+// live tests use the workspace trex.toml so no keys live in test code
+#[cfg(test)]
+pub(crate) const TEST_MODEL: &str = "gpt-6.1-sol";
+
+#[cfg(test)]
+pub(crate) fn test_models() -> Models {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../trex.toml");
+    let raw =
+        std::fs::read_to_string(path).expect("live tests need trex.toml in the workspace root");
+    Models::from_toml(&raw).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use async_openai::types::responses::{
@@ -105,16 +154,56 @@ mod tests {
 
     use super::*;
 
-    // needs the local responses api from trex.toml and LOCAL_API_KEY: cargo test -- --ignored
+    #[test]
+    fn rejects_invalid_catalogs() {
+        let provider = "[providers.p]\nbase_url = \"http://x/v1\"\n";
+        let cases = [
+            ("", "no models configured"),
+            (
+                "[[models]]\nid = \"a\"\nprovider = \"missing\"\n",
+                "unknown provider",
+            ),
+            (
+                &format!(
+                    "{provider}[[models]]\nid = \"a\"\nprovider = \"p\"\n[[models]]\nid = \"a\"\nprovider = \"p\"\n"
+                ),
+                "duplicate model id",
+            ),
+            (&format!("{provider}region = \"x\"\n"), "unknown field"),
+        ];
+        for (raw, expected) in cases {
+            let error = Models::from_toml(raw)
+                .err()
+                .expect("catalog should be rejected");
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{error:#} should mention {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn loads_catalog() {
+        let raw = r#"
+            [providers.local]
+            base_url = "http://127.0.0.1:8699/v1/"
+            api_key = "secret"
+
+            [[models]]
+            id = "fast"
+            provider = "local"
+            upstream = "gpt-6.1-sol"
+        "#;
+        let models = Models::from_toml(raw).unwrap();
+        assert_eq!(models.ids().collect::<Vec<_>>(), ["fast"]);
+        assert_eq!(models.get("fast").unwrap().upstream, "gpt-6.1-sol");
+    }
+
+    // needs the responses api configured in trex.toml: cargo test -- --ignored
     #[tokio::test]
     #[ignore]
     async fn streams_function_call() {
-        let models = Models::new(vec![ModelConfig {
-            id: "gpt-6.1-sol".into(),
-            upstream: "gpt-6.1-sol".into(),
-            base_url: "http://127.0.0.1:8699/v1".into(),
-            api_key: std::env::var("LOCAL_API_KEY").ok(),
-        }]);
+        let models = test_models();
 
         let turn = Turn {
             instructions: None,

@@ -1,0 +1,11 @@
+# copy to trex.toml; it holds api keys, so it is gitignored
+# any provider that speaks the openai responses api works
+
+[providers.local]
+base_url = "http://127.0.0.1:8699/v1"
+api_key = ""
+
+[[models]]
+id = "gpt-6.1-sol"      # what the ui selects
+provider = "local"
+# upstream = "..."      # model name sent to the provider, defaults to id

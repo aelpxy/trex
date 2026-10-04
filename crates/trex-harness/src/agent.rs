@@ -200,20 +200,15 @@ mod tests {
 
     use super::*;
     use crate::{
-        model::{ModelConfig, Models},
+        model::{TEST_MODEL, test_models},
         tool::Tools,
     };
 
-    // needs the openshell gateway tunnel, <workspace>/certs/openshell, and LOCAL_API_KEY for the local responses api
+    // needs the openshell gateway tunnel, <workspace>/certs/openshell, and trex.toml
     #[tokio::test]
     #[ignore]
     async fn runs_bash_in_sandbox() {
-        let models = Models::new(vec![ModelConfig {
-            id: "gpt-6.1-sol".into(),
-            upstream: "gpt-6.1-sol".into(),
-            base_url: "http://127.0.0.1:8699/v1".into(),
-            api_key: std::env::var("LOCAL_API_KEY").ok(),
-        }]);
+        let models = test_models();
         let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
         let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
             .await
@@ -222,7 +217,7 @@ mod tests {
         let tools = Tools::standard();
 
         let agent = Agent {
-            model: models.get("gpt-6.1-sol").unwrap(),
+            model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
             openshell: &openshell,
             sandbox: &sandbox,

@@ -14,6 +14,7 @@ trex-store = { path = "crates/trex-store" }
 anyhow = "1.0.104"
 async-openai = { version = "0.42.1", default-features = false }
 axum = "0.8.9"
+dotenvy = "0.15.7"
 futures = "0.3"
 object_store = { version = "0.14.2", default-features = false }
 openshell-sdk = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.2" }

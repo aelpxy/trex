@@ -34,18 +34,18 @@ The HTTP API takes the best of OpenAI, Anthropic and Stripe:
 - `cargo build` / `cargo run` (binary `trex`, run from the workspace root)
 - `cargo clippy --workspace --all-targets` must be warning-free
 - `cargo fmt` before committing
-- `cargo test --workspace` for unit tests; `cargo test --workspace -- --ignored` for tests needing the OpenShell gateway, the local Responses API (`LOCAL_API_KEY`), and Postgres/Redis (`TREX_DATABASE_URL`, `TREX_REDIS_URL`)
+- `cargo test --workspace` for unit tests; `cargo test --workspace -- --ignored` for tests needing the OpenShell gateway, the Responses API from `trex.toml`, and Postgres/Redis (from `.env`)
 
 ## Config
 
-All config is loaded once in `crates/trex-server/src/config.rs` into `Config` from `TREX_*` env vars and `trex.toml`. Never read env vars or config files elsewhere (tests excepted); library crates take config as plain structs.
+All config is loaded once in `crates/trex-server/src/config.rs` into `Config`: env vars (`.env` in the working directory is loaded first; real environment variables win) and `trex.toml`. Never read env vars or config files elsewhere; library crates take config as plain values. `.env.example` lists every variable.
 
-`trex.toml` (path overridable with `TREX_CONFIG`) holds the operator-managed model catalog. It is committed and never contains secrets; keys are referenced by env var name:
+`trex.toml` (path overridable with `TREX_CONFIG`) is the operator-managed model catalog, parsed by `trex_harness::model::Models::from_toml`. It contains provider api keys, so it is gitignored; `trex.toml.example` is the committed template:
 
 ```toml
 [providers.local]
 base_url = "http://127.0.0.1:8699/v1"
-api_key_env = "LOCAL_API_KEY"
+api_key = "..."
 
 [[models]]
 id = "gpt-6.1-sol"      # what the UI selects
@@ -57,6 +57,7 @@ Env vars:
 
 - `TREX_ADDR` (default `127.0.0.1:8080`)
 - `TREX_LOG_FORMAT` = `text` | `json`; `RUST_LOG` overrides filters
+- `TREX_CONFIG` (default `trex.toml`)
 - `TREX_DATABASE_URL`, `TREX_REDIS_URL` (required; contain credentials, so never log them or put them in `trex.toml`)
 - `TREX_OPENSHELL_ENDPOINT` (default `https://127.0.0.1:17670`)
 - `TREX_OPENSHELL_TLS_DIR` (default `certs/openshell`, relative to the working dir, containing `ca.crt`, `tls.crt`, `tls.key`; `certs/` is gitignored)

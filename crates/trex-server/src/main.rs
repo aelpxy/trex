@@ -5,7 +5,6 @@ mod logging;
 use std::sync::Arc;
 
 use tokio::{net::TcpListener, signal};
-use trex_harness::model::Models;
 use trex_sandbox::OpenShell;
 use trex_store::Store;
 
@@ -27,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
     let store = Arc::new(Store::connect(&config.database_url, &config.redis_url).await?);
     tracing::info!("connected to postgres and redis");
 
-    let models = Models::new(config.models);
+    let models = config.models;
     tracing::info!(models = ?models.ids().collect::<Vec<_>>(), "loaded models");
 
     let listener = TcpListener::bind(config.addr).await?;

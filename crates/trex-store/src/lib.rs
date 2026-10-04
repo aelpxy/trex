@@ -56,6 +56,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn connects_and_pings() {
+        dotenvy::dotenv().ok();
         let database_url = std::env::var("TREX_DATABASE_URL").unwrap();
         let redis_url = std::env::var("TREX_REDIS_URL").unwrap();
         let store = Store::connect(&database_url, &redis_url).await.unwrap();
