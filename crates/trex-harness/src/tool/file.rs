@@ -162,18 +162,22 @@ impl Tool for EditFile {
 }
 
 async fn read(ctx: &ToolContext<'_>, path: &str) -> anyhow::Result<String> {
-    let argv = ["cat", "--", path].map(String::from).to_vec();
-    let output = ctx.openshell.output(ctx.sandbox, argv, Vec::new()).await?;
-    if output.exit_code != Some(0) {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    match String::from_utf8(output.stdout) {
+    match String::from_utf8(read_bytes(ctx, path).await?) {
         Ok(content) => Ok(content),
         Err(_) => bail!("{path} is not a utf-8 text file"),
     }
 }
 
-async fn write(ctx: &ToolContext<'_>, path: &str, content: &[u8]) -> anyhow::Result<()> {
+pub(super) async fn read_bytes(ctx: &ToolContext<'_>, path: &str) -> anyhow::Result<Vec<u8>> {
+    let argv = ["cat", "--", path].map(String::from).to_vec();
+    let output = ctx.openshell.output(ctx.sandbox, argv, Vec::new()).await?;
+    if output.exit_code != Some(0) {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(output.stdout)
+}
+
+pub(super) async fn write(ctx: &ToolContext<'_>, path: &str, content: &[u8]) -> anyhow::Result<()> {
     // the path is passed as $1 so it is never interpreted by the shell
     let script = r#"mkdir -p -- "$(dirname -- "$1")" && cat > "$1""#;
     let argv = ["sh", "-c", script, "sh", path].map(String::from).to_vec();
@@ -243,6 +247,7 @@ fn apply_edit(
 #[cfg(test)]
 mod tests {
     use tokio::sync::mpsc;
+    use trex_store::library::Library;
 
     use super::*;
     use crate::{test_support::sandbox_for_new_user, tool::Tools};
@@ -254,7 +259,10 @@ mod tests {
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
         let (events, _rx) = mpsc::channel(64);
         let tools = Tools::standard();
+        let library = Library::in_memory();
         let ctx = || ToolContext {
+            user,
+            library: &library,
             openshell: &openshell,
             sandbox: &sandbox,
             call_id: "call_test",

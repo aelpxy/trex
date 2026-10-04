@@ -1,5 +1,7 @@
 mod bash;
 mod file;
+mod library;
+mod search;
 
 use anyhow::Context;
 use async_openai::types::responses::{FunctionTool, Tool as ToolDefinition};
@@ -7,17 +9,24 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use trex_sandbox::{OpenShell, Sandbox};
+use trex_store::library::Library;
+use uuid::Uuid;
 
 pub use self::{
     bash::Bash,
     file::{EditFile, ReadFile, WriteFile},
+    library::{LibraryList, LibraryLoad, LibrarySave},
+    search::{Glob, Grep},
 };
 use crate::event::Event;
 
 // keeps a single noisy result from flooding the model context
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
 
+// a tool only ever reaches the sandbox and library of the user the run belongs to
 pub struct ToolContext<'a> {
+    pub user: Uuid,
+    pub library: &'a Library,
     pub openshell: &'a OpenShell,
     pub sandbox: &'a Sandbox,
     pub call_id: &'a str,
@@ -50,6 +59,11 @@ impl Tools {
             Box::new(ReadFile),
             Box::new(WriteFile),
             Box::new(EditFile),
+            Box::new(Grep),
+            Box::new(Glob),
+            Box::new(LibraryList),
+            Box::new(LibraryLoad),
+            Box::new(LibrarySave),
         ])
     }
 
@@ -93,7 +107,83 @@ fn truncate(output: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+    use crate::test_support::sandbox_for_new_user;
+
+    // needs the openshell gateway tunnel, <workspace>/certs/openshell, and the dev image
+    #[tokio::test]
+    #[ignore]
+    async fn search_and_library_tools_in_sandbox() {
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let library = Library::in_memory();
+        let (events, _rx) = mpsc::channel(64);
+        let tools = Tools::standard();
+        let call = |name: &'static str, args: Value| {
+            let ctx = ToolContext {
+                user,
+                library: &library,
+                openshell: &openshell,
+                sandbox: &sandbox,
+                call_id: "call_test",
+                events: &events,
+            };
+            let tools = &tools;
+            async move { tools.call(ctx, name, &args.to_string()).await }
+        };
+
+        let setup = "mkdir -p /sandbox/proj/src && printf 'fn main() {}\\nfn helper() {}\\n' > /sandbox/proj/src/main.rs \
+            && printf 'TODO: ship\\n' > /sandbox/proj/notes.txt && head -c 3000 /dev/urandom > /sandbox/proj/blob.bin";
+        let prepared = call("bash", json!({"command": setup})).await.unwrap();
+
+        let grep = call("grep", json!({"pattern": "fn \\w+", "path": "/sandbox/proj", "glob": "*.rs", "ignore_case": null})).await;
+        let no_match = call("grep", json!({"pattern": "nothing-here", "path": "/sandbox/proj", "glob": null, "ignore_case": null})).await;
+        let glob = call(
+            "glob",
+            json!({"pattern": "**/*.rs", "path": "/sandbox/proj"}),
+        )
+        .await;
+        let empty = call("library_list", json!({})).await;
+        let saved = call(
+            "library_save",
+            json!({"sandbox_path": "/sandbox/proj/blob.bin", "library_path": "data/blob.bin"}),
+        )
+        .await;
+        let listed = call("library_list", json!({})).await;
+        let loaded = call(
+            "library_load",
+            json!({"library_path": "data/blob.bin", "sandbox_path": null}),
+        )
+        .await;
+        let same = call("bash", json!({"command": "cmp /sandbox/proj/blob.bin /sandbox/library/data/blob.bin && echo same"})).await;
+        let escape = call(
+            "library_save",
+            json!({"sandbox_path": "/sandbox/proj/notes.txt", "library_path": "../other-user/x"}),
+        )
+        .await;
+
+        openshell.delete_workspace(user).await.unwrap();
+
+        assert!(prepared.contains("[exit code 0]"), "{prepared}");
+        assert_eq!(
+            grep.unwrap(),
+            "/sandbox/proj/src/main.rs:1:fn main() {}\n/sandbox/proj/src/main.rs:2:fn helper() {}\n"
+        );
+        assert_eq!(no_match.unwrap(), "no matches");
+        assert_eq!(glob.unwrap(), "/sandbox/proj/src/main.rs");
+        assert_eq!(empty.unwrap(), "the library is empty");
+        assert!(saved.unwrap().contains("(3000 bytes)"));
+        assert_eq!(listed.unwrap(), "data/blob.bin (3000 bytes)");
+        assert!(
+            loaded
+                .unwrap()
+                .ends_with("to /sandbox/library/data/blob.bin")
+        );
+        assert!(same.unwrap().starts_with("same"));
+        assert!(escape.is_err());
+        assert_eq!(library.list(user).await.unwrap().len(), 1);
+    }
 
     #[test]
     fn truncate_keeps_short_output() {

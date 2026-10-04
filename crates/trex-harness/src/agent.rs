@@ -8,6 +8,8 @@ use async_openai::types::responses::{
 use futures::{StreamExt, future::join_all};
 use tokio::{sync::mpsc, time::sleep};
 use trex_sandbox::{OpenShell, Sandbox};
+use trex_store::library::Library;
+use uuid::Uuid;
 
 use crate::{
     event::{Event, Usage},
@@ -18,6 +20,8 @@ use crate::{
 const ACCESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct Agent<'a> {
+    pub user: Uuid,
+    pub library: &'a Library,
     pub model: &'a Model,
     pub tools: &'a Tools,
     pub openshell: &'a OpenShell,
@@ -196,6 +200,8 @@ impl Agent<'_> {
         events: &mpsc::Sender<Event>,
     ) -> anyhow::Result<String> {
         let ctx = ToolContext {
+            user: self.user,
+            library: self.library,
             openshell: self.openshell,
             sandbox: self.sandbox,
             call_id: &call.call_id,
@@ -249,7 +255,10 @@ mod tests {
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
         let tools = Tools::standard();
 
+        let library = Library::in_memory();
         let agent = Agent {
+            user,
+            library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
             openshell: &openshell,
@@ -314,7 +323,10 @@ mod tests {
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
         let tools = Tools::standard();
 
+        let library = Library::in_memory();
         let agent = Agent {
+            user,
+            library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
             openshell: &openshell,
@@ -364,7 +376,10 @@ mod tests {
         let models = test_models();
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
         let tools = Tools::standard();
+        let library = Library::in_memory();
         let agent = Agent {
+            user,
+            library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
             openshell: &openshell,
