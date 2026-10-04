@@ -7,7 +7,9 @@ edition.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 openshell-sdk.workspace = true
+sha2.workspace = true
 tonic = { workspace = true, features = ["tls-aws-lc"] }
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

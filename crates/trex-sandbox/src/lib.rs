@@ -1,19 +1,30 @@
-use std::{fs, path::Path, time::Duration};
+use std::{collections::HashMap, fmt::Write, fs, path::Path, time::Duration};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use futures::stream;
 use openshell_sdk::{
-    DeleteOptions, EdgeAuthInterceptor, OpenShellClient, SandboxSpec,
+    DeleteOptions, EdgeAuthInterceptor, ListOptions, OpenShellClient, SandboxSpec, SdkError,
     raw::proto::{self, exec_sandbox_event::Payload, exec_sandbox_input},
 };
+use sha2::{Digest, Sha256};
 use tonic::{
     Streaming,
     transport::{Certificate, ClientTlsConfig, Endpoint, Identity},
 };
+use uuid::Uuid;
 
-const WORKSPACE: &str = "default";
 // the gateway rejects grpc messages over 1 MiB, so stdin is streamed in smaller chunks
 const STDIN_CHUNK_BYTES: usize = 256 * 1024;
+const USER_LABEL: &str = "trex-user";
+const READY_TIMEOUT: Duration = Duration::from_secs(120);
+const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
+
+// openshell trusts trex's mtls identity as platform admin, so trex is what keeps users apart:
+// every sandbox handle carries the workspace of the user it was created for
+pub struct Sandbox {
+    pub workspace: String,
+    pub name: String,
+}
 
 pub struct OpenShell {
     client: OpenShellClient,
@@ -71,29 +82,86 @@ impl OpenShell {
         Ok(self.client.health().await?.version)
     }
 
-    pub async fn create(&self, image: Option<String>) -> anyhow::Result<String> {
+    pub async fn ensure_workspace(&self, user: Uuid) -> anyhow::Result<String> {
+        let name = workspace_name(user);
+        let workspace = match self.client.get_workspace(&name).await {
+            Ok(workspace) => workspace,
+            Err(SdkError::NotFound { .. }) => {
+                let labels = HashMap::from([(USER_LABEL.to_owned(), user.to_string())]);
+                match self.client.create_workspace(&name, labels).await {
+                    Ok(workspace) => workspace,
+                    Err(SdkError::AlreadyExists { .. }) => self.client.get_workspace(&name).await?,
+                    Err(error) => return Err(error).context("failed to create workspace"),
+                }
+            }
+            Err(error) => return Err(error).context("failed to get workspace"),
+        };
+
+        // names are a truncated hash, so a collision must never hand one user another's workspace
+        if workspace.labels.get(USER_LABEL) != Some(&user.to_string()) {
+            bail!("workspace {name} does not belong to user {user}");
+        }
+        Ok(name)
+    }
+
+    // openshell refuses to delete a workspace that still contains sandboxes
+    pub async fn delete_workspace(&self, user: Uuid) -> anyhow::Result<()> {
+        let name = workspace_name(user);
+        let scoped = self.client.workspace(&name);
+        let sandboxes = match scoped.list_all_sandboxes(ListOptions::default()).await {
+            Ok(sandboxes) => sandboxes,
+            Err(SdkError::NotFound { .. }) => return Ok(()),
+            Err(error) => return Err(error).context("failed to list sandboxes"),
+        };
+        for sandbox in sandboxes {
+            scoped
+                .delete_sandbox(
+                    &sandbox.name,
+                    DeleteOptions {
+                        allow_missing: true,
+                    },
+                )
+                .await?;
+            scoped
+                .wait_deleted(&sandbox.name, DELETE_TIMEOUT, Some(&sandbox.id))
+                .await?;
+        }
+        self.client
+            .delete_workspace(
+                &name,
+                DeleteOptions {
+                    allow_missing: true,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn create(&self, workspace: &str, image: Option<String>) -> anyhow::Result<Sandbox> {
         let spec = SandboxSpec {
             image,
             ..Default::default()
         };
-        let sandbox = self.client.create_sandbox(spec).await?;
-        self.client
-            .wait_ready(&sandbox.name, Duration::from_secs(120))
-            .await?;
-        Ok(sandbox.name)
+        let scoped = self.client.workspace(workspace);
+        let sandbox = scoped.create_sandbox(spec).await?;
+        scoped.wait_ready(&sandbox.name, READY_TIMEOUT).await?;
+        Ok(Sandbox {
+            workspace: workspace.to_owned(),
+            name: sandbox.name,
+        })
     }
 
     // uses the interactive rpc because dropping its stream kills the remote process,
     // and the end of the input stream closes stdin without ending output
     pub async fn exec(
         &self,
-        sandbox: &str,
+        sandbox: &Sandbox,
         command: Vec<String>,
         stdin: Vec<u8>,
     ) -> anyhow::Result<ExecStream> {
         let start = proto::ExecSandboxRequest {
-            sandbox: sandbox.to_owned(),
-            workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+            sandbox: sandbox.name.clone(),
+            workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
             command,
             no_login_shell: true,
             ..Default::default()
@@ -120,7 +188,7 @@ impl OpenShell {
 
     pub async fn output(
         &self,
-        sandbox: &str,
+        sandbox: &Sandbox,
         command: Vec<String>,
         stdin: Vec<u8>,
     ) -> anyhow::Result<Output> {
@@ -140,10 +208,11 @@ impl OpenShell {
         Ok(output)
     }
 
-    pub async fn delete(&self, sandbox: &str) -> anyhow::Result<()> {
+    pub async fn delete(&self, sandbox: &Sandbox) -> anyhow::Result<()> {
         self.client
+            .workspace(&sandbox.workspace)
             .delete_sandbox(
-                sandbox,
+                &sandbox.name,
                 DeleteOptions {
                     allow_missing: true,
                 },
@@ -151,6 +220,17 @@ impl OpenShell {
             .await?;
         Ok(())
     }
+}
+
+// workspace names are dns labels of at most 19 chars, too short for a uuid, so use 68 bits of its hash
+pub fn workspace_name(user: Uuid) -> String {
+    let digest = Sha256::digest(user.as_bytes());
+    let mut name = String::from("u-");
+    for byte in &digest[..9] {
+        write!(name, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    name.truncate(19);
+    name
 }
 
 impl ExecStream {
@@ -180,7 +260,9 @@ mod tests {
             .await
             .unwrap();
 
-        let sandbox = openshell.create(None).await.unwrap();
+        let user = Uuid::now_v7();
+        let workspace = openshell.ensure_workspace(user).await.unwrap();
+        let sandbox = openshell.create(&workspace, None).await.unwrap();
 
         let command = ["sh", "-c", "echo hello && echo oops >&2 && exit 3"];
         let mut stream = openshell
@@ -223,7 +305,7 @@ mod tests {
             .await
             .unwrap();
 
-        openshell.delete(&sandbox).await.unwrap();
+        openshell.delete_workspace(user).await.unwrap();
 
         assert!(matches!(first, Some(ExecEvent::Stdout(data)) if data == b"started\n"));
         assert_eq!(
@@ -236,5 +318,72 @@ mod tests {
         assert_eq!(exit, Some(3));
         assert_eq!(echoed.stdout, b"from stdin");
         assert_eq!(echoed.exit_code, Some(0));
+    }
+
+    #[test]
+    fn workspace_names_fit_openshell_limits() {
+        let user = Uuid::now_v7();
+        let name = workspace_name(user);
+        assert_eq!(name.len(), 19);
+        assert!(name.starts_with("u-"));
+        assert!(
+            name[2..]
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+        assert_eq!(workspace_name(user), name);
+        assert_ne!(workspace_name(Uuid::now_v7()), name);
+    }
+
+    // needs the gateway tunnel on 127.0.0.1:17670 and certs in <workspace>/certs/openshell: cargo test -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn users_cannot_reach_each_others_sandboxes() {
+        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
+        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
+            .await
+            .unwrap();
+        let (alice, bob) = (Uuid::now_v7(), Uuid::now_v7());
+        let alice_ws = openshell.ensure_workspace(alice).await.unwrap();
+        let bob_ws = openshell.ensure_workspace(bob).await.unwrap();
+        let again = openshell.ensure_workspace(alice).await.unwrap();
+        let sandbox = openshell.create(&alice_ws, None).await.unwrap();
+
+        let forged = Sandbox {
+            workspace: bob_ws.clone(),
+            name: sandbox.name.clone(),
+        };
+        let from_bob = openshell
+            .output(&forged, vec!["true".into()], Vec::new())
+            .await;
+        let from_alice = openshell
+            .output(&sandbox, vec!["true".into()], Vec::new())
+            .await
+            .unwrap();
+        let deleted_by_bob = openshell.delete(&forged).await;
+        let still_there = openshell
+            .output(&sandbox, vec!["true".into()], Vec::new())
+            .await
+            .unwrap();
+
+        openshell.delete_workspace(alice).await.unwrap();
+        openshell.delete_workspace(bob).await.unwrap();
+        let recreated = openshell.ensure_workspace(alice).await;
+        openshell.delete_workspace(alice).await.unwrap();
+
+        assert_eq!(again, alice_ws);
+        assert_ne!(alice_ws, bob_ws);
+        assert!(from_bob.is_err(), "bob must not exec in alice's sandbox");
+        assert_eq!(from_alice.exit_code, Some(0));
+        assert!(
+            deleted_by_bob.is_ok(),
+            "deleting a missing sandbox is allowed"
+        );
+        assert_eq!(
+            still_there.exit_code,
+            Some(0),
+            "bob's delete must not touch alice's sandbox"
+        );
+        assert!(recreated.is_ok());
     }
 }

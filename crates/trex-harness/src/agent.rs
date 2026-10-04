@@ -5,7 +5,7 @@ use async_openai::types::responses::{
 };
 use futures::{StreamExt, future::join_all};
 use tokio::sync::mpsc;
-use trex_sandbox::OpenShell;
+use trex_sandbox::{OpenShell, Sandbox};
 
 use crate::{
     event::{Event, Usage},
@@ -17,7 +17,7 @@ pub struct Agent<'a> {
     pub model: &'a Model,
     pub tools: &'a Tools,
     pub openshell: &'a OpenShell,
-    pub sandbox: &'a str,
+    pub sandbox: &'a Sandbox,
     pub instructions: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub max_turns: usize,
@@ -194,13 +194,12 @@ async fn send(events: &mpsc::Sender<Event>, event: Event) -> anyhow::Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use async_openai::types::responses::EasyInputMessage;
 
     use super::*;
     use crate::{
         model::{TEST_MODEL, test_models},
+        test_support::sandbox_for_new_user,
         tool::Tools,
     };
 
@@ -209,11 +208,7 @@ mod tests {
     #[ignore]
     async fn runs_bash_in_sandbox() {
         let models = test_models();
-        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
-        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
-            .await
-            .unwrap();
-        let sandbox = openshell.create(None).await.unwrap();
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
         let tools = Tools::standard();
 
         let agent = Agent {
@@ -251,7 +246,7 @@ mod tests {
         let result = agent.run(&mut history, &tx).await;
         drop(tx);
         let (text, tool_results, done, usages) = collector.await.unwrap();
-        openshell.delete(&sandbox).await.unwrap();
+        openshell.delete_workspace(user).await.unwrap();
 
         result.unwrap();
         assert!(done);
@@ -263,7 +258,7 @@ mod tests {
         assert!(
             usages
                 .iter()
-                .all(|u| u.model == "gpt-6.1-sol" && u.input_tokens > 0)
+                .all(|u| u.model == TEST_MODEL && u.input_tokens > 0)
         );
         assert_eq!(text.trim(), "trex");
         assert!(
@@ -271,5 +266,56 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item, InputItem::Item(Item::FunctionCallOutput(_))))
         );
+    }
+
+    // needs the openshell gateway tunnel, <workspace>/certs/openshell, and trex.toml
+    #[tokio::test]
+    #[ignore]
+    async fn replays_encrypted_reasoning() {
+        let models = test_models();
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let tools = Tools::standard();
+
+        let agent = Agent {
+            model: models.get(TEST_MODEL).unwrap(),
+            tools: &tools,
+            openshell: &openshell,
+            sandbox: &sandbox,
+            instructions: None,
+            reasoning_effort: Some(ReasoningEffort::High),
+            max_turns: 10,
+        };
+        let mut history = vec![
+            EasyInputMessage::from(
+                "How many primes are below 60? Work it out, verify it with the bash tool, then reply with only the number.",
+            )
+            .into(),
+        ];
+        let (tx, mut rx) = mpsc::channel(256);
+        let collector = tokio::spawn(async move {
+            let mut text = String::new();
+            while let Some(event) = rx.recv().await {
+                if let Event::TextDelta { delta } = event {
+                    text.push_str(&delta);
+                }
+            }
+            text
+        });
+
+        let result = agent.run(&mut history, &tx).await;
+        drop(tx);
+        let text = collector.await.unwrap();
+        openshell.delete_workspace(user).await.unwrap();
+
+        result.unwrap();
+        assert_eq!(text.trim(), "17");
+        // the reasoning precedes a tool call, so the follow-up turn resent it and was accepted
+        let reasoning = history.iter().position(|item| {
+            matches!(item, InputItem::Item(Item::Reasoning(r)) if r.encrypted_content.is_some())
+        });
+        let call = history
+            .iter()
+            .position(|item| matches!(item, InputItem::Item(Item::FunctionCall(_))));
+        assert!(matches!((reasoning, call), (Some(r), Some(c)) if r < c));
     }
 }

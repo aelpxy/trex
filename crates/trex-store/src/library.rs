@@ -166,6 +166,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_library_round_trips() {
+        let dir = std::env::temp_dir().join(format!("trex-library-{}", Uuid::now_v7()));
+        let library = Library::local(&dir).unwrap();
+        let user = Uuid::now_v7();
+
+        library
+            .put(user, "docs/a.md", b"hello".to_vec())
+            .await
+            .unwrap();
+        let listed = library.list(user).await.unwrap();
+        let content = library.get(user, "docs/a.md").await.unwrap();
+        let on_disk = std::fs::read(dir.join(format!("users/{user}/library/docs/a.md")));
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "docs/a.md");
+        assert_eq!(content, b"hello");
+        assert_eq!(on_disk.unwrap(), b"hello");
+    }
+
+    #[tokio::test]
     async fn stores_files_per_user() {
         let library = Library::in_memory();
         let (alice, bob) = (Uuid::now_v7(), Uuid::now_v7());

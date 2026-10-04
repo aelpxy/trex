@@ -242,23 +242,16 @@ fn apply_edit(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use tokio::sync::mpsc;
-    use trex_sandbox::OpenShell;
 
     use super::*;
-    use crate::tool::Tools;
+    use crate::{test_support::sandbox_for_new_user, tool::Tools};
 
     // needs the openshell gateway tunnel and <workspace>/certs/openshell: cargo test -- --ignored
     #[tokio::test]
     #[ignore]
     async fn file_tools_round_trip_in_sandbox() {
-        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
-        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
-            .await
-            .unwrap();
-        let sandbox = openshell.create(None).await.unwrap();
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
         let (events, _rx) = mpsc::channel(64);
         let tools = Tools::standard();
         let ctx = || ToolContext {
@@ -302,7 +295,7 @@ mod tests {
             .await
             .unwrap();
 
-        openshell.delete(&sandbox).await.unwrap();
+        openshell.delete_workspace(user).await.unwrap();
 
         assert_eq!(wrote.unwrap(), format!("wrote 8 bytes to {path}"));
         assert_eq!(read.unwrap(), "     1\tone\n     2\ttwo\n");

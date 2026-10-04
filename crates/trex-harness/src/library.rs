@@ -1,5 +1,5 @@
 use anyhow::{Context, bail};
-use trex_sandbox::OpenShell;
+use trex_sandbox::{OpenShell, Sandbox};
 use trex_store::library::Library;
 use uuid::Uuid;
 
@@ -7,7 +7,7 @@ pub async fn copy_to_sandbox(
     library: &Library,
     user: Uuid,
     openshell: &OpenShell,
-    sandbox: &str,
+    sandbox: &Sandbox,
     dest: &str,
 ) -> anyhow::Result<usize> {
     let files = library.list(user).await?;
@@ -36,34 +36,27 @@ pub async fn copy_to_sandbox(
         );
     }
 
-    tracing::debug!(%user, sandbox, files = files.len(), "copied library to sandbox");
+    tracing::debug!(%user, sandbox = sandbox.name, files = files.len(), "copied library to sandbox");
     Ok(files.len())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
+    use crate::test_support::sandbox_for_new_user;
 
     // needs the openshell gateway tunnel and <workspace>/certs/openshell: cargo test -- --ignored
     #[tokio::test]
     #[ignore]
     async fn copies_library_into_sandbox() {
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
         let library = Library::in_memory();
-        let user = Uuid::now_v7();
         let large = vec![b'x'; 3 * 1024 * 1024];
         library
             .put(user, "notes/todo.md", b"ship trex\n".to_vec())
             .await
             .unwrap();
         library.put(user, "data/large.bin", large).await.unwrap();
-
-        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
-        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
-            .await
-            .unwrap();
-        let sandbox = openshell.create(None).await.unwrap();
 
         let copied =
             copy_to_sandbox(&library, user, &openshell, &sandbox, "/sandbox/library").await;
@@ -82,7 +75,7 @@ mod tests {
             .await
             .unwrap();
 
-        openshell.delete(&sandbox).await.unwrap();
+        openshell.delete_workspace(user).await.unwrap();
 
         assert_eq!(copied.unwrap(), 2);
         assert_eq!(

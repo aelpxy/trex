@@ -6,7 +6,7 @@ use async_openai::types::responses::{FunctionTool, Tool as ToolDefinition};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::mpsc;
-use trex_sandbox::OpenShell;
+use trex_sandbox::{OpenShell, Sandbox};
 
 pub use self::{
     bash::Bash,
@@ -19,7 +19,7 @@ const MAX_OUTPUT_BYTES: usize = 32 * 1024;
 
 pub struct ToolContext<'a> {
     pub openshell: &'a OpenShell,
-    pub sandbox: &'a str,
+    pub sandbox: &'a Sandbox,
     pub call_id: &'a str,
     pub events: &'a mpsc::Sender<Event>,
 }

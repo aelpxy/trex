@@ -11,7 +11,7 @@ Backend and agent harness for a web UI. trex owns sessions, the model catalog th
 ## Workspace
 
 - `crates/trex-harness`: the brain. Agent loop, runs, events, tools, model catalog (`model::Models`). Current focus.
-- `crates/trex-sandbox`: OpenShell client (`OpenShell`): create, streaming exec, delete.
+- `crates/trex-sandbox`: OpenShell client (`OpenShell`). One OpenShell workspace per trex user (`workspace_name(uuid)` = `u-` + 17 hex chars of sha256, labelled `trex-user=<uuid>` and verified on every `ensure_workspace`). Every call takes a `Sandbox { workspace, name }` handle. trex's mTLS identity is a gateway platform admin, so trex is what enforces tenancy: never build a `Sandbox` for a user from anything but their own workspace. Exec uses the streaming RPC: stdin is chunked under the 1 MiB gRPC limit and dropping the stream kills the process.
 - `crates/trex-store`: Postgres (sqlx, migrations in `crates/trex-store/migrations`, applied on startup), Redis (connection manager), and the per-user file library (`object_store`, any S3-compatible provider, keyed `users/{uuid}/library/...`). Users, sessions and the credit ledger will live here.
 - `crates/trex-server`: the `trex` binary. Config loading, logging, axum API. Stays thin; logic belongs in the harness.
 
