@@ -18,7 +18,11 @@ use trex_sandbox::{Sandbox, workspace_name};
 use trex_store::sessions::{Session, SessionStatus, UsageRecord};
 use uuid::Uuid;
 
-use crate::api::{AppState, error::ApiError, events::to_api};
+use crate::api::{
+    AppState,
+    error::ApiError,
+    events::{SessionEvent, to_api},
+};
 
 const MAX_TURNS: usize = 50;
 const INSTRUCTIONS: &str = "You are trex, an autonomous agent working for the user inside a Linux sandbox. \
@@ -93,33 +97,25 @@ pub async fn start(
 }
 
 async fn run(state: Arc<AppState>, user: Uuid, session: Uuid, token: CancellationToken) {
-    publish(&state, session, json!({"type": "run.started"})).await;
+    publish(&state, session, SessionEvent::RunStarted).await;
     let result = drive(&state, user, session, &token).await;
     state.runs.remove(session);
 
     let (status, question, error, event) = match result {
-        Ok(Finished::Completed) => (
-            SessionStatus::Idle,
-            None,
-            None,
-            json!({"type": "run.completed"}),
-        ),
-        Ok(Finished::Cancelled) => (
-            SessionStatus::Idle,
-            None,
-            None,
-            json!({"type": "run.cancelled"}),
-        ),
+        Ok(Finished::Completed) => (SessionStatus::Idle, None, None, SessionEvent::RunCompleted),
+        Ok(Finished::Cancelled) => (SessionStatus::Idle, None, None, SessionEvent::RunCancelled),
         Ok(Finished::NeedsInput(question)) => (
             SessionStatus::NeedsInput,
             Some(question),
             None,
-            json!({"type": "run.needs_input"}),
+            SessionEvent::RunNeedsInput,
         ),
         Err(error) => {
             let message = format!("{error:#}");
             tracing::warn!(session = %session, error = message, "run failed");
-            let event = json!({"type": "run.failed", "error": message});
+            let event = SessionEvent::RunFailed {
+                error: message.clone(),
+            };
             (SessionStatus::Failed, None, Some(message), event)
         }
     };
@@ -213,7 +209,7 @@ async fn ensure_sandbox(
         });
     }
 
-    publish(state, session.id, json!({"type": "sandbox.creating"})).await;
+    publish(state, session.id, SessionEvent::SandboxCreating).await;
     let workspace = state.openshell.ensure_workspace(user).await?;
     let sandbox = state
         .openshell
@@ -227,7 +223,7 @@ async fn ensure_sandbox(
         .store
         .set_session_sandbox(user, session.id, &sandbox.name)
         .await?;
-    publish(state, session.id, json!({"type": "sandbox.ready"})).await;
+    publish(state, session.id, SessionEvent::SandboxReady).await;
     Ok(sandbox)
 }
 
@@ -261,16 +257,20 @@ async fn forward(
             }
             _ => {}
         }
-        if let Some(value) = to_api(&event) {
-            publish(&state, session, value).await;
+        if let Some(event) = to_api(event) {
+            publish(&state, session, event).await;
         }
     }
     question
 }
 
 // a lost event only degrades the live view; the run itself and its saved history are unaffected
-async fn publish(state: &AppState, session: Uuid, event: Value) {
-    if let Err(error) = state.store.publish_event(session, &event).await {
+async fn publish(state: &AppState, session: Uuid, event: SessionEvent) {
+    let result = match serde_json::to_value(&event) {
+        Ok(value) => state.store.publish_event(session, &value).await,
+        Err(error) => Err(error.into()),
+    };
+    if let Err(error) = result {
         tracing::warn!(session = %session, error = format!("{error:#}"), "failed to publish event");
     }
 }

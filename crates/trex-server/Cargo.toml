@@ -25,3 +25,5 @@ tower-http = { workspace = true, features = ["trace", "request-id"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 uuid.workspace = true
+utoipa = { workspace = true, features = ["macros", "axum_extras", "preserve_order", "preserve_path_order"] }
+utoipa-axum.workspace = true

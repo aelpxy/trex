@@ -6,73 +6,180 @@ use axum::{
     response::sse::{Event as SseEvent, KeepAlive, Sse},
 };
 use futures::{Stream, stream};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use trex_harness::event::{Event, OutputStream};
+use utoipa::{IntoParams, ToSchema};
 
-use super::{AppState, auth::CurrentUser, error::ApiError, sessions::find_session};
+use super::{
+    AppState,
+    auth::CurrentUser,
+    error::{ApiError, ErrorResponse},
+    sessions::{Question, find_session},
+};
 
 const READ_BLOCK: Duration = Duration::from_secs(15);
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct EventsQuery {
+    /// `start` replays every retained event; otherwise the stream starts at the live tail.
+    #[param(example = "start")]
     from: Option<String>,
 }
 
+/// An event on a session's stream. The SSE `event:` name equals `type`.
+#[derive(Serialize, ToSchema)]
+#[serde(tag = "type")]
+pub enum SessionEvent {
+    #[serde(rename = "run.started")]
+    RunStarted,
+    #[serde(rename = "sandbox.creating")]
+    SandboxCreating,
+    #[serde(rename = "sandbox.ready")]
+    SandboxReady,
+    #[serde(rename = "text.delta")]
+    TextDelta { delta: String },
+    #[serde(rename = "reasoning.delta")]
+    ReasoningDelta { delta: String },
+    #[serde(rename = "tool.call")]
+    ToolCall {
+        call_id: String,
+        name: String,
+        /// JSON-encoded arguments.
+        arguments: String,
+    },
+    /// Live output of a running command.
+    #[serde(rename = "tool.output")]
+    ToolOutput {
+        call_id: String,
+        stream: ToolStream,
+        chunk: String,
+    },
+    #[serde(rename = "tool.result")]
+    ToolResult {
+        call_id: String,
+        output: String,
+        is_error: bool,
+    },
+    /// Token usage of one model response.
+    #[serde(rename = "usage")]
+    Usage {
+        model: String,
+        input_tokens: u64,
+        cached_input_tokens: u64,
+        cache_write_tokens: u64,
+        output_tokens: u64,
+        reasoning_tokens: u64,
+    },
+    /// The sandbox was denied network access; see the access request endpoints.
+    #[serde(rename = "access.requested")]
+    AccessRequested {
+        id: String,
+        endpoints: Vec<String>,
+        binary: String,
+        rationale: String,
+        security_notes: String,
+    },
+    /// The agent asked the user something; the run ends with `run.needs_input`.
+    #[serde(rename = "question")]
+    Question { questions: Vec<Question> },
+    #[serde(rename = "run.completed")]
+    RunCompleted,
+    /// Waiting for answers to the session's `pending_questions`.
+    #[serde(rename = "run.needs_input")]
+    RunNeedsInput,
+    #[serde(rename = "run.cancelled")]
+    RunCancelled,
+    #[serde(rename = "run.failed")]
+    RunFailed { error: String },
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStream {
+    Stdout,
+    Stderr,
+}
+
 // harness events become api events here; anything internal (review tokens, raw items) stays out
-pub fn to_api(event: &Event) -> Option<Value> {
-    let value = match event {
-        Event::TextDelta { delta } => json!({"type": "text.delta", "delta": delta}),
-        Event::ReasoningDelta { delta } => json!({"type": "reasoning.delta", "delta": delta}),
+pub fn to_api(event: Event) -> Option<SessionEvent> {
+    let event = match event {
+        Event::TextDelta { delta } => SessionEvent::TextDelta { delta },
+        Event::ReasoningDelta { delta } => SessionEvent::ReasoningDelta { delta },
         Event::ToolCall {
             call_id,
             name,
             arguments,
-        } => json!({"type": "tool.call", "call_id": call_id, "name": name, "arguments": arguments}),
+        } => SessionEvent::ToolCall {
+            call_id,
+            name,
+            arguments,
+        },
         Event::ToolOutput {
             call_id,
             stream,
             chunk,
-        } => {
-            let stream = match stream {
-                OutputStream::Stdout => "stdout",
-                OutputStream::Stderr => "stderr",
-            };
-            json!({"type": "tool.output", "call_id": call_id, "stream": stream, "chunk": chunk})
-        }
+        } => SessionEvent::ToolOutput {
+            call_id,
+            stream: match stream {
+                OutputStream::Stdout => ToolStream::Stdout,
+                OutputStream::Stderr => ToolStream::Stderr,
+            },
+            chunk,
+        },
         Event::ToolResult {
             call_id,
             output,
             is_error,
-        } => {
-            json!({"type": "tool.result", "call_id": call_id, "output": output, "is_error": is_error})
-        }
-        Event::Usage(usage) => json!({
-            "type": "usage",
-            "model": usage.model,
-            "input_tokens": usage.input_tokens,
-            "cached_input_tokens": usage.cached_input_tokens,
-            "cache_write_tokens": usage.cache_write_tokens,
-            "output_tokens": usage.output_tokens,
-            "reasoning_tokens": usage.reasoning_tokens,
-        }),
-        Event::AccessRequest(request) => json!({
-            "type": "access.requested",
-            "id": request.id,
-            "endpoints": request.endpoints,
-            "binary": request.binary,
-            "rationale": request.rationale,
-            "security_notes": request.security_notes,
-        }),
-        Event::Question { questions, .. } => json!({"type": "question", "questions": questions}),
+        } => SessionEvent::ToolResult {
+            call_id,
+            output,
+            is_error,
+        },
+        Event::Usage(usage) => SessionEvent::Usage {
+            model: usage.model,
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+        },
+        Event::AccessRequest(request) => SessionEvent::AccessRequested {
+            id: request.id,
+            endpoints: request.endpoints,
+            binary: request.binary,
+            rationale: request.rationale,
+            security_notes: request.security_notes,
+        },
+        Event::Question { questions, .. } => SessionEvent::Question {
+            questions: questions.into_iter().map(Question::from).collect(),
+        },
         Event::Done => return None,
     };
-    Some(value)
+    Some(event)
 }
 
-// without Last-Event-ID the stream starts at the live tail, or at the beginning with ?from=start
+/// Stream events
+///
+/// Server-sent events for the session's runs. Reconnect with `Last-Event-ID` to resume without
+/// gaps; a comment heartbeat is sent every 15 seconds.
+#[utoipa::path(
+    get,
+    operation_id = "stream_events",
+    path = "/sessions/{id}/events",
+    tag = "sessions",
+    params(
+        ("id" = String, Path, description = "Session id"),
+        ("Last-Event-ID" = Option<String>, Header, description = "Resume after this event id"),
+        EventsQuery,
+    ),
+    responses(
+        (status = 200, content_type = "text/event-stream", body = SessionEvent),
+        (status = 404, response = ErrorResponse),
+    ),
+)]
 pub async fn stream_events(
     State(state): State<Arc<AppState>>,
     CurrentUser(user): CurrentUser,

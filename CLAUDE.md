@@ -72,6 +72,8 @@ Dev setup: the gateway on `fedora-server` only listens on loopback; tunnel with 
 
 Auth is temporary: every `/v1` request names its user in `X-Trex-User: <uuid>` until registration and api keys exist.
 
+Docs: `GET /docs` (Scalar, loaded from its CDN by `api/docs.html`) renders `GET /openapi.json`, which utoipa generates from the handlers. Every handler has a `#[utoipa::path]` (summary line, `operation_id`, tag, params, responses with `ErrorResponse` for errors) and is registered with `routes!` in `api::routes()`, so the router and the spec can't drift; `spec_documents_every_route` lists the expected paths. Request and response bodies are typed structs deriving `ToSchema`, never `json!`.
+
 - `GET /v1/models`
 - `POST /v1/sessions` `{model, reasoning_effort?}`, `GET /v1/sessions?limit&starting_after`, `GET|DELETE /v1/sessions/{id}`
 - `GET /v1/sessions/{id}/items`: the conversation as trex items (`message`, `tool_call`, `tool_result`, `reasoning`)

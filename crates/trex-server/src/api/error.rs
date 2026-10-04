@@ -3,7 +3,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use serde::Serialize;
+use utoipa::{ToResponse, ToSchema};
 
 // every error response has the same shape: {"error": {"type", "message", "param"}}
 pub enum ApiError {
@@ -15,6 +16,35 @@ pub enum ApiError {
     NotFound(String),
     Conflict(String),
     Internal(anyhow::Error),
+}
+
+#[derive(Serialize, ToSchema, ToResponse)]
+#[response(description = "Error")]
+pub struct ErrorResponse {
+    error: ErrorDetail,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ErrorDetail {
+    #[serde(rename = "type")]
+    kind: ErrorType,
+    message: String,
+    /// The request parameter the error relates to.
+    param: Option<&'static str>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub enum ErrorType {
+    #[serde(rename = "invalid_request_error")]
+    InvalidRequest,
+    #[serde(rename = "authentication_error")]
+    Authentication,
+    #[serde(rename = "not_found_error")]
+    NotFound,
+    #[serde(rename = "conflict_error")]
+    Conflict,
+    #[serde(rename = "api_error")]
+    Api,
 }
 
 impl ApiError {
@@ -37,29 +67,35 @@ impl IntoResponse for ApiError {
         let (status, kind, message, param) = match self {
             Self::InvalidRequest { message, param } => (
                 StatusCode::BAD_REQUEST,
-                "invalid_request_error",
+                ErrorType::InvalidRequest,
                 message,
                 param,
             ),
             Self::Authentication(message) => (
                 StatusCode::UNAUTHORIZED,
-                "authentication_error",
+                ErrorType::Authentication,
                 message,
                 None,
             ),
-            Self::NotFound(message) => (StatusCode::NOT_FOUND, "not_found_error", message, None),
-            Self::Conflict(message) => (StatusCode::CONFLICT, "conflict_error", message, None),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, ErrorType::NotFound, message, None),
+            Self::Conflict(message) => (StatusCode::CONFLICT, ErrorType::Conflict, message, None),
             Self::Internal(error) => {
                 tracing::error!(error = format!("{error:#}"), "request failed");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "api_error",
+                    ErrorType::Api,
                     "internal server error".to_owned(),
                     None,
                 )
             }
         };
-        let body = json!({"error": {"type": kind, "message": message, "param": param}});
+        let body = ErrorResponse {
+            error: ErrorDetail {
+                kind,
+                message,
+                param,
+            },
+        };
         (status, Json(body)).into_response()
     }
 }

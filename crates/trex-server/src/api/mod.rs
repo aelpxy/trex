@@ -11,10 +11,10 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
     http::{Request, StatusCode},
-    routing::{get, post},
+    response::Html,
+    routing::get,
 };
 use serde::Serialize;
-use serde_json::{Value, json};
 use tower_http::{
     LatencyUnit,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -24,10 +24,16 @@ use tracing::Level;
 use trex_harness::{model::Models, tool::Tools};
 use trex_sandbox::{OpenShell, Policy};
 use trex_store::{Store, library::Library};
+use utoipa::{
+    Modify, OpenApi, ToSchema,
+    openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
+};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::runs::Runs;
 
 const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
+const DOCS_PAGE: &str = include_str!("docs.html");
 
 pub struct AppState {
     pub store: Store,
@@ -62,29 +68,34 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .latency_unit(LatencyUnit::Millis),
         );
 
+    let (router, spec) = routes();
+    let spec = Arc::new(spec);
+
     // layers wrap bottom-up: the id is set before tracing and copied to the response after
-    let v1 = Router::new()
-        .route("/models", get(models))
-        .route("/sessions", post(sessions::create).get(sessions::list))
-        .route(
-            "/sessions/{id}",
-            get(sessions::get).delete(sessions::delete),
-        )
-        .route("/sessions/{id}/items", get(sessions::items))
-        .route("/sessions/{id}/messages", post(sessions::create_message))
-        .route("/sessions/{id}/answers", post(sessions::create_answers))
-        .route("/sessions/{id}/cancel", post(sessions::cancel))
-        .route("/sessions/{id}/events", get(events::stream_events))
-        .route("/sessions/{id}/access_requests", get(sessions::list_access))
-        .route(
-            "/sessions/{id}/access_requests/{request_id}/approve",
-            post(sessions::approve_access),
-        )
-        .route(
-            "/sessions/{id}/access_requests/{request_id}/reject",
-            post(sessions::reject_access),
-        )
-        .route("/library", get(library::list))
+    router
+        .route("/openapi.json", get(move || async move { Json(spec) }))
+        .route("/docs", get(|| async { Html(DOCS_PAGE) }))
+        .with_state(state)
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(trace)
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+}
+
+// the api routes and the openapi spec describing them, built from the same handler list
+fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
+    let v1 = OpenApiRouter::new()
+        .routes(routes!(models))
+        .routes(routes!(sessions::create, sessions::list))
+        .routes(routes!(sessions::get, sessions::delete))
+        .routes(routes!(sessions::items))
+        .routes(routes!(sessions::create_message))
+        .routes(routes!(sessions::create_answers))
+        .routes(routes!(sessions::cancel))
+        .routes(routes!(events::stream_events))
+        .routes(routes!(sessions::list_access))
+        .routes(routes!(sessions::approve_access))
+        .routes(routes!(sessions::reject_access))
+        .routes(routes!(library::list))
         .route(
             "/library/files/{*path}",
             get(library::download)
@@ -93,31 +104,113 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         );
 
-    Router::new()
-        .route("/health", get(health))
+    let (router, mut spec) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(health))
         .nest("/v1", v1)
-        .with_state(state)
-        .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(trace)
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .split_for_parts();
+    spec.merge(LibraryFiles::openapi());
+    (router, spec)
 }
 
-#[derive(Serialize)]
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "trex",
+        description = "Sessions, agent runs and sandboxes for the trex web UI. Errors always have the shape `{\"error\": {\"type\", \"message\", \"param\"}}`; every response carries an `x-request-id` header.",
+    ),
+    components(schemas(error::ErrorType)),
+    modifiers(&UserHeader),
+    security(("user" = [])),
+)]
+struct ApiDoc;
+
+#[derive(OpenApi)]
+#[openapi(paths(library::download, library::upload, library::delete))]
+struct LibraryFiles;
+
+struct UserHeader;
+
+impl Modify for UserHeader {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_default();
+        let scheme = ApiKey::Header(ApiKeyValue::with_description(
+            "X-Trex-User",
+            "Temporary: the user's uuid, until registration and api keys exist.",
+        ));
+        components.add_security_scheme("user", SecurityScheme::ApiKey(scheme));
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct List<T> {
+    #[schema(example = "list")]
+    object: &'static str,
+    data: Vec<T>,
+    has_more: bool,
+}
+
+impl<T> List<T> {
+    pub fn new(data: Vec<T>, has_more: bool) -> Self {
+        Self {
+            object: "list",
+            data,
+            has_more,
+        }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+struct Model {
+    #[schema(example = "gpt-6.1-sol")]
+    id: String,
+    #[schema(example = "model")]
+    object: &'static str,
+}
+
+#[derive(Serialize, ToSchema)]
 struct Health {
+    #[schema(example = "ok")]
     status: &'static str,
     version: &'static str,
 }
 
-async fn models(State(state): State<Arc<AppState>>) -> Json<Value> {
+/// List models
+///
+/// The models a session can use, configured by the operator.
+#[utoipa::path(
+    get,
+    operation_id = "list_models",
+    path = "/models",
+    tag = "models",
+    responses((status = 200, body = List<Model>)),
+)]
+async fn models(State(state): State<Arc<AppState>>) -> Json<List<Model>> {
     let mut ids: Vec<&str> = state.models.ids().collect();
     ids.sort_unstable();
-    let data: Vec<Value> = ids
+    let data = ids
         .into_iter()
-        .map(|id| json!({"id": id, "object": "model"}))
+        .map(|id| Model {
+            id: id.to_owned(),
+            object: "model",
+        })
         .collect();
-    Json(json!({"object": "list", "data": data, "has_more": false}))
+    Json(List::new(data, false))
 }
 
+/// Health check
+///
+/// Reports whether Postgres and Redis are reachable.
+#[utoipa::path(
+    get,
+    operation_id = "health",
+    path = "/health",
+    tag = "system",
+    security(()),
+    responses(
+        (status = 200, body = Health),
+        (status = 503, body = Health),
+    ),
+)]
 async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Health>) {
     let (code, status) = match state.store.ping().await {
         Ok(()) => (StatusCode::OK, "ok"),
@@ -131,4 +224,40 @@ async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Health>
         version: env!("CARGO_PKG_VERSION"),
     };
     (code, Json(health))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spec_documents_every_route() {
+        let (_, spec) = routes();
+        let paths: Vec<&str> = spec.paths.paths.keys().map(String::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "/health",
+                "/v1/models",
+                "/v1/sessions",
+                "/v1/sessions/{id}",
+                "/v1/sessions/{id}/items",
+                "/v1/sessions/{id}/messages",
+                "/v1/sessions/{id}/answers",
+                "/v1/sessions/{id}/cancel",
+                "/v1/sessions/{id}/events",
+                "/v1/sessions/{id}/access_requests",
+                "/v1/sessions/{id}/access_requests/{request_id}/approve",
+                "/v1/sessions/{id}/access_requests/{request_id}/reject",
+                "/v1/library",
+                "/v1/library/files/{path}",
+            ]
+        );
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            json["components"]["securitySchemes"]["user"]["name"],
+            "X-Trex-User"
+        );
+        assert!(json["components"]["schemas"]["SessionEvent"]["oneOf"].is_array());
+    }
 }
