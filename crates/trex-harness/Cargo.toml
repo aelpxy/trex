@@ -24,4 +24,5 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+axum = { workspace = true, features = ["tokio", "http1", "json"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

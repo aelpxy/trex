@@ -4,21 +4,28 @@ use anyhow::{Context, bail};
 use async_openai::{
     Client,
     config::OpenAIConfig,
+    error::OpenAIError,
     types::responses::{
         CreateResponse, IncludeEnum, InputItem, InputParam, Reasoning, ReasoningEffort,
-        ReasoningSummary, ResponseStream, Tool,
+        ReasoningSummary, ResponseStream, Tool, ToolChoiceOptions, ToolChoiceParam,
     },
 };
 use serde::Deserialize;
 
+// conservative for models whose catalog entry doesn't say; a low guess only compacts early
+const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+
 pub struct Model {
     id: String,
+    name: String,
     upstream: String,
+    context_window: u64,
     client: Client<OpenAIConfig>,
 }
 
 pub struct Models {
     models: HashMap<String, Model>,
+    order: Vec<String>,
 }
 
 pub struct Turn {
@@ -26,6 +33,9 @@ pub struct Turn {
     pub input: Vec<InputItem>,
     pub tools: Vec<Tool>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    // the tools stay declared even when calls are disabled, so the cached prompt prefix still matches
+    pub allow_tools: bool,
+    pub cache_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -48,8 +58,10 @@ struct ProviderEntry {
 #[serde(deny_unknown_fields)]
 struct ModelEntry {
     id: String,
+    name: Option<String>,
     provider: String,
     upstream: Option<String>,
+    context_window: Option<u64>,
 }
 
 // accepts the effort names the responses api uses, e.g. low, medium, high
@@ -64,6 +76,7 @@ impl Models {
 
         let mut ids = HashSet::new();
         let mut models = HashMap::new();
+        let mut order = Vec::new();
         for entry in catalog.models {
             let Some(provider) = catalog.providers.get(&entry.provider) else {
                 bail!("model {}: unknown provider {}", entry.id, entry.provider);
@@ -71,19 +84,26 @@ impl Models {
             if !ids.insert(entry.id.clone()) {
                 bail!("duplicate model id {}", entry.id);
             }
+            let context_window = entry.context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW);
+            if context_window == 0 {
+                bail!("model {}: context_window must be positive", entry.id);
+            }
             let model = Model::new(
                 entry.id.clone(),
+                entry.name.unwrap_or_else(|| entry.id.clone()),
                 entry.upstream.unwrap_or_else(|| entry.id.clone()),
+                context_window,
                 provider.base_url.trim_end_matches('/'),
                 provider.api_key.as_deref(),
             );
+            order.push(entry.id.clone());
             models.insert(entry.id, model);
         }
 
         if models.is_empty() {
             bail!("no models configured");
         }
-        Ok(Self { models })
+        Ok(Self { models, order })
     }
 
     pub fn get(&self, id: &str) -> Option<&Model> {
@@ -93,10 +113,22 @@ impl Models {
     pub fn ids(&self) -> impl Iterator<Item = &str> {
         self.models.keys().map(String::as_str)
     }
+
+    // in catalog order, which is the order the ui lists them
+    pub fn all(&self) -> impl Iterator<Item = &Model> {
+        self.order.iter().map(|id| &self.models[id])
+    }
 }
 
 impl Model {
-    fn new(id: String, upstream: String, base_url: &str, api_key: Option<&str>) -> Self {
+    fn new(
+        id: String,
+        name: String,
+        upstream: String,
+        context_window: u64,
+        base_url: &str,
+        api_key: Option<&str>,
+    ) -> Self {
         let mut openai = OpenAIConfig::new().with_api_base(base_url);
         if let Some(key) = api_key {
             openai = openai.with_api_key(key);
@@ -104,7 +136,9 @@ impl Model {
 
         Self {
             id,
+            name,
             upstream,
+            context_window,
             client: Client::with_config(openai),
         }
     }
@@ -113,13 +147,24 @@ impl Model {
         &self.id
     }
 
-    pub async fn stream(&self, turn: Turn) -> anyhow::Result<ResponseStream> {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn context_window(&self) -> u64 {
+        self.context_window
+    }
+
+    pub async fn stream(&self, turn: Turn) -> Result<ResponseStream, OpenAIError> {
         // trex owns conversation state, so reasoning must come back encrypted to be replayed
         let request = CreateResponse {
             model: Some(self.upstream.clone()),
             instructions: turn.instructions,
             input: InputParam::Items(turn.input),
             tools: Some(turn.tools),
+            tool_choice: (!turn.allow_tools)
+                .then_some(ToolChoiceParam::Option(ToolChoiceOptions::None)),
+            prompt_cache_key: turn.cache_key,
             reasoning: turn.reasoning_effort.map(|effort| Reasoning {
                 effort: Some(effort),
                 summary: Some(ReasoningSummary::Auto),
@@ -130,11 +175,7 @@ impl Model {
             ..Default::default()
         };
 
-        self.client
-            .responses()
-            .create_stream(request)
-            .await
-            .with_context(|| format!("failed to start response for model {}", self.id))
+        self.client.responses().create_stream(request).await
     }
 }
 
@@ -143,11 +184,45 @@ impl Model {
 pub(crate) const TEST_MODEL: &str = "gpt-6.1-sol";
 
 #[cfg(test)]
-pub(crate) fn test_models() -> Models {
+fn test_catalog() -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../trex.toml");
-    let raw =
-        std::fs::read_to_string(path).expect("live tests need trex.toml in the workspace root");
-    Models::from_toml(&raw).unwrap()
+    std::fs::read_to_string(path).expect("live tests need trex.toml in the workspace root")
+}
+
+#[cfg(test)]
+pub(crate) fn test_models() -> Models {
+    Models::from_toml(&test_catalog()).unwrap()
+}
+
+#[cfg(test)]
+fn test_entry() -> (ModelEntry, ProviderEntry) {
+    let mut catalog: Catalog = toml::from_str(&test_catalog()).unwrap();
+    let entry = catalog
+        .models
+        .into_iter()
+        .find(|entry| entry.id == TEST_MODEL)
+        .expect("trex.toml should configure the test model");
+    let provider = catalog.providers.remove(&entry.provider).unwrap();
+    (entry, provider)
+}
+
+#[cfg(test)]
+pub(crate) fn test_base_url() -> String {
+    test_entry().1.base_url.trim_end_matches('/').to_owned()
+}
+
+// the test model behind another base url (a fault-injecting proxy) with its own context window
+#[cfg(test)]
+pub(crate) fn test_model_via(base_url: &str, context_window: u64) -> Model {
+    let (entry, provider) = test_entry();
+    Model::new(
+        entry.id.clone(),
+        entry.id.clone(),
+        entry.upstream.unwrap_or(entry.id),
+        context_window,
+        base_url,
+        provider.api_key.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -197,12 +272,30 @@ mod tests {
 
             [[models]]
             id = "fast"
+            name = "Fast"
             provider = "local"
             upstream = "gpt-6.1-sol"
+            context_window = 400000
+
+            [[models]]
+            id = "plain"
+            provider = "local"
         "#;
         let models = Models::from_toml(raw).unwrap();
-        assert_eq!(models.ids().collect::<Vec<_>>(), ["fast"]);
-        assert_eq!(models.get("fast").unwrap().upstream, "gpt-6.1-sol");
+        let mut ids: Vec<_> = models.ids().collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["fast", "plain"]);
+        let fast = models.get("fast").unwrap();
+        assert_eq!(fast.upstream, "gpt-6.1-sol");
+        assert_eq!(fast.context_window(), 400_000);
+        assert_eq!(
+            models.all().map(Model::name).collect::<Vec<_>>(),
+            ["Fast", "plain"]
+        );
+        assert_eq!(
+            models.get("plain").unwrap().context_window(),
+            DEFAULT_CONTEXT_WINDOW
+        );
     }
 
     // needs the responses api configured in trex.toml: cargo test -- --ignored
@@ -227,6 +320,8 @@ mod tests {
                 ..Default::default()
             })],
             reasoning_effort: Some(ReasoningEffort::Medium),
+            allow_tools: true,
+            cache_key: None,
         };
 
         let mut stream = models

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use trex_sandbox::AccessRequest;
 
 use crate::question::Question;
@@ -30,6 +32,15 @@ pub enum Event {
         call_id: String,
         questions: Vec<Question>,
     },
+    // the partial output of the failed attempt should be discarded by whoever shows it
+    Retrying {
+        attempt: u32,
+        max_attempts: u32,
+        delay: Duration,
+        reason: String,
+    },
+    Compacting,
+    Compacted,
     Done,
 }
 
@@ -40,6 +51,10 @@ pub struct Usage {
     pub cache_write_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
+    // from sending the request to the end of the response
+    pub duration: Duration,
+    // until the first streamed output; none if nothing visible was streamed
+    pub time_to_first_token: Option<Duration>,
 }
 
 #[derive(Clone, Copy)]

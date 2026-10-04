@@ -162,6 +162,11 @@ pub enum Item {
     Reasoning {
         summary: String,
     },
+    /// Everything before this item was summarized to free up context; the model sees only this
+    /// summary and the items after it.
+    Compaction {
+        summary: String,
+    },
 }
 
 /// Outbound network access the sandbox was denied; approving it lets the agent retry.
@@ -678,6 +683,9 @@ fn access_request(request: trex_sandbox::AccessRequest, status: AccessStatus) ->
 fn item(item: &Value) -> Option<Item> {
     let kind = item["type"].as_str().unwrap_or("message");
     match kind {
+        "message" if history::checkpoint_text(item).is_some() => Some(Item::Compaction {
+            summary: history::checkpoint_text(item)?.trim().to_owned(),
+        }),
         "message" => {
             let text = match &item["content"] {
                 Value::String(text) => text.clone(),
@@ -752,5 +760,16 @@ mod tests {
             json!({"type": "reasoning", "summary": "thinking"})
         );
         assert!(item_json(&hidden).is_none());
+
+        let checkpoint =
+            serde_json::to_value(history::checkpoint(&["hi".into()], "did things")).unwrap();
+        let compaction = item_json(&checkpoint).unwrap();
+        assert_eq!(compaction["type"], "compaction");
+        assert!(
+            compaction["summary"]
+                .as_str()
+                .unwrap()
+                .ends_with("<summary>\ndid things\n</summary>")
+        );
     }
 }

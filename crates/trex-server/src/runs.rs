@@ -172,6 +172,7 @@ async fn drive(
         instructions: Some(INSTRUCTIONS.into()),
         reasoning_effort,
         max_turns: MAX_TURNS,
+        cache_key: Some(id.to_string()),
     };
     let result = tokio::select! {
         result = agent.run(&mut history, &tx) => Some(result),

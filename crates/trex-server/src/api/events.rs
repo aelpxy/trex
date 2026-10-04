@@ -72,6 +72,10 @@ pub enum SessionEvent {
         cache_write_tokens: u64,
         output_tokens: u64,
         reasoning_tokens: u64,
+        /// From sending the request to the end of the response.
+        duration_ms: u64,
+        /// Until the first streamed text, reasoning or tool arguments.
+        time_to_first_token_ms: Option<u64>,
     },
     /// The sandbox was denied network access; see the access request endpoints.
     #[serde(rename = "access.requested")]
@@ -85,6 +89,21 @@ pub enum SessionEvent {
     /// The agent asked the user something; the run ends with `run.needs_input`.
     #[serde(rename = "question")]
     Question { questions: Vec<Question> },
+    /// A model request failed transiently and will be retried after `delay_ms`. Discard the text,
+    /// reasoning and tool calls streamed since the last `tool.result` (or the run start).
+    #[serde(rename = "model.retrying")]
+    ModelRetrying {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        reason: String,
+    },
+    /// The context is nearly full and is being summarized; this can take a while.
+    #[serde(rename = "context.compacting")]
+    ContextCompacting,
+    /// Later requests start from the summary; it appears as a `compaction` item.
+    #[serde(rename = "context.compacted")]
+    ContextCompacted,
     #[serde(rename = "run.completed")]
     RunCompleted,
     /// Waiting for answers to the session's `pending_questions`.
@@ -145,6 +164,10 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
             cache_write_tokens: usage.cache_write_tokens,
             output_tokens: usage.output_tokens,
             reasoning_tokens: usage.reasoning_tokens,
+            duration_ms: usage.duration.as_millis() as u64,
+            time_to_first_token_ms: usage
+                .time_to_first_token
+                .map(|elapsed| elapsed.as_millis() as u64),
         },
         Event::AccessRequest(request) => SessionEvent::AccessRequested {
             id: request.id,
@@ -156,6 +179,19 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
         Event::Question { questions, .. } => SessionEvent::Question {
             questions: questions.into_iter().map(Question::from).collect(),
         },
+        Event::Retrying {
+            attempt,
+            max_attempts,
+            delay,
+            reason,
+        } => SessionEvent::ModelRetrying {
+            attempt,
+            max_attempts,
+            delay_ms: delay.as_millis() as u64,
+            reason,
+        },
+        Event::Compacting => SessionEvent::ContextCompacting,
+        Event::Compacted => SessionEvent::ContextCompacted,
         Event::Done => return None,
     };
     Some(event)

@@ -51,8 +51,10 @@ api_key = "..."
 
 [[models]]
 id = "gpt-6.1-sol"      # what the UI selects
+name = "GPT 6.1 Sol"    # optional, display name for pickers, defaults to id
 provider = "local"
 upstream = "..."        # optional, model name sent upstream, defaults to id
+context_window = 400000 # optional, tokens, defaults to 128000; compaction starts at 80%
 ```
 
 Env vars:
@@ -74,16 +76,22 @@ Auth is temporary: every `/v1` request names its user in `X-Trex-User: <uuid>` u
 
 Docs: `GET /docs` (Scalar, loaded from its CDN by `api/docs.html`) renders `GET /openapi.json`, which utoipa generates from the handlers. Every handler has a `#[utoipa::path]` (summary line, `operation_id`, tag, params, responses with `ErrorResponse` for errors) and is registered with `routes!` in `api::routes()`, so the router and the spec can't drift; `spec_documents_every_route` lists the expected paths. Request and response bodies are typed structs deriving `ToSchema`, never `json!`.
 
-- `GET /v1/models`
+- `GET /v1/models`: `{id, name}` in `trex.toml` order
 - `POST /v1/sessions` `{model, reasoning_effort?}`, `GET /v1/sessions?limit&starting_after`, `GET|DELETE /v1/sessions/{id}`
-- `GET /v1/sessions/{id}/items`: the conversation as trex items (`message`, `tool_call`, `tool_result`, `reasoning`)
+- `GET /v1/sessions/{id}/items`: the conversation as trex items (`message`, `tool_call`, `tool_result`, `reasoning`, `compaction`)
 - `POST /v1/sessions/{id}/messages` `{content}` and `POST .../answers` `{answers: [{selected, text}]}` start a run (202); 409 while one is running
 - `POST /v1/sessions/{id}/cancel`
 - `GET /v1/sessions/{id}/access_requests`, `POST .../access_requests/{request_id}/approve|reject`
 - `GET /v1/sessions/{id}/events`: SSE; resumes from `Last-Event-ID`, `?from=start` replays retained events, otherwise starts at the live tail
 - `GET /v1/library`, `GET|PUT|DELETE /v1/library/files/{path}`
 
-Events (`event:` equals the payload `type`): `run.started`, `sandbox.creating`, `sandbox.ready`, `text.delta`, `reasoning.delta`, `tool.call`, `tool.output`, `tool.result`, `usage`, `access.requested`, `question`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
+Events (`event:` equals the payload `type`): `run.started`, `sandbox.creating`, `sandbox.ready`, `text.delta`, `reasoning.delta`, `tool.call`, `tool.output`, `tool.result`, `usage`, `access.requested`, `question`, `model.retrying`, `context.compacting`, `context.compacted`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
+
+Agent loop robustness (`crates/trex-harness/src/agent.rs`):
+
+- Model requests are retried with exponential backoff (5 attempts) on dropped or stalled streams (300s idle timeout), 408/429/5xx, and `server_error`/`rate_limit_exceeded` responses, on top of the client's own connection retries. Tools only run after a response completes, so a retry has no side effects; `model.retrying` tells the UI to discard the partial turn.
+- Compaction is trex's own, so it works with any provider (native Responses compaction doesn't shrink the context on our endpoint). When a turn's tokens reach 80% of the model's `context_window`, or a request fails with `context_length_exceeded`, the model writes a handoff summary (same prefix with `tool_choice: none`, so it hits the prompt cache; a trimmed text transcript if even that overflows). It is appended as a developer-role checkpoint message (`history::checkpoint`) holding the recent user messages and the summary. History stays append-only: requests send items from the latest checkpoint (`history::context_start`), and the items API shows it as a `compaction` item.
+- Every request carries the session id as `prompt_cache_key`.
 
 Runs are spawned per session (`crates/trex-server/src/runs.rs`): one at a time, enforced by a conditional update in Postgres; history is saved even when a run fails or is cancelled; runs left `running` by a restart are marked failed on startup.
 

@@ -7,5 +7,7 @@ api_key = ""
 
 [[models]]
 id = "gpt-6.1-sol"      # what the ui selects
+name = "GPT 6.1 Sol"    # optional, shown in the model picker, defaults to id
 provider = "local"
 # upstream = "..."      # model name sent to the provider, defaults to id
+# context_window = 400000  # tokens, defaults to 128000; compaction starts at 80%

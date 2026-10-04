@@ -165,6 +165,11 @@ struct Model {
     id: String,
     #[schema(example = "model")]
     object: &'static str,
+    /// Display name for model pickers.
+    #[schema(example = "GPT 6.1 Sol")]
+    name: String,
+    /// Tokens; the conversation is compacted at 80% of it.
+    context_window: u64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -176,7 +181,7 @@ struct Health {
 
 /// List models
 ///
-/// The models a session can use, configured by the operator.
+/// The models a session can use, configured by the operator, in the operator's order.
 #[utoipa::path(
     get,
     operation_id = "list_models",
@@ -185,13 +190,14 @@ struct Health {
     responses((status = 200, body = List<Model>)),
 )]
 async fn models(State(state): State<Arc<AppState>>) -> Json<List<Model>> {
-    let mut ids: Vec<&str> = state.models.ids().collect();
-    ids.sort_unstable();
-    let data = ids
-        .into_iter()
-        .map(|id| Model {
-            id: id.to_owned(),
+    let data = state
+        .models
+        .all()
+        .map(|model| Model {
+            id: model.id().to_owned(),
             object: "model",
+            name: model.name().to_owned(),
+            context_window: model.context_window(),
         })
         .collect();
     Json(List::new(data, false))
