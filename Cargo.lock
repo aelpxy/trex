@@ -475,6 +475,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
 name = "crossbeam-queue"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -999,6 +1005,25 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hickory-proto"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12b92608f679a6fa515dd1d15c1ff89443026e391200a2c840c7afcba482893d"
+dependencies = [
+ "data-encoding",
+ "idna",
+ "ipnet",
+ "jni",
+ "once_cell",
+ "rand 0.10.3",
+ "ring",
+ "thiserror 2.0.21",
+ "tinyvec",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "hkdf"
@@ -1764,6 +1789,10 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+dependencies = [
+ "critical-section",
+ "portable-atomic",
+]
 
 [[package]]
 name = "openshell-core"
@@ -1812,6 +1841,20 @@ dependencies = [
  "tokio",
  "tonic",
  "tower",
+]
+
+[[package]]
+name = "openshell-policy"
+version = "0.0.0"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.2#6648bd0c290efbc41ba131ee9831ee45cd431f94"
+dependencies = [
+ "hickory-proto",
+ "miette",
+ "openshell-core",
+ "openshell-policy-schema",
+ "prost-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1939,6 +1982,12 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "portable-atomic"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
 name = "potential_utf"
@@ -3581,6 +3630,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
+ "openshell-policy",
  "openshell-sdk",
  "sha2 0.11.0",
  "tokio",

@@ -26,7 +26,9 @@ impl Tool for Bash {
             name: "bash".into(),
             description: Some(
                 "Run a bash command in the sandbox and return its stdout, stderr and exit code. \
-                 Use read_file, write_file and edit_file for file contents instead of cat, echo or sed."
+                 Use read_file, write_file and edit_file for file contents instead of cat, echo or sed. \
+                 Network access is limited to an allowlist; if a host is blocked, tell the user which host you need \
+                 and why, since they can approve it, instead of retrying or working around the block."
                     .into(),
             ),
             parameters: Some(json!({

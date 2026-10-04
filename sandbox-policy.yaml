@@ -1,0 +1,36 @@
+# default policy for every session sandbox, in openshell's policy format
+# network access not listed here is denied; denials become access requests the user can approve
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only: [/bin, /usr, /lib, /proc, /dev/urandom, /etc, /var/log]
+  read_write: [/sandbox, /tmp, /dev/null]
+
+landlock:
+  compatibility: best_effort
+
+network_policies:
+  package_registries:
+    name: package-registries
+    endpoints:
+      - { host: pypi.org, port: 443 }
+      - { host: files.pythonhosted.org, port: 443 }
+      - { host: registry.npmjs.org, port: 443 }
+      - { host: crates.io, port: 443 }
+      - { host: index.crates.io, port: 443 }
+      - { host: static.crates.io, port: 443 }
+    # an empty list matches no binary at enforcement time; this glob allows any
+    binaries:
+      - { path: "/**" }
+
+  github:
+    name: github
+    endpoints:
+      - { host: github.com, port: 443 }
+      - { host: api.github.com, port: 443 }
+      - { host: codeload.github.com, port: 443 }
+      - { host: objects.githubusercontent.com, port: 443 }
+      - { host: raw.githubusercontent.com, port: 443 }
+    binaries:
+      - { path: "/**" }

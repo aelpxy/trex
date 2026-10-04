@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Write, fs, path::Path, time::Duration};
 use anyhow::{Context, bail};
 use futures::stream;
 use openshell_sdk::{
-    DeleteOptions, EdgeAuthInterceptor, ListOptions, OpenShellClient, SandboxSpec, SdkError,
+    DeleteOptions, EdgeAuthInterceptor, ListOptions, OpenShellClient, SdkError,
     raw::proto::{self, exec_sandbox_event::Payload, exec_sandbox_input},
 };
 use sha2::{Digest, Sha256};
@@ -24,6 +24,20 @@ const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct Sandbox {
     pub workspace: String,
     pub name: String,
+}
+
+pub struct Policy(proto::SandboxPolicy);
+
+// a network request the sandbox was denied, proposed by openshell as a rule a user can approve
+pub struct AccessRequest {
+    pub id: String,
+    pub review_token: String,
+    pub rule_name: String,
+    pub endpoints: Vec<String>,
+    pub binary: String,
+    pub rationale: String,
+    pub security_notes: String,
+    pub hit_count: i32,
 }
 
 pub struct OpenShell {
@@ -137,18 +151,130 @@ impl OpenShell {
         Ok(())
     }
 
-    pub async fn create(&self, workspace: &str, image: Option<String>) -> anyhow::Result<Sandbox> {
-        let spec = SandboxSpec {
-            image,
+    // the sdk's sandbox spec has no policy field, so this uses the raw create rpc
+    pub async fn create(
+        &self,
+        workspace: &str,
+        image: Option<String>,
+        policy: Option<&Policy>,
+    ) -> anyhow::Result<Sandbox> {
+        let request = proto::CreateSandboxRequest {
+            workspace_scope: Some(proto::workspace_selector(workspace)),
+            spec: Some(proto::SandboxSpec {
+                template: image.map(|image| proto::SandboxTemplate {
+                    image,
+                    ..Default::default()
+                }),
+                policy: policy.map(|policy| policy.0.clone()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        let scoped = self.client.workspace(workspace);
-        let sandbox = scoped.create_sandbox(spec).await?;
-        scoped.wait_ready(&sandbox.name, READY_TIMEOUT).await?;
+        let response = self
+            .client
+            .raw_grpc()
+            .create_sandbox(request)
+            .await
+            .context("failed to create sandbox")?
+            .into_inner();
+        let name = response
+            .sandbox
+            .and_then(|sandbox| sandbox.metadata)
+            .map(|metadata| metadata.name)
+            .context("gateway returned no sandbox")?;
+
+        self.client
+            .workspace(workspace)
+            .wait_ready(&name, READY_TIMEOUT)
+            .await?;
         Ok(Sandbox {
             workspace: workspace.to_owned(),
-            name: sandbox.name,
+            name,
         })
+    }
+
+    // openshell has no push notification for new drafts, so callers poll this
+    pub async fn pending_access(&self, sandbox: &Sandbox) -> anyhow::Result<Vec<AccessRequest>> {
+        let request = proto::GetDraftPolicyRequest {
+            workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
+            sandbox: sandbox.name.clone(),
+            status_filter: "pending".into(),
+        };
+        let response = self
+            .client
+            .raw_grpc()
+            .get_draft_policy(request)
+            .await
+            .context("failed to get access requests")?
+            .into_inner();
+
+        let requests = response
+            .chunks
+            .into_iter()
+            .map(|chunk| AccessRequest {
+                endpoints: chunk
+                    .proposed_rule
+                    .map(|rule| {
+                        rule.endpoints
+                            .iter()
+                            .map(|endpoint| {
+                                format!("{}:{}", endpoint.host, endpoint_ports(endpoint))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                id: chunk.id,
+                review_token: chunk.review_token,
+                rule_name: chunk.rule_name,
+                binary: chunk.binary,
+                rationale: chunk.rationale,
+                security_notes: chunk.security_notes,
+                hit_count: chunk.hit_count,
+            })
+            .collect();
+        Ok(requests)
+    }
+
+    // the review token pins approval to the exact proposal the user saw
+    pub async fn approve_access(
+        &self,
+        sandbox: &Sandbox,
+        request: &AccessRequest,
+    ) -> anyhow::Result<()> {
+        let approve = proto::ApproveDraftChunkRequest {
+            workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
+            sandbox: sandbox.name.clone(),
+            chunk_id: request.id.clone(),
+            review_token: request.review_token.clone(),
+            ..Default::default()
+        };
+        self.client
+            .raw_grpc()
+            .approve_draft_chunk(approve)
+            .await
+            .context("failed to approve access request")?;
+        Ok(())
+    }
+
+    pub async fn reject_access(
+        &self,
+        sandbox: &Sandbox,
+        request: &AccessRequest,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let reject = proto::RejectDraftChunkRequest {
+            workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
+            sandbox: sandbox.name.clone(),
+            chunk_id: request.id.clone(),
+            reason: reason.to_owned(),
+            ..Default::default()
+        };
+        self.client
+            .raw_grpc()
+            .reject_draft_chunk(reject)
+            .await
+            .context("failed to reject access request")?;
+        Ok(())
     }
 
     // uses the interactive rpc because dropping its stream kills the remote process,
@@ -222,6 +348,27 @@ impl OpenShell {
     }
 }
 
+impl Policy {
+    pub fn from_yaml(yaml: &str) -> anyhow::Result<Self> {
+        openshell_policy::parse_sandbox_policy(yaml)
+            .map(Self)
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+}
+
+fn endpoint_ports(endpoint: &proto::NetworkEndpoint) -> String {
+    let ports: Vec<_> = if endpoint.ports.is_empty() {
+        vec![endpoint.port]
+    } else {
+        endpoint.ports.clone()
+    };
+    ports
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 // workspace names are dns labels of at most 19 chars, too short for a uuid, so use 68 bits of its hash
 pub fn workspace_name(user: Uuid) -> String {
     let digest = Sha256::digest(user.as_bytes());
@@ -262,7 +409,7 @@ mod tests {
 
         let user = Uuid::now_v7();
         let workspace = openshell.ensure_workspace(user).await.unwrap();
-        let sandbox = openshell.create(&workspace, None).await.unwrap();
+        let sandbox = openshell.create(&workspace, None, None).await.unwrap();
 
         let command = ["sh", "-c", "echo hello && echo oops >&2 && exit 3"];
         let mut stream = openshell
@@ -347,7 +494,7 @@ mod tests {
         let alice_ws = openshell.ensure_workspace(alice).await.unwrap();
         let bob_ws = openshell.ensure_workspace(bob).await.unwrap();
         let again = openshell.ensure_workspace(alice).await.unwrap();
-        let sandbox = openshell.create(&alice_ws, None).await.unwrap();
+        let sandbox = openshell.create(&alice_ws, None, None).await.unwrap();
 
         let forged = Sandbox {
             workspace: bob_ws.clone(),
@@ -385,5 +532,81 @@ mod tests {
             "bob's delete must not touch alice's sandbox"
         );
         assert!(recreated.is_ok());
+    }
+
+    #[test]
+    fn default_policy_parses() {
+        let yaml = include_str!("../../../sandbox-policy.yaml");
+        let policy = Policy::from_yaml(yaml).unwrap();
+        assert!(policy.0.network_policies.contains_key("package_registries"));
+        assert!(Policy::from_yaml("version: 1\nbogus: true\n").is_err());
+    }
+
+    // needs the gateway tunnel on 127.0.0.1:17670, certs in <workspace>/certs/openshell, and internet on the gateway host
+    #[tokio::test]
+    #[ignore]
+    async fn denied_network_access_can_be_approved() {
+        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
+        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
+            .await
+            .unwrap();
+        let policy = Policy::from_yaml(include_str!("../../../sandbox-policy.yaml")).unwrap();
+        let user = Uuid::now_v7();
+        let workspace = openshell.ensure_workspace(user).await.unwrap();
+        let sandbox = openshell
+            .create(&workspace, None, Some(&policy))
+            .await
+            .unwrap();
+
+        // the default image has no curl, so open a tcp connection with bash itself
+        let connect = |host: &str| {
+            let script = format!("timeout 15 bash -c 'exec 3<>/dev/tcp/{host}/443'");
+            ["bash", "-c", &script].map(String::from).to_vec()
+        };
+        let allowed = openshell
+            .output(&sandbox, connect("pypi.org"), Vec::new())
+            .await
+            .unwrap();
+        let denied = openshell
+            .output(&sandbox, connect("example.com"), Vec::new())
+            .await
+            .unwrap();
+
+        // the supervisor batches denials into proposals roughly every 10 seconds
+        let mut request = None;
+        for _ in 0..30 {
+            let pending = openshell.pending_access(&sandbox).await.unwrap();
+            request = pending
+                .into_iter()
+                .find(|r| r.endpoints.iter().any(|e| e.starts_with("example.com:")));
+            if request.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        let request = request.expect("denied access should become a pending request");
+        openshell.approve_access(&sandbox, &request).await.unwrap();
+
+        let mut approved = None;
+        for _ in 0..15 {
+            let output = openshell
+                .output(&sandbox, connect("example.com"), Vec::new())
+                .await
+                .unwrap();
+            approved = output.exit_code;
+            if approved == Some(0) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        let still_pending = openshell.pending_access(&sandbox).await.unwrap();
+
+        openshell.delete_workspace(user).await.unwrap();
+
+        assert_eq!(allowed.exit_code, Some(0), "allowlisted host must connect");
+        assert_ne!(denied.exit_code, Some(0), "unlisted host must be denied");
+        assert!(!request.review_token.is_empty());
+        assert_eq!(approved, Some(0), "approved host must connect");
+        assert!(still_pending.iter().all(|r| r.id != request.id));
     }
 }

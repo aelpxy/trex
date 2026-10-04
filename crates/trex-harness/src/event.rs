@@ -1,3 +1,5 @@
+use trex_sandbox::AccessRequest;
+
 pub enum Event {
     TextDelta {
         delta: String,
@@ -21,6 +23,7 @@ pub enum Event {
         is_error: bool,
     },
     Usage(Usage),
+    AccessRequest(AccessRequest),
     Done,
 }
 

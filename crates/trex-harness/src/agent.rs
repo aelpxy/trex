@@ -1,10 +1,12 @@
+use std::{collections::HashSet, time::Duration};
+
 use anyhow::{Context, bail};
 use async_openai::types::responses::{
     FunctionCallOutput, FunctionCallOutputItemParam, FunctionToolCall, InputItem, Item,
     MessageItem, OutputItem, ReasoningEffort, Response, ResponseStreamEvent,
 };
 use futures::{StreamExt, future::join_all};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::sleep};
 use trex_sandbox::{OpenShell, Sandbox};
 
 use crate::{
@@ -12,6 +14,8 @@ use crate::{
     model::{Model, Turn},
     tool::{ToolContext, Tools},
 };
+
+const ACCESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct Agent<'a> {
     pub model: &'a Model,
@@ -26,6 +30,17 @@ pub struct Agent<'a> {
 impl Agent<'_> {
     // appends every item the run produces to history so the next run continues from it
     pub async fn run(
+        &self,
+        history: &mut Vec<InputItem>,
+        events: &mpsc::Sender<Event>,
+    ) -> anyhow::Result<()> {
+        tokio::select! {
+            result = self.run_turns(history, events) => result,
+            result = self.watch_access(events) => result,
+        }
+    }
+
+    async fn run_turns(
         &self,
         history: &mut Vec<InputItem>,
         events: &mpsc::Sender<Event>,
@@ -59,6 +74,29 @@ impl Agent<'_> {
             "run stopped after reaching the limit of {} turns",
             self.max_turns
         )
+    }
+
+    // surfaces each network request the sandbox was denied once, so the user can approve it mid-run
+    async fn watch_access(&self, events: &mpsc::Sender<Event>) -> anyhow::Result<()> {
+        let mut seen = HashSet::new();
+        loop {
+            sleep(ACCESS_POLL_INTERVAL).await;
+            let requests = match self.openshell.pending_access(self.sandbox).await {
+                Ok(requests) => requests,
+                Err(error) => {
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        "failed to poll access requests"
+                    );
+                    continue;
+                }
+            };
+            for request in requests {
+                if seen.insert(request.id.clone()) {
+                    send(events, Event::AccessRequest(request)).await?;
+                }
+            }
+        }
     }
 
     async fn stream_turn(
@@ -317,5 +355,51 @@ mod tests {
             .iter()
             .position(|item| matches!(item, InputItem::Item(Item::FunctionCall(_))));
         assert!(matches!((reasoning, call), (Some(r), Some(c)) if r < c));
+    }
+
+    // needs the openshell gateway tunnel, <workspace>/certs/openshell, and trex.toml
+    #[tokio::test]
+    #[ignore]
+    async fn surfaces_denied_network_access() {
+        let models = test_models();
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let tools = Tools::standard();
+        let agent = Agent {
+            model: models.get(TEST_MODEL).unwrap(),
+            tools: &tools,
+            openshell: &openshell,
+            sandbox: &sandbox,
+            instructions: None,
+            reasoning_effort: None,
+            max_turns: 1,
+        };
+
+        let script = "timeout 15 bash -c 'exec 3<>/dev/tcp/example.com/443'";
+        let denied = openshell
+            .output(
+                &sandbox,
+                ["bash", "-c", script].map(String::from).to_vec(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let first = tokio::time::timeout(Duration::from_secs(90), async {
+            tokio::select! {
+                result = agent.watch_access(&tx) => panic!("watcher stopped: {result:?}"),
+                event = rx.recv() => event,
+            }
+        })
+        .await;
+
+        openshell.delete_workspace(user).await.unwrap();
+
+        assert_ne!(denied.exit_code, Some(0));
+        let Ok(Some(Event::AccessRequest(request))) = first else {
+            panic!("expected an access request event");
+        };
+        assert!(request.endpoints.iter().any(|e| e == "example.com:443"));
+        assert!(!request.review_token.is_empty());
     }
 }

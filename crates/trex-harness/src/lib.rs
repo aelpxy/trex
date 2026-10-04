@@ -19,7 +19,7 @@ mod test_support {
             .unwrap();
         let user = Uuid::now_v7();
         let workspace = openshell.ensure_workspace(user).await.unwrap();
-        let sandbox = openshell.create(&workspace, None).await.unwrap();
+        let sandbox = openshell.create(&workspace, None, None).await.unwrap();
         (openshell, user, sandbox)
     }
 }
