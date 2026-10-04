@@ -20,6 +20,11 @@ network_policies:
       - { host: crates.io, port: 443 }
       - { host: index.crates.io, port: 443 }
       - { host: static.crates.io, port: 443 }
+      - { host: static.rust-lang.org, port: 443 }
+      - { host: proxy.golang.org, port: 443 }
+      - { host: sum.golang.org, port: 443 }
+      - { host: storage.googleapis.com, port: 443 }
+      - { host: conda.anaconda.org, port: 443 }
     # an empty list matches no binary at enforcement time; this glob allows any
     binaries:
       - { path: "/**" }

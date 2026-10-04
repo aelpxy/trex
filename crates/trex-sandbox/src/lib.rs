@@ -18,6 +18,8 @@ const STDIN_CHUNK_BYTES: usize = 256 * 1024;
 const USER_LABEL: &str = "trex-user";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const DEV_IMAGE: &str = "localhost/trex-sandbox:latest";
 
 // openshell trusts trex's mtls identity as platform admin, so trex is what keeps users apart:
 // every sandbox handle carries the workspace of the user it was created for
@@ -608,5 +610,68 @@ mod tests {
         assert!(!request.review_token.is_empty());
         assert_eq!(approved, Some(0), "approved host must connect");
         assert!(still_pending.iter().all(|r| r.id != request.id));
+    }
+
+    // needs the gateway tunnel, certs, internet on the gateway host, and the image from images/sandbox built on it
+    #[tokio::test]
+    #[ignore]
+    async fn dev_image_tools_work_under_policy() {
+        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
+        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
+            .await
+            .unwrap();
+        let policy = Policy::from_yaml(include_str!("../../../sandbox-policy.yaml")).unwrap();
+        let user = Uuid::now_v7();
+        let workspace = openshell.ensure_workspace(user).await.unwrap();
+        let sandbox = openshell
+            .create(&workspace, Some(DEV_IMAGE.into()), Some(&policy))
+            .await
+            .unwrap();
+
+        let script = r#"
+            set -u
+            for tool in git curl python3 pip uv node npm go cargo rustc micromamba rg jq cmake sqlite3; do
+                command -v "$tool" >/dev/null && echo "tool:$tool" || echo "missing:$tool"
+            done
+            cd /tmp && mkdir work && cd work
+            pip install --quiet six && python3 -c "import six" && echo "ok:pip"
+            uv venv --quiet venv && uv pip install --quiet --python venv six && echo "ok:uv"
+            npm install --silent --no-audit --no-fund is-number >/dev/null && node -e "require('is-number')" && echo "ok:npm"
+            go mod init example.com/probe >/dev/null 2>&1 && go get github.com/google/uuid >/dev/null 2>&1 && echo "ok:go"
+            cargo new --quiet probe && cd probe && cargo add --quiet itoa && cargo fetch --quiet && echo "ok:cargo" && cd ..
+            micromamba install --quiet -y -n base -c conda-forge yq >/dev/null && yq --version >/dev/null && echo "ok:micromamba"
+            git ls-remote --heads https://github.com/octocat/Hello-World >/dev/null && echo "ok:git"
+            curl -s -o /dev/null --max-time 15 https://example.com && echo "reached:example.com" || echo "blocked:example.com"
+        "#;
+        let output = openshell
+            .output(
+                &sandbox,
+                ["bash", "-c", script].map(String::from).to_vec(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        openshell.delete_workspace(user).await.unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected = [
+            "ok:pip",
+            "ok:uv",
+            "ok:npm",
+            "ok:go",
+            "ok:cargo",
+            "ok:micromamba",
+            "ok:git",
+            "blocked:example.com",
+        ];
+        assert!(!stdout.contains("missing:"), "missing tools:\n{stdout}");
+        for marker in expected {
+            assert!(
+                stdout.contains(marker),
+                "{marker} not found\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
     }
 }
