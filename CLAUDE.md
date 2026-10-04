@@ -1,23 +1,58 @@
 # trex
 
-Agentic harness exposed as an HTTP API (not a CLI). trex runs the model loop and sessions; tools execute inside OpenShell sandboxes.
+Backend and agent harness for a web UI. trex owns sessions, the model catalog the UI picks from (models are configurable per session), the agent loop, and tool execution inside OpenShell sandboxes. The UI only renders and sends input.
 
 ## Architecture
 
 - **API**: axum, JSON in, SSE out. Runs are decoupled from client connections; streams are resumable via event ids (`Last-Event-ID`) with heartbeats.
-- **Model**: OpenAI Responses API with `store=false`. trex owns all conversation state; output items (including encrypted reasoning and compaction items) are persisted and sent back verbatim.
+- **Model**: OpenAI Responses API via `async-openai` (no hand-rolled client), `store=false`. trex owns all conversation state; output items (including encrypted reasoning and compaction items) are persisted and sent back verbatim. Any provider speaking the Responses API works.
 - **Sandbox**: OpenShell gateway over gRPC + mTLS via `openshell-sdk` (git dep pinned to the gateway's version tag). One sandbox per session.
+
+## Workspace
+
+- `crates/trex-harness`: the brain. Agent loop, runs, events, tools, model catalog (`model::Models`). Current focus.
+- `crates/trex-sandbox`: OpenShell client (`OpenShell`): create, streaming exec, delete.
+- `crates/trex-server`: the `trex` binary. Config loading, logging, axum API. Stays thin; logic belongs in the harness.
+
+Shared dependency versions live in the root `[workspace.dependencies]`; crates opt into features.
+
+## API design
+
+The HTTP API takes the best of OpenAI, Anthropic and Stripe:
+
+- **Resources** (Stripe): plural nouns (`/v1/sessions/{id}/runs`), prefixed ids (`sess_`, `run_`, `evt_`), an `object` field on every resource, `metadata` map on user-facing objects.
+- **Errors** (Stripe/Anthropic): one shape everywhere, `{"error": {"type", "code", "message", "param"}}`, with the `request_id` header on every response. Types are a small fixed set mapped to HTTP status.
+- **Lists** (Stripe): cursor pagination with `limit`, `starting_after`, `ending_before`; responses are `{"object": "list", "data": [...], "has_more"}`.
+- **Writes** (Stripe): `Idempotency-Key` header on POSTs.
+- **Versioning** (Anthropic/Stripe): `/v1` path plus a date-based `Trex-Version` header for breaking changes.
+- **Streaming** (OpenAI/Anthropic): SSE with typed events (`event:` name equals the payload's `type`), a monotonically increasing `sequence_number` used as the SSE id for `Last-Event-ID` resume, and explicit start/delta/done events per content block.
+- **Content** (OpenAI items/Anthropic blocks): conversations are lists of typed items (message, tool call, tool result, reasoning) so the UI renders by `type`.
 
 ## Commands
 
-- `cargo build` / `cargo run`
-- `cargo clippy --all-targets` must be warning-free
+- `cargo build` / `cargo run` (binary `trex`, run from the workspace root)
+- `cargo clippy --workspace --all-targets` must be warning-free
 - `cargo fmt` before committing
-- `cargo test` for unit tests; `cargo test -- --ignored` for tests that need a live OpenShell gateway
+- `cargo test --workspace` for unit tests; `cargo test --workspace -- --ignored` for tests needing the OpenShell gateway and the local Responses API (`LOCAL_API_KEY` set)
 
 ## Config
 
-All config comes from `TREX_*` env vars, parsed once in `src/config.rs` into `Config`. Never read env vars elsewhere.
+All config is loaded once in `crates/trex-server/src/config.rs` into `Config` from `TREX_*` env vars and `trex.toml`. Never read env vars or config files elsewhere (tests excepted); library crates take config as plain structs.
+
+`trex.toml` (path overridable with `TREX_CONFIG`) holds the operator-managed model catalog. It is committed and never contains secrets; keys are referenced by env var name:
+
+```toml
+[providers.local]
+base_url = "http://127.0.0.1:8699/v1"
+api_key_env = "LOCAL_API_KEY"
+
+[[models]]
+id = "gpt-6.1-sol"      # what the UI selects
+provider = "local"
+upstream = "..."        # optional, model name sent upstream, defaults to id
+```
+
+Env vars:
 
 - `TREX_ADDR` (default `127.0.0.1:8080`)
 - `TREX_LOG_FORMAT` = `text` | `json`; `RUST_LOG` overrides filters
@@ -29,47 +64,56 @@ Dev setup: the gateway on `fedora-server` only listens on loopback; tunnel with 
 ## Rust practices
 
 ### Structure
-- One module per concern (`api`, `config`, `logging`, `openshell`, ...). Split into a directory module only when a file grows past one clear responsibility.
-- Wrap external SDKs behind a small trex-owned type (like `OpenShell`) that exposes only what we use. Don't leak SDK/proto types through the rest of the codebase.
+
+- One crate per layer (see Workspace), one module per concern inside it. Split into a directory module only when a file grows past one clear responsibility.
+- Use official or well-maintained SDKs instead of hand-writing API clients.
+- Wrap the OpenShell SDK behind `trex_sandbox::OpenShell`; don't leak its proto types. `async-openai` types are the harness's model vocabulary and may be used inside `trex-harness`, but never appear in the HTTP API.
 - Introduce a trait only when there is a second implementation or a real test seam, not speculatively.
 - Keep handlers thin: parse input, call into a domain module, map the result to a response.
 
 ### Errors
+
 - `anyhow::Result` with `.context(...)` for application code and startup paths. Context messages are lowercase and say what was being attempted (`"failed to read {path}"`).
 - Use a `thiserror` enum where callers need to branch on the error, e.g. mapping to HTTP status codes in the API layer.
 - No `unwrap()`/`expect()` outside tests and truly impossible states; `expect` messages state the invariant.
 - Never swallow errors silently. Either propagate, or log with `tracing::warn!/error!` and explain why continuing is safe.
 
 ### Async
+
 - Everything runs on tokio. Never block the runtime: no `std::thread::sleep`, no blocking I/O in async fns; use `tokio::fs`/`spawn_blocking` when needed.
 - Every long-running task must be cancellable (a `CancellationToken` or dropped handle) and have a timeout on external calls.
 - Don't hold a lock across an `.await`.
 - Prefer channels (`mpsc`/`broadcast`) for streaming events between the agent loop and SSE subscribers over shared mutable state.
 
 ### Types
+
 - Make invalid states unrepresentable: enums over strings/bools for modes (see `LogFormat`), newtypes for ids (`SessionId`, `SandboxName`) once they cross module boundaries.
 - Derive only what's needed. Don't derive `Debug` on structs holding secrets; implement it manually with redaction.
-- Serde types for external APIs tolerate unknown fields and unknown enum variants (keep raw `serde_json::Value` for items we don't model) so upstream additions don't break us.
+- Our own serde types for external data tolerate unknown fields and variants (keep raw `serde_json::Value` for items we don't model) so upstream additions don't break us.
 - Borrow (`&str`, `&Path`) in function parameters; take ownership only when storing.
 
 ### Logging
+
 - Use `tracing` with structured fields, not string interpolation: `tracing::info!(sandbox = %name, "created sandbox")`.
 - Messages are short lowercase phrases. Put variable data in fields.
 - Never log secrets, API keys, tokens, or full model prompts at `info` or above.
 - Request spans carry `request_id`; add spans (`session_id`, `run_id`) at boundaries so nested logs inherit them.
 
 ### Dependencies
+
 - Add deps with `cargo add`, enabling only the features we use.
-- Check before adding: prefer the standard library or an existing dep. Keep one version of tonic/hyper/rustls in the tree (`cargo tree -d`).
+- Check before adding: prefer the standard library or an existing dep. Keep one version of tonic/hyper/rustls in the tree (`cargo tree -d`). Known duplicate: reqwest 0.12 (openshell-sdk) and 0.13 (async-openai).
 - Git deps must be pinned to a tag or rev.
 
 ### Testing
+
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 - Tests that need external services (OpenShell, OpenAI) are `#[ignore]` with a comment saying what they need.
 - Test behavior through public functions; assert on concrete values, not just `is_ok()`.
 
 ### Style
+
 - `rustfmt` defaults, clippy clean. Fix lints rather than `#[allow]`; when an allow is necessary, scope it narrowly and add a one-line reason.
 - Comments only when the why isn't obvious from the code; one line.
-- Imports grouped: std, external crates, `crate::`.
+- Imports grouped: std, external crates, workspace crates, `crate::`.
 - Constants for magic values (timeouts, defaults), named for what they mean.

@@ -1,0 +1,12 @@
+[package]
+name = "trex-sandbox"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+openshell-sdk.workspace = true
+tonic = { workspace = true, features = ["tls-aws-lc"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

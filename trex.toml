@@ -1,0 +1,7 @@
+[providers.local]
+base_url = "http://127.0.0.1:8699/v1"
+api_key_env = "LOCAL_API_KEY"
+
+[[models]]
+id = "gpt-6.1-sol"
+provider = "local"

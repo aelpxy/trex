@@ -127,14 +127,13 @@ impl ExecStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
-    // needs a reachable gateway: cargo test -- --ignored
+    // needs the gateway tunnel on 127.0.0.1:17670 and certs in <workspace>/certs/openshell: cargo test -- --ignored
     #[tokio::test]
     #[ignore]
     async fn sandbox_lifecycle() {
-        let config = Config::from_env().unwrap();
-        let openshell = OpenShell::connect(&config.openshell_endpoint, &config.openshell_tls_dir)
+        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
+        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
             .await
             .unwrap();
 

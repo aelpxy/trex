@@ -1,16 +1,16 @@
 mod api;
 mod config;
 mod logging;
-#[allow(dead_code)]
-mod openshell;
 
 use tokio::{net::TcpListener, signal};
+use trex_harness::model::Models;
+use trex_sandbox::OpenShell;
 
-use crate::{config::Config, openshell::OpenShell};
+use crate::config::Config;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::from_env()?;
+    let config = Config::load()?;
     logging::init(config.log_format);
 
     let openshell =
@@ -20,6 +20,9 @@ async fn main() -> anyhow::Result<()> {
         version = openshell.version().await?,
         "connected to openshell gateway"
     );
+
+    let models = Models::new(config.models);
+    tracing::info!(models = ?models.ids().collect::<Vec<_>>(), "loaded models");
 
     let listener = TcpListener::bind(config.addr).await?;
     tracing::info!(addr = %listener.local_addr()?, version = env!("CARGO_PKG_VERSION"), "listening");
