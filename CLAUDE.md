@@ -12,6 +12,7 @@ Backend and agent harness for a web UI. trex owns sessions, the model catalog th
 
 - `crates/trex-harness`: the brain. Agent loop, runs, events, tools, model catalog (`model::Models`). Current focus.
 - `crates/trex-sandbox`: OpenShell client (`OpenShell`): create, streaming exec, delete.
+- `crates/trex-store`: Postgres (sqlx, migrations in `crates/trex-store/migrations`, applied on startup) and Redis (connection manager). Users, sessions and the credit ledger will live here.
 - `crates/trex-server`: the `trex` binary. Config loading, logging, axum API. Stays thin; logic belongs in the harness.
 
 Shared dependency versions live in the root `[workspace.dependencies]`; crates opt into features.
@@ -33,7 +34,7 @@ The HTTP API takes the best of OpenAI, Anthropic and Stripe:
 - `cargo build` / `cargo run` (binary `trex`, run from the workspace root)
 - `cargo clippy --workspace --all-targets` must be warning-free
 - `cargo fmt` before committing
-- `cargo test --workspace` for unit tests; `cargo test --workspace -- --ignored` for tests needing the OpenShell gateway and the local Responses API (`LOCAL_API_KEY` set)
+- `cargo test --workspace` for unit tests; `cargo test --workspace -- --ignored` for tests needing the OpenShell gateway, the local Responses API (`LOCAL_API_KEY`), and Postgres/Redis (`TREX_DATABASE_URL`, `TREX_REDIS_URL`)
 
 ## Config
 
@@ -56,6 +57,7 @@ Env vars:
 
 - `TREX_ADDR` (default `127.0.0.1:8080`)
 - `TREX_LOG_FORMAT` = `text` | `json`; `RUST_LOG` overrides filters
+- `TREX_DATABASE_URL`, `TREX_REDIS_URL` (required; contain credentials, so never log them or put them in `trex.toml`)
 - `TREX_OPENSHELL_ENDPOINT` (default `https://127.0.0.1:17670`)
 - `TREX_OPENSHELL_TLS_DIR` (default `certs/openshell`, relative to the working dir, containing `ca.crt`, `tls.crt`, `tls.key`; `certs/` is gitignored)
 

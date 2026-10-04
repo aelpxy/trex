@@ -4,7 +4,9 @@ use crate::config::LogFormat;
 
 pub fn init(format: LogFormat) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,trex=debug,trex_harness=debug,trex_sandbox=debug,tower_http=info")
+        EnvFilter::new(
+            "info,trex=debug,trex_harness=debug,trex_sandbox=debug,trex_store=debug,tower_http=info,sqlx=warn",
+        )
     });
 
     let builder = fmt().with_env_filter(filter);

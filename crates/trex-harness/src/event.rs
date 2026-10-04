@@ -20,7 +20,17 @@ pub enum Event {
         output: String,
         is_error: bool,
     },
+    Usage(Usage),
     Done,
+}
+
+pub struct Usage {
+    pub model: String,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
 }
 
 #[derive(Clone, Copy)]

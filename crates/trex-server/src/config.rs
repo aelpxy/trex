@@ -14,6 +14,8 @@ pub struct Config {
     pub log_format: LogFormat,
     pub openshell_endpoint: String,
     pub openshell_tls_dir: PathBuf,
+    pub database_url: String,
+    pub redis_url: String,
     pub models: Vec<ModelConfig>,
 }
 
@@ -67,6 +69,9 @@ impl Config {
             env::var("TREX_OPENSHELL_TLS_DIR").unwrap_or_else(|_| "certs/openshell".into()),
         );
 
+        let database_url = env::var("TREX_DATABASE_URL").context("TREX_DATABASE_URL is not set")?;
+        let redis_url = env::var("TREX_REDIS_URL").context("TREX_REDIS_URL is not set")?;
+
         let path = env::var("TREX_CONFIG").unwrap_or_else(|_| "trex.toml".into());
         let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {path}"))?;
         let file: File = toml::from_str(&raw).with_context(|| format!("invalid {path}"))?;
@@ -77,6 +82,8 @@ impl Config {
             log_format,
             openshell_endpoint,
             openshell_tls_dir,
+            database_url,
+            redis_url,
             models,
         })
     }

@@ -1,14 +1,14 @@
 use anyhow::{Context, bail};
 use async_openai::types::responses::{
     FunctionCallOutput, FunctionCallOutputItemParam, FunctionToolCall, InputItem, Item,
-    MessageItem, OutputItem, ReasoningEffort, ResponseStreamEvent,
+    MessageItem, OutputItem, ReasoningEffort, Response, ResponseStreamEvent,
 };
 use futures::{StreamExt, future::join_all};
 use tokio::sync::mpsc;
 use trex_sandbox::OpenShell;
 
 use crate::{
-    event::Event,
+    event::{Event, Usage},
     model::{Model, Turn},
     tool::{ToolContext, Tools},
 };
@@ -105,12 +105,17 @@ impl Agent<'_> {
                     }
                     other => tracing::warn!(item = ?other, "ignoring unsupported output item"),
                 },
-                ResponseStreamEvent::ResponseCompleted(_) => return Ok(calls),
+                ResponseStreamEvent::ResponseCompleted(e) => {
+                    self.report_usage(&e.response, events).await?;
+                    return Ok(calls);
+                }
                 ResponseStreamEvent::ResponseIncomplete(e) => {
+                    self.report_usage(&e.response, events).await?;
                     let reason = e.response.incomplete_details.map(|d| d.reason);
                     bail!("model response incomplete: {}", reason.unwrap_or_default());
                 }
                 ResponseStreamEvent::ResponseFailed(e) => {
+                    self.report_usage(&e.response, events).await?;
                     let message = e.response.error.map(|e| e.message);
                     bail!("model response failed: {}", message.unwrap_or_default());
                 }
@@ -120,6 +125,30 @@ impl Agent<'_> {
         }
 
         bail!("model stream ended before the response completed")
+    }
+
+    // incomplete and failed responses still consume tokens, so every terminal response is metered
+    async fn report_usage(
+        &self,
+        response: &Response,
+        events: &mpsc::Sender<Event>,
+    ) -> anyhow::Result<()> {
+        let Some(usage) = &response.usage else {
+            tracing::warn!(model = self.model.id(), "response has no usage");
+            return Ok(());
+        };
+        let usage = Usage {
+            model: self.model.id().to_owned(),
+            input_tokens: usage.input_tokens.into(),
+            cached_input_tokens: usage.input_tokens_details.cached_tokens.into(),
+            cache_write_tokens: usage
+                .input_tokens_details
+                .cache_write_tokens
+                .map_or(0, |tokens| tokens.max(0) as u64),
+            output_tokens: usage.output_tokens.into(),
+            reasoning_tokens: usage.output_tokens_details.reasoning_tokens.into(),
+        };
+        send(events, Event::Usage(usage)).await
     }
 
     // tool failures are reported to the model as output so it can recover
@@ -211,25 +240,36 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(256);
         let collector = tokio::spawn(async move {
             let (mut text, mut tool_results, mut done) = (String::new(), 0, false);
+            let mut usages = Vec::new();
             while let Some(event) = rx.recv().await {
                 match event {
                     Event::TextDelta { delta } => text.push_str(&delta),
                     Event::ToolResult { .. } => tool_results += 1,
+                    Event::Usage(usage) => usages.push(usage),
                     Event::Done => done = true,
                     _ => {}
                 }
             }
-            (text, tool_results, done)
+            (text, tool_results, done, usages)
         });
 
         let result = agent.run(&mut history, &tx).await;
         drop(tx);
-        let (text, tool_results, done) = collector.await.unwrap();
+        let (text, tool_results, done, usages) = collector.await.unwrap();
         openshell.delete(&sandbox).await.unwrap();
 
         result.unwrap();
         assert!(done);
         assert!(tool_results >= 1);
+        assert!(
+            usages.len() >= 2,
+            "a tool turn and a final turn are both metered"
+        );
+        assert!(
+            usages
+                .iter()
+                .all(|u| u.model == "gpt-6.1-sol" && u.input_tokens > 0)
+        );
         assert_eq!(text.trim(), "trex");
         assert!(
             history

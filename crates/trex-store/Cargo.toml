@@ -1,0 +1,12 @@
+[package]
+name = "trex-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "migrate", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
