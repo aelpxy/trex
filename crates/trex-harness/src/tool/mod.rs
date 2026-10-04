@@ -2,6 +2,7 @@ mod bash;
 mod file;
 mod library;
 mod search;
+mod web;
 
 use anyhow::Context;
 use async_openai::types::responses::{FunctionTool, Tool as ToolDefinition};
@@ -17,6 +18,7 @@ pub use self::{
     file::{EditFile, ReadFile, WriteFile},
     library::{LibraryList, LibraryLoad, LibrarySave},
     search::{Glob, Grep},
+    web::WebFetch,
 };
 use crate::event::Event;
 
@@ -53,8 +55,8 @@ impl Tools {
         Self { tools }
     }
 
-    pub fn standard() -> Self {
-        Self::new(vec![
+    pub fn standard() -> anyhow::Result<Self> {
+        Ok(Self::new(vec![
             Box::new(Bash),
             Box::new(ReadFile),
             Box::new(WriteFile),
@@ -64,7 +66,8 @@ impl Tools {
             Box::new(LibraryList),
             Box::new(LibraryLoad),
             Box::new(LibrarySave),
-        ])
+            Box::new(WebFetch::new()?),
+        ]))
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -119,7 +122,7 @@ mod tests {
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
         let library = Library::in_memory();
         let (events, _rx) = mpsc::channel(64);
-        let tools = Tools::standard();
+        let tools = Tools::standard().unwrap();
         let call = |name: &'static str, args: Value| {
             let ctx = ToolContext {
                 user,

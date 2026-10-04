@@ -2,6 +2,7 @@ pub mod agent;
 pub mod event;
 pub mod library;
 pub mod model;
+pub mod question;
 pub mod tool;
 
 #[cfg(test)]

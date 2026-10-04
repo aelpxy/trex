@@ -1,5 +1,7 @@
 use trex_sandbox::AccessRequest;
 
+use crate::question::Question;
+
 pub enum Event {
     TextDelta {
         delta: String,
@@ -24,6 +26,10 @@ pub enum Event {
     },
     Usage(Usage),
     AccessRequest(AccessRequest),
+    Question {
+        call_id: String,
+        questions: Vec<Question>,
+    },
     Done,
 }
 

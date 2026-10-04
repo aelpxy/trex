@@ -3,7 +3,7 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::{Context, bail};
 use async_openai::types::responses::{
     FunctionCallOutput, FunctionCallOutputItemParam, FunctionToolCall, InputItem, Item,
-    MessageItem, OutputItem, ReasoningEffort, Response, ResponseStreamEvent,
+    MessageItem, OutputItem, ReasoningEffort, Response, ResponseStreamEvent, Tool,
 };
 use futures::{StreamExt, future::join_all};
 use tokio::{sync::mpsc, time::sleep};
@@ -14,10 +14,18 @@ use uuid::Uuid;
 use crate::{
     event::{Event, Usage},
     model::{Model, Turn},
+    question::{self, ASK_USER},
     tool::{ToolContext, Tools},
 };
 
 const ACCESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Debug, PartialEq)]
+pub enum RunOutcome {
+    Completed,
+    // the model asked the user something; push question::answer_item and run again to continue
+    NeedsInput,
+}
 
 pub struct Agent<'a> {
     pub user: Uuid,
@@ -37,10 +45,10 @@ impl Agent<'_> {
         &self,
         history: &mut Vec<InputItem>,
         events: &mpsc::Sender<Event>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<RunOutcome> {
         tokio::select! {
             result = self.run_turns(history, events) => result,
-            result = self.watch_access(events) => result,
+            error = self.watch_access(events) => Err(error),
         }
     }
 
@@ -48,29 +56,47 @@ impl Agent<'_> {
         &self,
         history: &mut Vec<InputItem>,
         events: &mpsc::Sender<Event>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<RunOutcome> {
+        question::close_unanswered(history);
+
         for turn in 0..self.max_turns {
             tracing::debug!(turn, model = self.model.id(), "starting turn");
 
             let calls = self.stream_turn(history, events).await?;
             if calls.is_empty() {
                 send(events, Event::Done).await?;
-                return Ok(());
+                return Ok(RunOutcome::Completed);
             }
+
+            let (asks, calls): (Vec<_>, Vec<_>) =
+                calls.into_iter().partition(|call| call.name == ASK_USER);
 
             let results = join_all(calls.iter().map(|call| self.call_tool(call, events))).await;
             for (call, output) in calls.into_iter().zip(results) {
-                history.push(InputItem::Item(Item::FunctionCallOutput(
-                    FunctionCallOutputItemParam {
-                        call_id: Some(call.call_id),
-                        output: FunctionCallOutput::Text(output?),
-                        id: None,
-                        status: None,
-                        caller: None,
-                        name: None,
-                        namespace: None,
-                    },
-                )));
+                history.push(output_item(call.call_id, output?));
+            }
+
+            let mut asked = false;
+            for call in asks {
+                match question::parse(&call.arguments) {
+                    Ok(questions) => {
+                        send(
+                            events,
+                            Event::Question {
+                                call_id: call.call_id,
+                                questions,
+                            },
+                        )
+                        .await?;
+                        asked = true;
+                    }
+                    Err(error) => {
+                        history.push(output_item(call.call_id, format!("error: {error:#}")));
+                    }
+                }
+            }
+            if asked {
+                return Ok(RunOutcome::NeedsInput);
             }
         }
 
@@ -81,7 +107,7 @@ impl Agent<'_> {
     }
 
     // surfaces each network request the sandbox was denied once, so the user can approve it mid-run
-    async fn watch_access(&self, events: &mpsc::Sender<Event>) -> anyhow::Result<()> {
+    async fn watch_access(&self, events: &mpsc::Sender<Event>) -> anyhow::Error {
         let mut seen = HashSet::new();
         loop {
             sleep(ACCESS_POLL_INTERVAL).await;
@@ -96,8 +122,10 @@ impl Agent<'_> {
                 }
             };
             for request in requests {
-                if seen.insert(request.id.clone()) {
-                    send(events, Event::AccessRequest(request)).await?;
+                if seen.insert(request.id.clone())
+                    && let Err(error) = send(events, Event::AccessRequest(request)).await
+                {
+                    return error;
                 }
             }
         }
@@ -111,7 +139,11 @@ impl Agent<'_> {
         let turn = Turn {
             instructions: self.instructions.clone(),
             input: history.clone(),
-            tools: self.tools.definitions(),
+            tools: [
+                self.tools.definitions(),
+                vec![Tool::Function(question::definition())],
+            ]
+            .concat(),
             reasoning_effort: self.reasoning_effort.clone(),
         };
         let mut stream = self.model.stream(turn).await?;
@@ -232,6 +264,18 @@ impl Agent<'_> {
     }
 }
 
+pub(crate) fn output_item(call_id: String, output: String) -> InputItem {
+    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+        call_id: Some(call_id),
+        output: FunctionCallOutput::Text(output),
+        id: None,
+        status: None,
+        caller: None,
+        name: None,
+        namespace: None,
+    }))
+}
+
 async fn send(events: &mpsc::Sender<Event>, event: Event) -> anyhow::Result<()> {
     events.send(event).await.context("event receiver dropped")
 }
@@ -243,6 +287,7 @@ mod tests {
     use super::*;
     use crate::{
         model::{TEST_MODEL, test_models},
+        question::{Answer, Question},
         test_support::sandbox_for_new_user,
         tool::Tools,
     };
@@ -253,7 +298,7 @@ mod tests {
     async fn runs_bash_in_sandbox() {
         let models = test_models();
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
-        let tools = Tools::standard();
+        let tools = Tools::standard().unwrap();
 
         let library = Library::in_memory();
         let agent = Agent {
@@ -321,7 +366,7 @@ mod tests {
     async fn replays_encrypted_reasoning() {
         let models = test_models();
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
-        let tools = Tools::standard();
+        let tools = Tools::standard().unwrap();
 
         let library = Library::in_memory();
         let agent = Agent {
@@ -375,7 +420,7 @@ mod tests {
     async fn surfaces_denied_network_access() {
         let models = test_models();
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
-        let tools = Tools::standard();
+        let tools = Tools::standard().unwrap();
         let library = Library::in_memory();
         let agent = Agent {
             user,
@@ -402,7 +447,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let first = tokio::time::timeout(Duration::from_secs(90), async {
             tokio::select! {
-                result = agent.watch_access(&tx) => panic!("watcher stopped: {result:?}"),
+                error = agent.watch_access(&tx) => panic!("watcher stopped: {error:#}"),
                 event = rx.recv() => event,
             }
         })
@@ -416,5 +461,121 @@ mod tests {
         };
         assert!(request.endpoints.iter().any(|e| e == "example.com:443"));
         assert!(!request.review_token.is_empty());
+    }
+
+    async fn collect(
+        rx: &mut mpsc::Receiver<Event>,
+    ) -> (String, Vec<String>, Vec<(String, Vec<Question>)>) {
+        let (mut text, mut calls, mut asked) = (String::new(), Vec::new(), Vec::new());
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                Event::TextDelta { delta } => text.push_str(&delta),
+                Event::ToolCall {
+                    name, arguments, ..
+                } => calls.push(format!("{name} {arguments}")),
+                Event::Question { call_id, questions } => asked.push((call_id, questions)),
+                _ => {}
+            }
+        }
+        (text, calls, asked)
+    }
+
+    // needs the openshell gateway tunnel, <workspace>/certs/openshell, the dev image, and trex.toml
+    #[tokio::test]
+    #[ignore]
+    async fn asks_user_and_continues_with_the_answer() {
+        let models = test_models();
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let library = Library::in_memory();
+        let tools = Tools::standard().unwrap();
+        let agent = Agent {
+            user,
+            library: &library,
+            model: models.get(TEST_MODEL).unwrap(),
+            tools: &tools,
+            openshell: &openshell,
+            sandbox: &sandbox,
+            instructions: None,
+            reasoning_effort: Some(ReasoningEffort::Low),
+            max_turns: 10,
+        };
+        let mut history = vec![
+            EasyInputMessage::from(
+                "I want a script that prints exactly `hello from trex` with no punctuation. Before writing anything, use ask_user to ask me \
+                 which language to use, offering Python and Node as options. Then write it in /sandbox, run it, and \
+                 reply with only what it printed.",
+            )
+            .into(),
+        ];
+        let (tx, mut rx) = mpsc::channel(1024);
+
+        let first = agent.run(&mut history, &tx).await;
+        let (_, _, asked) = collect(&mut rx).await;
+        let (call_id, questions) = asked.into_iter().next().expect("the model should ask");
+        let python = questions[0]
+            .options
+            .iter()
+            .find(|option| option.label.to_lowercase().contains("python"))
+            .map(|option| option.label.clone())
+            .expect("python should be offered");
+        let answers = [Answer {
+            selected: vec![python],
+            text: None,
+        }];
+        history.push(question::answer_item(&call_id, &questions, &answers));
+
+        let second = agent.run(&mut history, &tx).await;
+        let (text, calls, _) = collect(&mut rx).await;
+
+        openshell.delete_workspace(user).await.unwrap();
+
+        assert_eq!(first.unwrap(), RunOutcome::NeedsInput);
+        assert_eq!(second.unwrap(), RunOutcome::Completed);
+        assert!(
+            calls.iter().any(|call| call.contains("python")),
+            "{calls:?}"
+        );
+        assert_eq!(text.trim(), "hello from trex");
+    }
+
+    // needs the openshell gateway tunnel, <workspace>/certs/openshell, the dev image, and trex.toml
+    #[tokio::test]
+    #[ignore]
+    async fn continues_when_user_ignores_question() {
+        let models = test_models();
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let library = Library::in_memory();
+        let tools = Tools::standard().unwrap();
+        let agent = Agent {
+            user,
+            library: &library,
+            model: models.get(TEST_MODEL).unwrap(),
+            tools: &tools,
+            openshell: &openshell,
+            sandbox: &sandbox,
+            instructions: None,
+            reasoning_effort: Some(ReasoningEffort::Low),
+            max_turns: 5,
+        };
+        let mut history = vec![
+            EasyInputMessage::from(
+                "Use ask_user to ask me what my favourite colour is. Do nothing else.",
+            )
+            .into(),
+        ];
+        let (tx, mut rx) = mpsc::channel(1024);
+
+        let first = agent.run(&mut history, &tx).await;
+        history
+            .push(EasyInputMessage::from("Never mind that. Reply with only the word ok.").into());
+        let second = agent.run(&mut history, &tx).await;
+        let (text, _, asked) = collect(&mut rx).await;
+
+        openshell.delete_workspace(user).await.unwrap();
+
+        assert_eq!(first.unwrap(), RunOutcome::NeedsInput);
+        assert_eq!(second.unwrap(), RunOutcome::Completed);
+        assert_eq!(asked.len(), 1);
+        assert!(text.trim().to_lowercase().ends_with("ok"), "{text}");
     }
 }

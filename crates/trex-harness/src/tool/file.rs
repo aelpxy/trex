@@ -258,7 +258,7 @@ mod tests {
     async fn file_tools_round_trip_in_sandbox() {
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
         let (events, _rx) = mpsc::channel(64);
-        let tools = Tools::standard();
+        let tools = Tools::standard().unwrap();
         let library = Library::in_memory();
         let ctx = || ToolContext {
             user,
