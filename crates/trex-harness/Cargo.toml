@@ -2,6 +2,7 @@
 name = "trex-harness"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 trex-sandbox.workspace = true
