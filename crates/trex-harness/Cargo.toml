@@ -10,6 +10,8 @@ trex-store.workspace = true
 
 anyhow.workspace = true
 async-openai = { workspace = true, features = ["responses", "rustls"] }
+chrono = { workspace = true, features = ["clock"] }
+chrono-tz.workspace = true
 futures.workspace = true
 htmd.workspace = true
 pdf-extract.workspace = true

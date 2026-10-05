@@ -2,6 +2,7 @@ mod bash;
 mod file;
 mod library;
 mod search;
+mod time;
 mod web;
 
 use anyhow::Context;
@@ -18,6 +19,7 @@ pub use self::{
     file::{EditFile, ReadFile, WriteFile},
     library::{LibraryList, LibraryLoad, LibrarySave},
     search::{Glob, Grep},
+    time::CurrentTime,
     web::WebFetch,
 };
 use crate::{event::Event, sandbox::LazySandbox};
@@ -73,6 +75,7 @@ impl Tools {
             Box::new(LibraryLoad),
             Box::new(LibrarySave),
             Box::new(WebFetch::new()?),
+            Box::new(CurrentTime),
         ]))
     }
 

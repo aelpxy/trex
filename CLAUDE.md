@@ -98,6 +98,8 @@ Steering: messages sent during a run are queued in `sessions.queued_messages`; t
 
 Idle sandboxes (`crates/trex-server/src/idle.rs`): every minute, sessions not running whose `updated_at` is older than the idle timeout have their sandbox stopped and `sessions.sandbox_stopped` set. The row stays locked (`FOR UPDATE SKIP LOCKED`) while stopping, so a run can't start mid-stop; starting always checks the real phase, so the flag is only a hint.
 
+The agent's system prompt is `crates/trex-server/src/instructions.md` (today's date is appended per run). It is model-facing: never name the agent trex in it, or in anything else the model reads; trex is the harness, not the assistant.
+
 Runs are spawned per session (`crates/trex-server/src/runs.rs`): one at a time, enforced by a conditional update in Postgres. Each run holds a lease (`sessions.run_id` + `run_heartbeat_at`, renewed every 10s); every instance sweeps for runs whose heartbeat is older than 30s (a restart or a crashed instance) and resumes them from saved history (`run.resumed`). A run that loses its lease stops without touching the session. History is saved item by item as the agent produces it (`agent::Journal`, keyed by position so a repeated save is a no-op), and stays strictly append-only: dangling tool calls are closed by appending outputs, never inserting. A resumed run whose history already ends with the model's reply just finishes.
 
 ## Rust practices

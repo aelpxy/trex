@@ -12,7 +12,9 @@ const UNANSWERED: &str = "The user did not answer and sent a new message instead
 const INTERRUPTED: &str = "The tool call was interrupted before it finished.";
 
 // marks the developer message that replaces everything before it in the model's context
-const CHECKPOINT_HEADER: &str = "[trex context checkpoint]";
+const CHECKPOINT_HEADER: &str = "[context checkpoint]";
+// written by earlier versions; still recognised so their history keeps its checkpoints
+const LEGACY_CHECKPOINT_HEADER: &str = "[trex context checkpoint]";
 const CHECKPOINT_INTRO: &str = "The conversation above this point was compacted to save context. \
 Below are the user's most recent messages, oldest first, then a summary of the work so far. \
 Continue from where it left off; if a task was in progress, keep working on it without asking the user to repeat themselves.";
@@ -46,7 +48,10 @@ pub fn checkpoint_text(item: &Value) -> Option<&str> {
     if item["role"] != "developer" {
         return None;
     }
-    item["content"].as_str()?.strip_prefix(CHECKPOINT_HEADER)
+    let content = item["content"].as_str()?;
+    content
+        .strip_prefix(CHECKPOINT_HEADER)
+        .or_else(|| content.strip_prefix(LEGACY_CHECKPOINT_HEADER))
 }
 
 pub fn context_start(history: &[InputItem]) -> usize {
@@ -307,6 +312,9 @@ mod tests {
         assert!(text.contains("<user_message>\nsecond\n</user_message>"));
         assert!(text.contains("<summary>\ndid two\n</summary>"));
         assert!(checkpoint_text(&json!({"role": "user", "content": CHECKPOINT_HEADER})).is_none());
+        let legacy =
+            json!({"role": "developer", "content": format!("{LEGACY_CHECKPOINT_HEADER}\nsummary")});
+        assert_eq!(checkpoint_text(&legacy), Some("\nsummary"));
     }
 
     #[test]

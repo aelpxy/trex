@@ -40,13 +40,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const RUN_STALE_AFTER: Duration = Duration::from_secs(30);
 const RESUME_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const RESUME_BATCH: i64 = 20;
-const INSTRUCTIONS: &str = "You are trex, an autonomous agent working for the user inside a Linux sandbox. \
-Your working directory is /sandbox, which persists for this conversation. Use your tools to do the work rather than \
-describing it: run commands, read and edit files, search the web when needed, and verify your results. \
-Python, Node, Go, Rust and common build tools are installed; install anything else with pip, uv, npm, go, cargo, \
-or micromamba (apt is not available). The user's personal library is reachable with the library tools; save \
-deliverables there when the user should keep them. Ask the user only when you need a decision or information you \
-cannot find yourself. Be concise in your replies.";
+const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 #[derive(Default)]
 pub struct Runs {
@@ -398,7 +392,7 @@ async fn drive(
         tools: &state.tools,
         openshell: &state.openshell,
         sandbox: &sandbox,
-        instructions: Some(INSTRUCTIONS.into()),
+        instructions: Some(instructions()),
         reasoning_effort,
         max_turns: MAX_TURNS,
         cache_key: Some(id.to_string()),
@@ -442,6 +436,14 @@ async fn drive(
             }
         }
     }
+}
+
+// the date changes once a day, so it costs the prompt cache little
+fn instructions() -> String {
+    format!(
+        "{INSTRUCTIONS}\nToday's date is {}.",
+        chrono::Utc::now().format("%Y-%m-%d")
+    )
 }
 
 struct SessionSandbox<'a> {
