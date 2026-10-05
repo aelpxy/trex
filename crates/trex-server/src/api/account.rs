@@ -1,26 +1,33 @@
-use std::{
-    sync::{Arc, LazyLock},
-    time::Duration,
-};
+use std::sync::{Arc, LazyLock};
 
 use anyhow::Context;
 use argon2::{
     Argon2,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
-use trex_store::accounts;
+use trex_store::{
+    accounts,
+    user_sessions::{NewSession, UserSession},
+};
 use utoipa::ToSchema;
 
 use super::{
-    AppState,
-    auth::{Account, hash_token, new_token},
+    AppState, List,
+    auth::{
+        Account, Client, SESSION_LIFETIME, cleared_cookie, hash_token, new_token, session_cookie,
+    },
     error::{ApiError, ErrorResponse},
-    ids::{self, USER, WORKSPACE},
+    ids::{self, SIGN_IN, USER, WORKSPACE},
 };
 
-const TOKEN_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+type SetCookie = [(header::HeaderName, HeaderValue); 1];
 const MIN_PASSWORD_CHARS: usize = 8;
 const MAX_PASSWORD_BYTES: usize = 1024;
 const MAX_NAME_CHARS: usize = 100;
@@ -59,19 +66,42 @@ pub struct UpdateAccount {
 #[derive(Deserialize, ToSchema)]
 pub struct ChangePassword {
     current_password: String,
-    /// At least 8 characters. Every other token of the account is revoked.
+    /// At least 8 characters. The account's other sessions are signed out.
     new_password: String,
 }
 
-/// A bearer token for the `Authorization` header, valid for 30 days.
+/// A signed-in browser.
 #[derive(Serialize, ToSchema)]
-pub struct Token {
-    #[schema(example = "token")]
+pub struct SignInSession {
+    #[schema(example = "signin_0199b3c1d6a07c3e8b1f2a4d5e6f7a8b")]
+    id: String,
+    #[schema(example = "sign_in_session")]
     object: &'static str,
-    #[schema(example = "trex_5f2b...")]
-    token: String,
-    user: User,
-    workspaces: Vec<Workspace>,
+    /// Where it signed in from.
+    ip: Option<String>,
+    /// Where it was last used from.
+    last_ip: Option<String>,
+    user_agent: Option<String>,
+    /// Whether this is the session making the request.
+    current: bool,
+    /// Unix seconds.
+    created_at: i64,
+    last_used_at: i64,
+    expires_at: i64,
+}
+
+pub fn session_object(session: &UserSession, current: Option<uuid::Uuid>) -> SignInSession {
+    SignInSession {
+        id: ids::encode(SIGN_IN, session.id),
+        object: "sign_in_session",
+        ip: session.ip.clone(),
+        last_ip: session.last_ip.clone(),
+        user_agent: session.user_agent.clone(),
+        current: current == Some(session.id),
+        created_at: session.created_at,
+        last_used_at: session.last_used_at,
+        expires_at: session.expires_at,
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -88,11 +118,29 @@ pub struct User {
     created_at: i64,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     User,
     Admin,
+}
+
+impl From<accounts::UserRole> for Role {
+    fn from(role: accounts::UserRole) -> Self {
+        match role {
+            accounts::UserRole::User => Self::User,
+            accounts::UserRole::Admin => Self::Admin,
+        }
+    }
+}
+
+impl From<Role> for accounts::UserRole {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::User => Self::User,
+            Role::Admin => Self::Admin,
+        }
+    }
 }
 
 /// Chats, projects, the library and credits belong to a workspace. Requests act in the
@@ -124,7 +172,7 @@ pub struct Me {
 
 /// Sign up
 ///
-/// Creates an account with a personal workspace and signs it in.
+/// Creates an account with a personal workspace and signs it in with an HttpOnly session cookie.
 #[utoipa::path(
     post,
     operation_id = "signup",
@@ -132,15 +180,16 @@ pub struct Me {
     tag = "account",
     request_body = Signup,
     responses(
-        (status = 201, body = Token),
+        (status = 201, body = Me),
         (status = 400, response = ErrorResponse),
         (status = 409, description = "The email is already registered", body = ErrorResponse),
     ),
 )]
 pub async fn signup(
     State(state): State<Arc<AppState>>,
+    client: Client,
     Json(body): Json<Signup>,
-) -> Result<(StatusCode, Json<Token>), ApiError> {
+) -> Result<(StatusCode, SetCookie, Json<Me>), ApiError> {
     let email = valid_email(&body.email)?;
     let name = valid_name(&body.name)?;
     valid_password(&body.password, "password")?;
@@ -150,17 +199,17 @@ pub async fn signup(
         .create_user(&email, &name, &hash)
         .await?
         .ok_or_else(|| ApiError::Conflict("an account with this email already exists".into()))?;
-    let token = issue_token(&state, user.id).await?;
-    let token = Token {
-        object: "token",
-        token,
+    let cookie = sign_in(&state, user.id, &client).await?;
+    let me = Me {
         user: user_object(&user),
         workspaces: vec![workspace_object(&workspace)],
     };
-    Ok((StatusCode::CREATED, Json(token)))
+    Ok((StatusCode::CREATED, cookie, Json(me)))
 }
 
 /// Log in
+///
+/// Signs in with an HttpOnly session cookie, valid for 30 days.
 #[utoipa::path(
     post,
     operation_id = "login",
@@ -168,14 +217,15 @@ pub async fn signup(
     tag = "account",
     request_body = Login,
     responses(
-        (status = 200, body = Token),
+        (status = 200, body = Me),
         (status = 401, description = "Wrong email or password", body = ErrorResponse),
     ),
 )]
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    client: Client,
     Json(body): Json<Login>,
-) -> Result<Json<Token>, ApiError> {
+) -> Result<(SetCookie, Json<Me>), ApiError> {
     let found = state.store.user_by_email(body.email.trim()).await?;
     let hash = found
         .as_ref()
@@ -184,19 +234,18 @@ pub async fn login(
     let Some((user, _)) = found.filter(|_| matches) else {
         return Err(ApiError::Authentication("wrong email or password".into()));
     };
-    let token = issue_token(&state, user.id).await?;
+    let cookie = sign_in(&state, user.id, &client).await?;
     let workspaces = state.store.workspaces(user.id).await?;
-    Ok(Json(Token {
-        object: "token",
-        token,
+    let me = Me {
         user: user_object(&user),
         workspaces: workspaces.iter().map(workspace_object).collect(),
-    }))
+    };
+    Ok((cookie, Json(me)))
 }
 
 /// Log out
 ///
-/// Revokes the token used for this request.
+/// Ends this session and clears its cookie.
 #[utoipa::path(
     post,
     operation_id = "logout",
@@ -207,8 +256,93 @@ pub async fn login(
 pub async fn logout(
     State(state): State<Arc<AppState>>,
     account: Account,
+) -> Result<(StatusCode, SetCookie), ApiError> {
+    state
+        .store
+        .delete_user_session(account.user, account.session)
+        .await?;
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, cleared_cookie(state.secure_cookies))],
+    ))
+}
+
+/// List your sessions
+///
+/// Every browser signed in to this account, most recently used first.
+#[utoipa::path(
+    get,
+    operation_id = "list_my_sessions",
+    path = "/me/sessions",
+    tag = "account",
+    responses((status = 200, body = List<SignInSession>), (status = 401, response = ErrorResponse)),
+)]
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    account: Account,
+) -> Result<Json<List<SignInSession>>, ApiError> {
+    let sessions = state.store.user_sessions(account.user).await?;
+    let data = sessions
+        .iter()
+        .map(|session| session_object(session, Some(account.session)))
+        .collect();
+    Ok(Json(List::new(data, false)))
+}
+
+/// Sign out a session
+///
+/// Ending the current session also clears its cookie.
+#[utoipa::path(
+    delete,
+    operation_id = "delete_my_session",
+    path = "/me/sessions/{id}",
+    tag = "account",
+    params(("id" = String, Path, description = "Session id")),
+    responses(
+        (status = 204),
+        (status = 401, response = ErrorResponse),
+        (status = 404, response = ErrorResponse),
+    ),
+)]
+pub async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    account: Account,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let not_found = || ApiError::NotFound(format!("no session {id}"));
+    let session = ids::decode(SIGN_IN, &id).ok_or_else(not_found)?;
+    if !state
+        .store
+        .delete_user_session(account.user, session)
+        .await?
+    {
+        return Err(not_found());
+    }
+    if session == account.session {
+        let cookie = [(header::SET_COOKIE, cleared_cookie(state.secure_cookies))];
+        return Ok((StatusCode::NO_CONTENT, cookie).into_response());
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Sign out other sessions
+///
+/// Ends every session of this account except the one making the request.
+#[utoipa::path(
+    post,
+    operation_id = "delete_other_sessions",
+    path = "/me/sessions/sign_out_others",
+    tag = "account",
+    responses((status = 204), (status = 401, response = ErrorResponse)),
+)]
+pub async fn sign_out_others(
+    State(state): State<Arc<AppState>>,
+    account: Account,
 ) -> Result<StatusCode, ApiError> {
-    state.store.delete_token(&account.token_hash).await?;
+    state
+        .store
+        .delete_user_sessions(account.user, Some(account.session))
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -255,7 +389,7 @@ pub async fn update_me(
 
 /// Change the password
 ///
-/// Other sessions are signed out; the token used for this request stays valid.
+/// Other sessions are signed out; this one stays signed in.
 #[utoipa::path(
     post,
     operation_id = "change_password",
@@ -291,7 +425,7 @@ pub async fn change_password(
         .await?;
     state
         .store
-        .delete_other_tokens(account.user, &account.token_hash)
+        .delete_user_sessions(account.user, Some(account.session))
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -309,13 +443,27 @@ async fn load_me(state: &AppState, user: uuid::Uuid) -> Result<Me, ApiError> {
     })
 }
 
-async fn issue_token(state: &AppState, user: uuid::Uuid) -> Result<String, ApiError> {
+// starts a session and returns the cookie that carries it
+async fn sign_in(
+    state: &AppState,
+    user: uuid::Uuid,
+    client: &Client,
+) -> Result<SetCookie, ApiError> {
     let token = new_token()?;
     state
         .store
-        .create_token(user, &hash_token(&token), TOKEN_LIFETIME)
+        .create_user_session(NewSession {
+            user,
+            token_hash: &hash_token(&token),
+            lifetime: SESSION_LIFETIME,
+            ip: client.ip.as_deref(),
+            user_agent: client.user_agent.as_deref(),
+        })
         .await?;
-    Ok(token)
+    Ok([(
+        header::SET_COOKIE,
+        session_cookie(&token, state.secure_cookies),
+    )])
 }
 
 // argon2 is deliberately slow, so it runs off the async workers
@@ -382,10 +530,7 @@ fn user_object(user: &accounts::User) -> User {
         object: "user",
         email: user.email.clone(),
         name: user.name.clone(),
-        role: match user.role {
-            accounts::UserRole::User => Role::User,
-            accounts::UserRole::Admin => Role::Admin,
-        },
+        role: Role::from(user.role),
         created_at: user.created_at,
     }
 }

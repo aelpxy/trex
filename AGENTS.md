@@ -25,7 +25,8 @@ Shared dependency versions live in the root `[workspace.dependencies]`; crates o
 - `cargo clippy --workspace --all-targets` must be warning-free; `cargo fmt` before committing
 - `cargo test --workspace`; `cargo test --workspace -- --ignored` for live tests (OpenShell gateway, the Responses API from `trex.toml`, Postgres/Redis from `.env`)
 - `cargo run -p trex-eval -- [--repeat N] [--concurrency N] [--effort LEVEL] [SCENARIO...]` runs the eval suite and writes `target/eval/last-run.json`. Run it before and after agent or prompt changes. It starts its own trex (random port, `target/eval/trex.toml` = `trex.toml` plus `eval-small-context` for compaction and a 15s idle timeout) and uses fixed eval accounts; scenarios live in `scenarios.rs` (`: exclusive` ones restart the server and run last)
-- Frontend (`frontend/`, pnpm only): `pnpm dev` (proxies `/api` to `TREX_URL`, default `http://127.0.0.1:8080`), `pnpm typecheck`
+- The `trex` binary serves the web app too (`web.rs`): `pnpm --dir frontend build`, then `cargo build --release` embeds `frontend/build/client` with `rust-embed` (debug builds read it from disk, so a rebuilt frontend shows without recompiling). Every path that isn't the api (`/v1/...`, `/health`, `/docs`, `/openapi.json`) gets the app's file or `index.html`; `/assets/*` is cached as immutable, `index.html` never. Unknown `/v1/...` paths get the api's JSON 404. A build without the frontend still compiles and only serves the api.
+- Frontend development (`frontend/`, pnpm only): `pnpm dev` serves it with hot reload on :5173 and proxies `/v1` to `TREX_URL` (default `http://127.0.0.1:8080`); `pnpm typecheck`
 - CI (`.github/workflows/ci.yml`) runs fmt, clippy with `-D warnings`, the unit tests, and the frontend typecheck and build on every push and pull request; live tests and evals stay local
 - Sandbox image, built with the gateway's engine on the gateway host: `podman build -t localhost/trex-sandbox:latest images/sandbox`
 - Dev gateway: it listens on loopback on `fedora-server`; tunnel with `ssh -fN -L 17670:127.0.0.1:17670 fedora-server`
@@ -39,6 +40,7 @@ Loaded once in `crates/trex-server/src/config.rs` into `Config` from env vars (`
 - `TREX_OPENSHELL_ENDPOINT` (default `https://127.0.0.1:17670`), `TREX_OPENSHELL_TLS_DIR` (default `certs/openshell` with `ca.crt`, `tls.crt`, `tls.key`; `certs/` is gitignored)
 - `TREX_SANDBOX_IMAGE` (default `localhost/trex-sandbox:latest`), `TREX_SANDBOX_POLICY` (default `sandbox-policy.yaml`), `TREX_SANDBOX_IDLE_SECS` (default `300`)
 - `TREX_LIBRARY_DIR` (default `data/library`) or `TREX_S3_BUCKET` + `TREX_S3_ENDPOINT`/`_REGION`/`_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY`/`_FORCE_PATH_STYLE` for any S3-compatible provider
+- `TREX_INSECURE_COOKIES` (default `false`; `true` drops `Secure` from the session cookie for plain-http access other than localhost), `TREX_TRUST_PROXY_HEADERS` (default `false`; `true` reads the client IP from `X-Forwarded-For`, only behind a proxy you control; the Vite dev proxy sends it)
 - `TREX_PREVIEW_ADDR` (default `127.0.0.1:8081`), `TREX_PREVIEW_URL` (default `http://{id}.preview.localhost:8081`; `{id}` must start the host)
 
 `trex.toml` is the operator's model catalog (`Models::from_toml`). It holds provider api keys, so it's gitignored; `trex.toml.example` is the template:
@@ -58,7 +60,7 @@ reasoning_efforts = ["low", "medium", "high"] # optional levels sessions may pic
 fast = true             # optional, allows the priority service tier
 price = { input = 1_250_000, cached_input = 125_000, output = 10_000_000 } # optional credits per million tokens; fast_multiplier defaults to 2
 
-[plans.free]            # optional; without plans, credits are tracked but not enforced
+[plans.free]            # optional; plans top balances up monthly, without them only admins add funds
 name = "Free"
 monthly_credits = 5_000_000 # $5; the balance is topped up to this once a month
 ```
@@ -67,7 +69,7 @@ monthly_credits = 5_000_000 # $5; the balance is topped up to this once a month
 
 - The workspace is the tenant. Sessions, projects, the library, sandboxes, usage and credits belong to a workspace; users are members (`workspace_members`, one personal workspace each for now). Every store function on tenant data takes the workspace id and filters by it.
 - Users have a `role`, `user` or `admin`; admins use `/v1/admin` and the Admin page. Grant or revoke it with `trex admin grant|revoke <email>` (runs against the configured database and exits).
-- Auth is email + password (argon2id, hashed on a blocking thread). Signup and login return a bearer token (`trex_` + 64 hex, 30 days; only its sha256 is stored). `api::auth::Auth` resolves the user and workspace (`Trex-Workspace: ws_...` header, or the user's first) and handlers use `Auth.workspace` as the tenant; `api::auth::Account` is for endpoints that aren't workspace scoped. Email verification and password reset are not built yet (`users.email_verified_at` exists for it).
+- Auth is email + password (argon2id, hashed on a blocking thread). Signing up or in starts a sign-in session (`user_sessions`: sha256 of a random token, 30 days, with the IP and user agent it started from and the last IP it was used from) and sets it as a `session` cookie: `HttpOnly; SameSite=Lax; Path=/; Secure` (`TREX_INSECURE_COOKIES=true` drops `Secure` for plain-http setups; the eval uses it). There are no bearer tokens. Requests that change data must also send an `X-Requested-With` header (`auth::require_csrf_header`), which other sites can't add without a CORS preflight trex never allows. The client IP is the peer address, or the first `X-Forwarded-For` entry only with `TREX_TRUST_PROXY_HEADERS=true`. `api::auth::Account` is the signed-in user and session; `api::auth::Auth` resolves their workspace (the `Trex-Workspace: ws_...` header, or their first workspace) and every workspace handler uses `Auth.workspace` as the tenant. Users list and end their own sessions (`/v1/me/sessions`); admins list and end anyone's (`/v1/admin/users/{id}/sessions`). Email verification and password reset come later (`users.email_verified_at` exists for it).
 - OpenShell: one OpenShell workspace per trex workspace (`workspace_name(uuid)` = `u-` + 17 hex chars of sha256, labelled `trex-workspace=<uuid>`, or the legacy `trex-user=<uuid>`, verified on every `ensure_workspace`). trex's mTLS identity is a gateway platform admin, so trex enforces tenancy: never build a `Sandbox { workspace, name }` for a request from anything but its own workspace.
 
 ## Agent
@@ -80,7 +82,7 @@ monthly_credits = 5_000_000 # $5; the balance is topped up to this once a month
 - **Runs** (`runs.rs`): one per session, claimed with a conditional update. Each holds a lease (`sessions.run_id` + `run_heartbeat_at`, renewed every 10s); every instance resumes runs whose heartbeat is over 30s old (`run.resumed`). A run that loses its lease stops without touching the session; a resumed run whose history already ends with a reply just finishes.
 - **Steering**: messages sent mid-run are queued in `sessions.queued_messages`; the agent takes them before every step and when it would finish (`agent::Inbox`). A run only finishes while the queue is empty, so a message sent as it ends continues it; cancelled and failed runs save leftover messages. An interrupt (`agent::Steering::interrupts`, in-memory per instance) drops the current step and closes unfinished tool calls as interrupted.
 - **Plans**: `update_plan` keeps a checklist (`plan.updated`); finishing with unfinished steps appends a `[plan reminder]` developer message once per plan. Developer messages are hidden from the items API except checkpoints.
-- **Credits** (`credits.rs`) are US dollars in millionths: 1 credit = $0.000001, so `1_000_000` is $1. Each response is charged `ceil((uncached × input + cached × cached_input + output × output) × fast_multiplier? / 1M)` from the model's `price`, recorded with its ledger entry in one transaction (`Store::charge_usage`). With plans configured, `credits::require` refills the monthly allowance and refuses new messages at zero (402 `insufficient_credits_error`); a running agent checks `agent::Budget` before each request after its first and stops with `run.failed` `code: insufficient_credits`. Title generation isn't charged.
+- **Credits** (`credits.rs`) are US dollars in millionths: 1 credit = $0.000001, so `1_000_000` is $1. Each response is charged `ceil((uncached × input + cached × cached_input + output × output) × fast_multiplier? / 1M)` from the model's `price`, recorded with its ledger entry in one transaction (`Store::charge_usage`). `credits::require` refills the monthly allowance when plans are configured, and always refuses new messages at $0 (402 `insufficient_credits_error`), so new users need a plan or funds from an admin before they can chat; a running agent checks `agent::Budget` before each request after its first and stops with `run.failed` `code: insufficient_credits`. Title generation isn't charged.
 
 ## Tools
 
@@ -109,8 +111,8 @@ Style: plural resources, prefixed ids (`sess_`, `ws_`, `proj_`, ...), an `object
 
 Docs: `GET /docs` (Scalar) renders `GET /openapi.json`, generated by utoipa. Every handler has a `#[utoipa::path]` (summary, `operation_id`, tag, params, `ErrorResponse` responses) and is registered with `routes!` in `api::routes()`; `{*path}` wildcard routes are registered by hand and their docs merged in. `spec_documents_every_route` lists every path. Bodies are typed structs deriving `ToSchema`, never `json!`.
 
-- Auth and account: `POST /v1/auth/signup|login|logout`, `GET|PATCH /v1/me`, `POST /v1/me/password` (revokes the other tokens)
-- `GET /v1/models`: `{id, name, context_window, reasoning_efforts, fast}` in `trex.toml` order
+- Auth and account: `POST /v1/auth/signup|login|logout` (set or clear the session cookie), `GET|PATCH /v1/me`, `POST /v1/me/password` (signs out the other sessions), `GET /v1/me/sessions`, `DELETE /v1/me/sessions/{id}`, `POST /v1/me/sessions/sign_out_others`
+- `GET /v1/models`: `{id, name, context_window, reasoning_efforts, fast}` in `trex.toml` order, limited to the workspace's `allowed_models` when an admin set them; creating, switching or running a chat on another model is refused (403)
 - Sessions: `POST|GET /v1/sessions` (`?project_id=none` lists chats outside projects), `GET|PATCH|DELETE /v1/sessions/{id}`. `PATCH {title?, project_id?, model?, reasoning_effort?, fast?}`; model changes apply from the next run. Titles are generated after the first message (`session.updated`).
 - Projects: `POST|GET /v1/projects`, `GET|PATCH|DELETE /v1/projects/{id}`; optional `instructions` apply to every chat in them; deleting keeps the chats
 - `GET /v1/sessions/{id}/items` (`message`, `tool_call`, `tool_result`, `reasoning`, `compaction`, each with `seq` and `created_at`), `GET /v1/sessions/{id}/usage` (per response, with `duration_ms` and `first_token_ms`)
@@ -122,14 +124,15 @@ Docs: `GET /docs` (Scalar) renders `GET /openapi.json`, generated by utoipa. Eve
 - `POST /v1/sessions/{id}/previews` `{port}` returns a preview `url`
 - `GET /v1/sessions/{id}/files`, `GET|PUT|DELETE /v1/sessions/{id}/files/{path}`, `POST .../files/move`
 - Library: `GET /v1/library?prefix`, `GET|PUT|DELETE /v1/library/files/{path}`, `POST /v1/library/move` (never overwrites); `GET /v1/attachments/{id}`
-- Credits: `GET /v1/plans`, `GET /v1/credits`, `GET /v1/credits/ledger`; admin (users with `role: admin`): `GET /v1/admin/workspaces`, `POST /v1/admin/workspaces/{id}/credits|plan`
+- Credits: `GET /v1/plans`, `GET /v1/credits`, `GET /v1/credits/ledger`; admin (users with `role: admin`): `GET /v1/admin/overview|usage|logs|models`, `GET /v1/admin/users`, `PATCH /v1/admin/users/{id}` `{role}`, `POST /v1/admin/users/{id}/sign_out`, `GET /v1/admin/users/{id}/sessions`, `DELETE /v1/admin/users/{id}/sessions/{session_id}`, `GET /v1/admin/workspaces`, `PATCH /v1/admin/workspaces/{id}` `{allowed_models}`, `GET /v1/admin/workspaces/{id}/library`, `GET /v1/admin/workspaces/{id}/library/files/{path}`, `POST /v1/admin/workspaces/{id}/credits|plan`
 
 Events: `run.started`, `run.resumed`, `sandbox.creating`, `sandbox.starting`, `sandbox.ready`, `sandbox.replaced`, `text.delta`, `reasoning.delta`, `tool.call.started`, `tool.call.delta`, `tool.call`, `tool.output`, `tool.result`, `file.changed`, `plan.updated`, `preview.opened`, `usage`, `access.requested`, `question`, `model.retrying`, `context.compacting`, `context.compacted`, `message.received`, `run.interrupted`, `session.updated`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
 
 ## Frontend
 
-- `frontend/app`: `routes/` (layout with auth guard, chat, library, auth, scheduled, admin), `components/` (the owner's UI components), `lib/` (`api.ts` fetch client and SSE reader, `trex.ts` API types and calls).
-- The bearer token is in localStorage (`trex-token`); `Trex-Workspace` comes from the saved UI state. SSE is read with fetch (EventSource can't send the token) and reconnects with `Last-Event-ID`.
+- `frontend/app`: `routes/` (layout with auth guard, chat, library, auth, account, scheduled, and `admin/` as nested routes per tab), `components/` (the owner's UI components; admin and account ones in their folders), `lib/` (`api.ts` fetch client and SSE reader, `trex.ts` API types and calls, `queries.ts` TanStack Query definitions, `query-client.ts`).
+- Server state goes through TanStack Query: every read is a `queryOptions()` in `lib/queries.ts`; route `clientLoader`s prefetch with `queryClient.ensureQueryData` and components read with `useSuspenseQuery`; writes are `useMutation`s that invalidate the affected keys. URL state (filters, tabs, ranges) lives in search params. The chat's live event stream is the exception: it's SSE, handled in `use-chat.ts`.
+- The session is an HttpOnly cookie the browser sends itself; `lib/api.ts` adds `X-Requested-With` and `Trex-Workspace` (from the saved UI state). SSE is read with fetch and reconnects with `Last-Event-ID`.
 - `components/chat/use-chat.ts` maps events into message parts (`events.ts` is the reducer); reloading mid-run replays it with `?from=run`.
 - Previews of agent output run in sandboxed iframes: HTML and React files (`lib/react-preview.ts`, React and npm imports from esm.sh, Tailwind from its browser build) at an opaque origin, live servers at their preview origin.
 - Don't restyle or restructure the owner's components beyond wiring; new components follow the existing styles (`components/ui/styles.ts`). Verify with `pnpm typecheck`; the owner tests in the browser.

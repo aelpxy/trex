@@ -15,6 +15,8 @@ pub struct Config {
     // serves running apps from sandboxes, each on its own origin
     pub preview_addr: SocketAddr,
     pub preview_url: PreviewUrl,
+    pub secure_cookies: bool,
+    pub trust_proxy_headers: bool,
     pub log_format: LogFormat,
     pub openshell_endpoint: String,
     pub openshell_tls_dir: PathBuf,
@@ -81,6 +83,9 @@ impl Config {
                 .unwrap_or_else(|_| "http://{id}.preview.localhost:8081".into()),
         )?;
 
+        let secure_cookies = !flag("TREX_INSECURE_COOKIES")?;
+        let trust_proxy_headers = flag("TREX_TRUST_PROXY_HEADERS")?;
+
         let log_format = match env::var("TREX_LOG_FORMAT").as_deref() {
             Err(_) | Ok("text") => LogFormat::Text,
             Ok("json") => LogFormat::Json,
@@ -124,6 +129,8 @@ impl Config {
             addr,
             preview_addr,
             preview_url,
+            secure_cookies,
+            trust_proxy_headers,
             log_format,
             openshell_endpoint,
             openshell_tls_dir,
@@ -136,6 +143,15 @@ impl Config {
             sandbox_idle_timeout,
             library,
         })
+    }
+}
+
+// an optional true/false setting, off when unset
+fn flag(name: &str) -> anyhow::Result<bool> {
+    match env::var(name).as_deref() {
+        Err(_) | Ok("") | Ok("false") | Ok("0") => Ok(false),
+        Ok("true") | Ok("1") => Ok(true),
+        Ok(other) => bail!("{name} must be true or false, not {other:?}"),
     }
 }
 

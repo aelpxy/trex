@@ -27,8 +27,6 @@ pub struct Credits {
     /// Credits are millionths of a US dollar: 1,000,000 is $1.
     balance: i64,
     plan: Option<Plan>,
-    /// Whether messages are refused at zero; off when the server has no plans configured.
-    enforced: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -69,7 +67,7 @@ pub struct LedgerQuery {
 
 /// List plans
 ///
-/// The plans this server offers, sorted by monthly credits; empty when credits aren't enforced.
+/// The plans this server offers, sorted by monthly credits.
 #[utoipa::path(
     get,
     operation_id = "list_plans",
@@ -112,12 +110,7 @@ pub async fn get(
     State(state): State<Arc<AppState>>,
     Auth { workspace, .. }: Auth,
 ) -> Result<Json<Credits>, ApiError> {
-    let enforced = state.plans.enforced();
-    let balance = if enforced {
-        credits::refilled_balance(&state, workspace).await?
-    } else {
-        state.store.credit_balance(workspace).await?
-    };
+    let balance = credits::refilled_balance(&state, workspace).await?;
     let plan_id = state
         .store
         .workspace_plan(workspace)
@@ -132,7 +125,6 @@ pub async fn get(
         object: "credits",
         balance,
         plan,
-        enforced,
     }))
 }
 

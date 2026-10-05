@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::Context;
 use sqlx::{FromRow, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -32,7 +30,7 @@ impl UserRole {
         }
     }
 
-    fn parse(value: &str) -> Self {
+    pub(crate) fn parse(value: &str) -> Self {
         if value == "admin" {
             Self::Admin
         } else {
@@ -48,6 +46,8 @@ pub struct WorkspaceSummary {
     pub plan: String,
     pub credits: i64,
     pub owner_email: Option<String>,
+    // none means every model
+    pub allowed_models: Option<Vec<String>>,
     pub created_at: i64,
 }
 
@@ -171,7 +171,7 @@ impl Store {
     // every workspace, newest first, for admins
     pub async fn all_workspaces(&self) -> anyhow::Result<Vec<WorkspaceSummary>> {
         let rows = sqlx::query(
-            "SELECT w.id, w.name, w.plan, w.credits, EXTRACT(EPOCH FROM w.created_at)::BIGINT AS created_at, \
+            "SELECT w.id, w.name, w.plan, w.credits, w.allowed_models, EXTRACT(EPOCH FROM w.created_at)::BIGINT AS created_at, \
              (SELECT u.email FROM workspace_members m JOIN users u ON u.id = m.user_id \
               WHERE m.workspace_id = w.id ORDER BY m.role = 'owner' DESC, u.created_at LIMIT 1) AS owner_email \
              FROM workspaces w ORDER BY w.created_at DESC",
@@ -187,10 +187,37 @@ impl Store {
                     plan: row.try_get("plan")?,
                     credits: row.try_get("credits")?,
                     owner_email: row.try_get("owner_email")?,
+                    allowed_models: row.try_get("allowed_models")?,
                     created_at: row.try_get("created_at")?,
                 })
             })
             .collect()
+    }
+
+    // the models a workspace may use; none means every model
+    pub async fn workspace_models(&self, workspace: Uuid) -> anyhow::Result<Option<Vec<String>>> {
+        let models: Option<Option<Vec<String>>> =
+            sqlx::query_scalar("SELECT allowed_models FROM workspaces WHERE id = $1")
+                .bind(workspace)
+                .fetch_optional(&self.pg)
+                .await
+                .context("failed to load workspace models")?;
+        Ok(models.flatten())
+    }
+
+    // false when there's no such workspace
+    pub async fn set_workspace_models(
+        &self,
+        workspace: Uuid,
+        models: Option<&[String]>,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query("UPDATE workspaces SET allowed_models = $2 WHERE id = $1")
+            .bind(workspace)
+            .bind(models)
+            .execute(&self.pg)
+            .await
+            .context("failed to set workspace models")?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn update_user(
@@ -261,56 +288,6 @@ impl Store {
     }
 
     // only the hash is stored, so a database leak doesn't leak working tokens
-    pub async fn create_token(
-        &self,
-        user: Uuid,
-        token_hash: &[u8],
-        lifetime: Duration,
-    ) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO auth_tokens (id, user_id, token_hash, expires_at) \
-             VALUES ($1, $2, $3, NOW() + MAKE_INTERVAL(secs => $4))",
-        )
-        .bind(Uuid::now_v7())
-        .bind(user)
-        .bind(token_hash)
-        .bind(lifetime.as_secs_f64())
-        .execute(&self.pg)
-        .await
-        .context("failed to create token")?;
-        Ok(())
-    }
-
-    pub async fn token_user(&self, token_hash: &[u8]) -> anyhow::Result<Option<Uuid>> {
-        sqlx::query_scalar(
-            "UPDATE auth_tokens SET last_used_at = NOW() WHERE token_hash = $1 AND expires_at > NOW() \
-             RETURNING user_id",
-        )
-        .bind(token_hash)
-        .fetch_optional(&self.pg)
-        .await
-        .context("failed to check token")
-    }
-
-    pub async fn delete_token(&self, token_hash: &[u8]) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM auth_tokens WHERE token_hash = $1")
-            .bind(token_hash)
-            .execute(&self.pg)
-            .await
-            .context("failed to delete token")?;
-        Ok(())
-    }
-
-    // signs the user out everywhere except the token they are using
-    pub async fn delete_other_tokens(&self, user: Uuid, keep: &[u8]) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM auth_tokens WHERE user_id = $1 AND token_hash <> $2")
-            .bind(user)
-            .bind(keep)
-            .execute(&self.pg)
-            .await
-            .context("failed to delete tokens")?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -391,31 +368,6 @@ mod tests {
                 .is_some()
         );
         assert!(store.membership(sam.id, theirs.id).await.unwrap().is_none());
-
-        store
-            .create_token(sam.id, b"token-a", Duration::from_secs(60))
-            .await
-            .unwrap();
-        store
-            .create_token(sam.id, b"token-b", Duration::from_secs(60))
-            .await
-            .unwrap();
-        store
-            .create_token(sam.id, b"token-old", Duration::ZERO)
-            .await
-            .unwrap();
-        assert_eq!(store.token_user(b"token-a").await.unwrap(), Some(sam.id));
-        assert_eq!(
-            store.token_user(b"token-old").await.unwrap(),
-            None,
-            "expired"
-        );
-        assert_eq!(store.token_user(b"nope").await.unwrap(), None);
-        store.delete_other_tokens(sam.id, b"token-a").await.unwrap();
-        assert_eq!(store.token_user(b"token-b").await.unwrap(), None);
-        assert_eq!(store.token_user(b"token-a").await.unwrap(), Some(sam.id));
-        store.delete_token(b"token-a").await.unwrap();
-        assert_eq!(store.token_user(b"token-a").await.unwrap(), None);
 
         for (user, workspace) in [(sam.id, personal.id), (eve.id, theirs.id)] {
             sqlx::query("DELETE FROM users WHERE id = $1")

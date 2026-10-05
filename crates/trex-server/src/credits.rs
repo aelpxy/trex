@@ -37,7 +37,8 @@ impl Plans {
         Ok(Self { plans: file.plans })
     }
 
-    pub fn enforced(&self) -> bool {
+    // without plans, balances only change when an admin adjusts them
+    pub fn any(&self) -> bool {
         !self.plans.is_empty()
     }
 
@@ -52,9 +53,6 @@ impl Plans {
 
 // the balance after this month's refill; refuses when nothing is left
 pub async fn require(state: &AppState, workspace: Uuid) -> Result<i64, ApiError> {
-    if !state.plans.enforced() {
-        return Ok(state.store.credit_balance(workspace).await?);
-    }
     let balance = refilled_balance(state, workspace).await?;
     if balance <= 0 {
         return Err(ApiError::InsufficientCredits(
@@ -65,6 +63,9 @@ pub async fn require(state: &AppState, workspace: Uuid) -> Result<i64, ApiError>
 }
 
 pub async fn refilled_balance(state: &AppState, workspace: Uuid) -> anyhow::Result<i64> {
+    if !state.plans.any() {
+        return state.store.credit_balance(workspace).await;
+    }
     let plan = state
         .store
         .workspace_plan(workspace)
@@ -97,17 +98,11 @@ pub async fn charge(state: &AppState, usage: &UsageRecord<'_>, fast: bool) -> an
 pub struct WorkspaceBudget<'a> {
     pub store: &'a Store,
     pub workspace: Uuid,
-    pub enforced: bool,
 }
 
 impl Budget for WorkspaceBudget<'_> {
     fn exhausted(&self) -> BoxFuture<'_, anyhow::Result<bool>> {
-        Box::pin(async move {
-            if !self.enforced {
-                return Ok(false);
-            }
-            Ok(self.store.credit_balance(self.workspace).await? <= 0)
-        })
+        Box::pin(async move { Ok(self.store.credit_balance(self.workspace).await? <= 0) })
     }
 }
 
@@ -121,12 +116,12 @@ mod tests {
             "[plans.free]\nname = \"Free\"\nmonthly_credits = 1000\n\n[plans.pro]\nname = \"Pro\"\nmonthly_credits = 50000\n",
         )
         .unwrap();
-        assert!(plans.enforced());
+        assert!(plans.any());
         assert_eq!(
             plans.get("pro").map(|plan| plan.monthly_credits),
             Some(50_000)
         );
-        assert!(!Plans::from_toml("").unwrap().enforced());
+        assert!(!Plans::from_toml("").unwrap().any());
         assert!(Plans::from_toml("[plans.bad]\nname = \"Bad\"\nmonthly_credits = -1\n").is_err());
     }
 }

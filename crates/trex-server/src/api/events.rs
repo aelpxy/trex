@@ -5,7 +5,7 @@ use axum::{
     http::HeaderMap,
     response::sse::{Event as SseEvent, KeepAlive, Sse},
 };
-use futures::{Stream, stream};
+use futures::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use trex_harness::event::{Event, FileChange, OutputStream, StepStatus as HarnessStepStatus};
@@ -386,6 +386,7 @@ pub async fn stream_events(
     let mut connection = state.store.event_connection().await?;
 
     let (tx, rx) = mpsc::channel(64);
+    let shutdown = state.shutdown.clone();
     tokio::spawn(async move {
         while !tx.is_closed() {
             let events = match state
@@ -420,8 +421,10 @@ pub async fn stream_events(
         }
     });
 
+    // clients reconnect with Last-Event-ID, so ending the stream on shutdown loses nothing
     let stream = stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|event| (Ok(event), rx))
-    });
+    })
+    .take_until(shutdown.cancelled_owned());
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEP_ALIVE)))
 }

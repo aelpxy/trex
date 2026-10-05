@@ -22,6 +22,7 @@ futures.workspace = true
 getrandom.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
+rust-embed = { workspace = true, features = ["mime-guess"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

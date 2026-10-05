@@ -18,43 +18,47 @@ const RUN_ENDS: [&str; 4] = [
     "run.failed",
 ];
 
+// signed in with a session cookie, kept in the client's cookie jar
 #[derive(Clone)]
 pub struct Api {
     http: Client,
     base: String,
-    token: String,
 }
 
 impl Api {
     // logs in, signing the account up the first time, so eval runs reuse one workspace
     pub async fn account(base: String, email: &str, password: &str) -> anyhow::Result<Self> {
-        let http = Client::new();
+        let http = Client::builder()
+            .cookie_store(true)
+            .build()
+            .context("failed to build the http client")?;
+        let api = Self { http, base };
         let body = json!({"email": email, "password": password, "name": "Eval"});
-        let mut response = http
-            .post(format!("{base}/v1/auth/login"))
+        let mut response = api
+            .request(Method::POST, "/auth/login")
             .json(&body)
             .send()
             .await?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            response = http
-                .post(format!("{base}/v1/auth/signup"))
+            response = api
+                .request(Method::POST, "/auth/signup")
                 .json(&body)
                 .send()
                 .await?;
         }
         let status = response.status();
-        let token: Value = response.json().await?;
         if !status.is_success() {
-            bail!("signing in {email} returned {status}: {token}");
+            let error: Value = response.json().await.unwrap_or_default();
+            bail!("signing in {email} returned {status}: {error}");
         }
-        let token = token["token"].as_str().context("no token")?.to_owned();
-        Ok(Self { http, base, token })
+        Ok(api)
     }
 
+    // the header marks requests as coming from trex's own client, which the server requires for writes
     pub fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
         self.http
             .request(method, format!("{}/v1{path}", self.base))
-            .bearer_auth(&self.token)
+            .header("x-requested-with", "trex-eval")
     }
 
     pub async fn get(&self, path: &str) -> anyhow::Result<Value> {

@@ -8,7 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 eventsource-stream.workspace = true
 futures.workspace = true
-reqwest = { workspace = true, features = ["json", "stream"] }
+reqwest = { workspace = true, features = ["cookies", "json", "stream"] }
 serde = { workspace = true }
 serde_json.workspace = true
 tempfile.workspace = true

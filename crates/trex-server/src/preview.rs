@@ -21,8 +21,11 @@ const PREVIEW_ID_LENGTH: usize = 32;
 pub async fn serve(state: Arc<AppState>, addr: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "serving previews");
+    let shutdown = state.shutdown.clone();
     let router = Router::new().fallback(proxy).with_state(state);
-    axum::serve(listener, router).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await?;
     Ok(())
 }
 

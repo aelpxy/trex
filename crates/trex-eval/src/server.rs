@@ -124,6 +124,8 @@ impl Server {
             .current_dir(&self.root)
             .env("TREX_ADDR", format!("127.0.0.1:{}", self.port))
             .env("TREX_PREVIEW_ADDR", self.preview_addr())
+            // the eval talks plain http to 127.0.0.1, where secure cookies aren't sent
+            .env("TREX_INSECURE_COOKIES", "true")
             .env(
                 "TREX_PREVIEW_URL",
                 format!("http://{{id}}.preview.localhost:{}", self.preview_port),

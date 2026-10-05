@@ -22,6 +22,7 @@ use axum::{
     routing::get,
 };
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use tower_http::{
     LatencyUnit,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -37,6 +38,10 @@ use utoipa::{
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+use self::{
+    auth::Auth,
+    error::{ApiError, ErrorResponse},
+};
 use crate::{config::PreviewUrl, credits::Plans, runs::Runs};
 
 const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
@@ -55,6 +60,12 @@ pub struct AppState {
     pub sandbox_policy: Policy,
     pub runs: Runs,
     pub preview_url: PreviewUrl,
+    // fires when the server stops, so long-lived streams end and connections can drain
+    pub shutdown: CancellationToken,
+    // sends session cookies only over https; off only for plain-http development off localhost
+    pub secure_cookies: bool,
+    // whether x-forwarded-for names the client, which is only true behind a trusted proxy
+    pub trust_proxy_headers: bool,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -86,7 +97,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     router
         .route("/openapi.json", get(move || async move { Json(spec) }))
         .route("/docs", get(|| async { Html(DOCS_PAGE) }))
+        .fallback(crate::web::serve)
         .with_state(state)
+        .layer(axum::middleware::from_fn(auth::require_csrf_header))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(trace)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -100,10 +113,28 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(account::logout))
         .routes(routes!(account::me, account::update_me))
         .routes(routes!(account::change_password))
+        .routes(routes!(account::list_sessions))
+        .routes(routes!(account::delete_session))
+        .routes(routes!(account::sign_out_others))
         .routes(routes!(credits::plans))
         .routes(routes!(credits::get))
         .routes(routes!(credits::ledger))
+        .routes(routes!(admin::overview))
+        .routes(routes!(admin::usage))
+        .routes(routes!(admin::list_users))
+        .routes(routes!(admin::update_user))
+        .routes(routes!(admin::sign_out_user))
+        .routes(routes!(admin::user_sessions))
+        .routes(routes!(admin::delete_user_session))
+        .routes(routes!(admin::logs))
+        .routes(routes!(admin::all_models))
         .routes(routes!(admin::list_workspaces))
+        .routes(routes!(admin::update_workspace))
+        .routes(routes!(admin::workspace_library))
+        .route(
+            "/admin/workspaces/{id}/library/files/{*path}",
+            get(admin::workspace_file),
+        )
         .routes(routes!(admin::adjust_credits))
         .routes(routes!(admin::set_plan))
         .routes(routes!(models))
@@ -157,6 +188,7 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .split_for_parts();
     spec.merge(LibraryFiles::openapi());
     spec.merge(SandboxFiles::openapi());
+    spec.merge(AdminFiles::openapi());
     (router, spec)
 }
 
@@ -180,6 +212,10 @@ struct LibraryFiles;
 #[openapi(paths(files::download, files::upload, files::delete))]
 struct SandboxFiles;
 
+#[derive(OpenApi)]
+#[openapi(paths(admin::workspace_file))]
+struct AdminFiles;
+
 struct BearerToken;
 
 impl Modify for BearerToken {
@@ -188,7 +224,7 @@ impl Modify for BearerToken {
         let scheme = HttpBuilder::new()
             .scheme(HttpAuthScheme::Bearer)
             .description(Some(
-                "A token from POST /v1/auth/signup or /v1/auth/login; /v1/admin needs a user with the admin role.",
+                "The session cookie set by POST /v1/auth/signup or /v1/auth/login; /v1/admin needs a user with the admin role. Requests that change data also need an X-Requested-With header.",
             ))
             .build();
         components.add_security_scheme("token", SecurityScheme::Http(scheme));
@@ -252,37 +288,49 @@ struct Health {
 
 /// List models
 ///
-/// The models a session can use, configured by the operator, in the operator's order.
+/// The models this workspace can use, in the operator's order. Admins may limit a workspace to
+/// some of them.
 #[utoipa::path(
     get,
     operation_id = "list_models",
     path = "/models",
     tag = "models",
-    responses((status = 200, body = List<Model>)),
+    responses((status = 200, body = List<Model>), (status = 401, response = ErrorResponse)),
 )]
-async fn models(State(state): State<Arc<AppState>>) -> Json<List<Model>> {
+async fn models(
+    State(state): State<Arc<AppState>>,
+    Auth { workspace, .. }: Auth,
+) -> Result<Json<List<Model>>, ApiError> {
+    let allowed = state.store.workspace_models(workspace).await?;
     let data = state
         .models
         .all()
-        .map(|model| Model {
-            id: model.id().to_owned(),
-            object: "model",
-            name: model.name().to_owned(),
-            context_window: model.context_window(),
-            reasoning_efforts: model.reasoning_efforts().map(<[String]>::to_vec),
-            fast: model.supports_fast(),
-            price: {
-                let price = model.price();
-                Price {
-                    input: price.input,
-                    cached_input: price.cached_input,
-                    output: price.output,
-                    fast_multiplier: price.fast_multiplier,
-                }
-            },
+        .filter(|model| {
+            allowed
+                .as_ref()
+                .is_none_or(|ids| ids.iter().any(|id| id == model.id()))
         })
+        .map(model_object)
         .collect();
-    Json(List::new(data, false))
+    Ok(Json(List::new(data, false)))
+}
+
+fn model_object(model: &trex_harness::model::Model) -> Model {
+    let price = model.price();
+    Model {
+        id: model.id().to_owned(),
+        object: "model",
+        name: model.name().to_owned(),
+        context_window: model.context_window(),
+        reasoning_efforts: model.reasoning_efforts().map(<[String]>::to_vec),
+        fast: model.supports_fast(),
+        price: Price {
+            input: price.input,
+            cached_input: price.cached_input,
+            output: price.output,
+            fast_multiplier: price.fast_multiplier,
+        },
+    }
 }
 
 /// Health check
@@ -331,10 +379,24 @@ mod tests {
                 "/v1/auth/logout",
                 "/v1/me",
                 "/v1/me/password",
+                "/v1/me/sessions",
+                "/v1/me/sessions/{id}",
+                "/v1/me/sessions/sign_out_others",
                 "/v1/plans",
                 "/v1/credits",
                 "/v1/credits/ledger",
+                "/v1/admin/overview",
+                "/v1/admin/usage",
+                "/v1/admin/users",
+                "/v1/admin/users/{id}",
+                "/v1/admin/users/{id}/sign_out",
+                "/v1/admin/users/{id}/sessions",
+                "/v1/admin/users/{id}/sessions/{session_id}",
+                "/v1/admin/logs",
+                "/v1/admin/models",
                 "/v1/admin/workspaces",
+                "/v1/admin/workspaces/{id}",
+                "/v1/admin/workspaces/{id}/library",
                 "/v1/admin/workspaces/{id}/credits",
                 "/v1/admin/workspaces/{id}/plan",
                 "/v1/models",
@@ -361,6 +423,7 @@ mod tests {
                 "/v1/attachments/{id}",
                 "/v1/library/files/{path}",
                 "/v1/sessions/{id}/files/{path}",
+                "/v1/admin/workspaces/{id}/library/files/{path}",
             ]
         );
         let json = serde_json::to_value(&spec).unwrap();

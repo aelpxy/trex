@@ -234,7 +234,7 @@ pub async fn delete(
     }))
 }
 
-fn library_error(error: anyhow::Error, path: &str) -> ApiError {
+pub(super) fn library_error(error: anyhow::Error, path: &str) -> ApiError {
     if is_not_found(&error) {
         return ApiError::NotFound(format!("no library file {path}"));
     }
@@ -244,7 +244,7 @@ fn library_error(error: anyhow::Error, path: &str) -> ApiError {
     ApiError::Internal(error)
 }
 
-fn file(file: &LibraryFile) -> File {
+pub(super) fn file(file: &LibraryFile) -> File {
     File {
         object: "file",
         path: file.path.clone(),

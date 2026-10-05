@@ -1,10 +1,12 @@
 pub mod accounts;
+pub mod admin;
 pub mod credits;
 pub mod events;
 pub mod library;
 pub mod previews;
 pub mod projects;
 pub mod sessions;
+pub mod user_sessions;
 
 use std::time::Duration;
 

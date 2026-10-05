@@ -163,6 +163,17 @@ impl Runs {
     }
 }
 
+// admins can limit a workspace to some models; a chat on another model can't run
+pub async fn require_model(state: &AppState, workspace: Uuid, model: &str) -> Result<(), ApiError> {
+    let allowed = state.store.workspace_models(workspace).await?;
+    if allowed.is_some_and(|ids| !ids.iter().any(|id| id == model)) {
+        return Err(ApiError::Permission(format!(
+            "this workspace can't use {model}; pick another model"
+        )));
+    }
+    Ok(())
+}
+
 // claims the session, saves the new input, and runs the agent in the background
 pub async fn start(
     state: &Arc<AppState>,
@@ -170,6 +181,7 @@ pub async fn start(
     session: &Session,
     input: Vec<Value>,
 ) -> Result<(), ApiError> {
+    require_model(state, workspace, &session.model).await?;
     credits::require(state, workspace).await?;
     if !claim(state, workspace, session, &input).await? {
         return Err(ApiError::Conflict(
@@ -187,6 +199,7 @@ pub async fn send_message(
     message: Value,
     interrupt: bool,
 ) -> Result<Started, ApiError> {
+    require_model(state, workspace, &session.model).await?;
     credits::require(state, workspace).await?;
     let input = [message];
     // the run can end between the two attempts, so they are retried a few times
@@ -516,7 +529,6 @@ async fn drive(
     let budget = WorkspaceBudget {
         store: &state.store,
         workspace,
-        enforced: state.plans.enforced(),
     };
     let journal = SessionJournal {
         store: &state.store,

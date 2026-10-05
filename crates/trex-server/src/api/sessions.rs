@@ -322,6 +322,7 @@ pub async fn create(
         body.reasoning_effort.as_deref(),
         body.fast,
     )?;
+    runs::require_model(&state, workspace, &body.model).await?;
     let project = match body.project_id.as_deref() {
         Some(id) => Some(find_project_id(&state, workspace, id).await?),
         None => None,
@@ -480,6 +481,7 @@ pub async fn update(
         };
         let fast = body.fast.unwrap_or(session.fast);
         check_settings(&state, model_id, effort, fast)?;
+        runs::require_model(&state, workspace, model_id).await?;
         state
             .store
             .set_session_model(workspace, session.id, model_id, effort, fast)
