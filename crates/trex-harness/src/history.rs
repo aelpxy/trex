@@ -56,6 +56,10 @@ pub fn checkpoint_text(item: &Value) -> Option<&str> {
         .or_else(|| content.strip_prefix(LEGACY_CHECKPOINT_HEADER))
 }
 
+pub fn is_reasoning(item: &InputItem) -> bool {
+    serde_json::to_value(item).is_ok_and(|value| value["type"] == "reasoning")
+}
+
 pub fn context_start(history: &[InputItem]) -> usize {
     history
         .iter()

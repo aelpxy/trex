@@ -15,6 +15,16 @@ pub enum Event {
     ReasoningDelta {
         delta: String,
     },
+    // the model began writing a tool call; its arguments follow in `ToolCall`
+    ToolCallStarted {
+        call_id: String,
+        name: String,
+    },
+    // a piece of a started tool call's JSON arguments
+    ToolCallDelta {
+        call_id: String,
+        delta: String,
+    },
     ToolCall {
         call_id: String,
         name: String,

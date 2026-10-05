@@ -498,6 +498,15 @@ async fn drive(
     let sandbox = LazySandbox::new(&provider);
 
     let mut history = history::from_json(state.store.session_items(workspace, id).await?)?;
+    let reasoning_from = state
+        .store
+        .start_reasoning(
+            workspace,
+            id,
+            &session.model,
+            i32::try_from(history.len()).context("session history is too long")?,
+        )
+        .await?;
     let inbox = SessionInbox {
         store: &state.store,
         workspace,
@@ -531,6 +540,7 @@ async fn drive(
         journal: Some(&journal),
         fast: session.fast,
         budget: Some(&budget),
+        reasoning_from,
     };
 
     // the agent saves every item as it goes, so whatever happens the session can be continued

@@ -57,6 +57,12 @@ pub enum SessionEvent {
     TextDelta { delta: String },
     #[serde(rename = "reasoning.delta")]
     ReasoningDelta { delta: String },
+    /// The model began writing a tool call; `tool.call` follows once its arguments are complete.
+    #[serde(rename = "tool.call.started")]
+    ToolCallStarted { call_id: String, name: String },
+    /// A piece of a started tool call's JSON-encoded arguments.
+    #[serde(rename = "tool.call.delta")]
+    ToolCallDelta { call_id: String, delta: String },
     #[serde(rename = "tool.call")]
     ToolCall {
         call_id: String,
@@ -202,6 +208,8 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
         Event::SandboxReady => SessionEvent::SandboxReady,
         Event::TextDelta { delta } => SessionEvent::TextDelta { delta },
         Event::ReasoningDelta { delta } => SessionEvent::ReasoningDelta { delta },
+        Event::ToolCallStarted { call_id, name } => SessionEvent::ToolCallStarted { call_id, name },
+        Event::ToolCallDelta { call_id, delta } => SessionEvent::ToolCallDelta { call_id, delta },
         Event::ToolCall {
             call_id,
             name,

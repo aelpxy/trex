@@ -68,6 +68,13 @@ pub struct UpdateSession {
     #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<String>)]
     project_id: Option<Option<String>>,
+    /// Switch the model for the next run.
+    model: Option<String>,
+    /// The effort for the next run; null uses the provider's default.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<String>)]
+    reasoning_effort: Option<Option<String>>,
+    fast: Option<bool>,
 }
 
 // tells an explicit null (Some(None)) apart from a missing field (None)
@@ -305,23 +312,12 @@ pub async fn create(
     Auth { workspace, .. }: Auth,
     Json(body): Json<CreateSession>,
 ) -> Result<(StatusCode, Json<Session>), ApiError> {
-    let Some(model) = state.models.get(&body.model) else {
-        return Err(ApiError::invalid(
-            format!("unknown model {}", body.model),
-            "model",
-        ));
-    };
-    if body.fast && !model.supports_fast() {
-        return Err(ApiError::invalid(
-            format!("{} has no fast mode", body.model),
-            "fast",
-        ));
-    }
-    if let Some(effort) = &body.reasoning_effort {
-        model
-            .check_effort(effort)
-            .map_err(|error| ApiError::invalid(format!("{error:#}"), "reasoning_effort"))?;
-    }
+    check_settings(
+        &state,
+        &body.model,
+        body.reasoning_effort.as_deref(),
+        body.fast,
+    )?;
     let project = match body.project_id.as_deref() {
         Some(id) => Some(find_project_id(&state, workspace, id).await?),
         None => None,
@@ -337,6 +333,29 @@ pub async fn create(
         )
         .await?;
     Ok((StatusCode::CREATED, Json(session_object(&session))))
+}
+
+fn check_settings(
+    state: &AppState,
+    model: &str,
+    effort: Option<&str>,
+    fast: bool,
+) -> Result<(), ApiError> {
+    let Some(config) = state.models.get(model) else {
+        return Err(ApiError::invalid(format!("unknown model {model}"), "model"));
+    };
+    if fast && !config.supports_fast() {
+        return Err(ApiError::invalid(
+            format!("{model} has no fast mode"),
+            "fast",
+        ));
+    }
+    if let Some(effort) = effort {
+        config
+            .check_effort(effort)
+            .map_err(|error| ApiError::invalid(format!("{error:#}"), "reasoning_effort"))?;
+    }
+    Ok(())
 }
 
 /// List sessions
@@ -416,7 +435,7 @@ pub async fn get(
 
 /// Update a session
 ///
-/// Renames the chat or moves it into or out of a project.
+/// Renames the chat, moves it into or out of a project, or changes the model, effort or fast mode for its next run.
 #[utoipa::path(
     patch,
     operation_id = "update_session",
@@ -449,6 +468,19 @@ pub async fn update(
         Some(None) => Some(None),
         None => None,
     };
+    if body.model.is_some() || body.reasoning_effort.is_some() || body.fast.is_some() {
+        let model_id = body.model.as_deref().unwrap_or(&session.model);
+        let effort = match &body.reasoning_effort {
+            Some(effort) => effort.as_deref(),
+            None => session.reasoning_effort.as_deref(),
+        };
+        let fast = body.fast.unwrap_or(session.fast);
+        check_settings(&state, model_id, effort, fast)?;
+        state
+            .store
+            .set_session_model(workspace, session.id, model_id, effort, fast)
+            .await?;
+    }
     let session = state
         .store
         .update_session(workspace, session.id, title, project)
@@ -589,8 +621,11 @@ pub async fn create_message(
     Path(id): Path<String>,
     Json(body): Json<CreateMessage>,
 ) -> Result<(StatusCode, Json<Run>), ApiError> {
-    if body.content.trim().is_empty() {
-        return Err(ApiError::invalid("content must not be empty", "content"));
+    if body.content.trim().is_empty() && body.attachments.is_empty() {
+        return Err(ApiError::invalid(
+            "a message needs content or attachments",
+            "content",
+        ));
     }
     if body.attachments.len() > MAX_ATTACHMENTS {
         return Err(ApiError::invalid(

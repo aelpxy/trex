@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -100,6 +100,8 @@ pub struct Agent<'a> {
     pub journal: Option<&'a dyn Journal>,
     pub fast: bool,
     pub budget: Option<&'a dyn Budget>,
+    // reasoning items before this position came from another model, which can't read them
+    pub reasoning_from: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -342,6 +344,19 @@ impl Agent<'_> {
         Ok(Step::Continue)
     }
 
+    // the items sent upstream: from the latest checkpoint, without reasoning another model wrote
+    fn context(&self, history: &[InputItem]) -> Vec<InputItem> {
+        let start = history::context_start(history);
+        history[start..]
+            .iter()
+            .enumerate()
+            .filter(|(offset, item)| {
+                start + offset >= self.reasoning_from || !history::is_reasoning(item)
+            })
+            .map(|(_, item)| item.clone())
+            .collect()
+    }
+
     fn compact_threshold(&self) -> u64 {
         self.model.context_window() * COMPACT_AT_PERCENT / 100
     }
@@ -354,7 +369,7 @@ impl Agent<'_> {
     ) -> anyhow::Result<Sampled> {
         let mut compacted = false;
         loop {
-            let context = history[history::context_start(history)..].to_vec();
+            let context = self.context(history);
             match self.request(context, WORK, events).await {
                 Ok(sampled) => return Ok(sampled),
                 Err(Failure::ContextOverflow) if !compacted => {
@@ -382,7 +397,7 @@ impl Agent<'_> {
         let context = &history[history::context_start(history)..];
 
         // the same prefix as the last turn reuses its prompt cache
-        let mut input = context.to_vec();
+        let mut input = self.context(history);
         input.push(history::user_message(SUMMARY_PROMPT));
         let summary = match self.request(input, SUMMARIZE, events).await {
             Ok(sampled) => sampled.text,
@@ -528,6 +543,8 @@ impl Agent<'_> {
             text: String::new(),
             context_tokens: 0,
         };
+        // argument deltas name the output item, so remember which call each one belongs to
+        let mut streaming_calls: HashMap<u32, String> = HashMap::new();
         loop {
             let event = match timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
                 Ok(Some(Ok(event))) => event,
@@ -569,6 +586,28 @@ impl Agent<'_> {
                 ResponseStreamEvent::ResponseReasoningSummaryTextDelta(e) => {
                     if mode.live {
                         send(events, Event::ReasoningDelta { delta: e.delta }).await?;
+                    }
+                }
+                ResponseStreamEvent::ResponseOutputItemAdded(e) => {
+                    if let (OutputItem::FunctionCall(call), true) = (e.item, mode.live) {
+                        streaming_calls.insert(e.output_index, call.call_id.clone());
+                        send(
+                            events,
+                            Event::ToolCallStarted {
+                                call_id: call.call_id,
+                                name: call.name,
+                            },
+                        )
+                        .await?;
+                    }
+                }
+                ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(e) => {
+                    if let Some(call_id) = streaming_calls.get(&e.output_index) {
+                        let event = Event::ToolCallDelta {
+                            call_id: call_id.clone(),
+                            delta: e.delta,
+                        };
+                        send(events, event).await?;
                     }
                 }
                 ResponseStreamEvent::ResponseOutputItemDone(e) => match e.item {
@@ -959,6 +998,7 @@ mod tests {
             journal: None,
             fast: false,
             budget: None,
+            reasoning_from: 0,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1020,6 +1060,7 @@ mod tests {
             journal: None,
             fast: false,
             budget: None,
+            reasoning_from: 0,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1098,6 +1139,7 @@ mod tests {
             journal: None,
             fast: false,
             budget: None,
+            reasoning_from: 0,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message("Reply with only the word one.")];
@@ -1155,6 +1197,7 @@ mod tests {
             journal: None,
             fast: false,
             budget: None,
+            reasoning_from: 0,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message(
@@ -1242,6 +1285,7 @@ mod tests {
             journal: None,
             fast: false,
             budget: None,
+            reasoning_from: 0,
         };
 
         let mut history = vec![
@@ -1316,6 +1360,7 @@ mod tests {
             journal: None,
             fast: false,
             budget: None,
+            reasoning_from: 0,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1375,6 +1420,7 @@ mod tests {
             journal: None,
             fast: false,
             budget: None,
+            reasoning_from: 0,
         };
 
         let script = "timeout 15 bash -c 'exec 3<>/dev/tcp/example.com/443'";
@@ -1447,6 +1493,7 @@ mod tests {
             journal: None,
             fast: false,
             budget: None,
+            reasoning_from: 0,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1511,6 +1558,7 @@ mod tests {
             journal: None,
             fast: false,
             budget: None,
+            reasoning_from: 0,
         };
         let mut history = vec![
             EasyInputMessage::from(

@@ -32,6 +32,9 @@ RUN . /tmp/arch \
     && tar -xJf "$file" -C /usr/local --strip-components=1 --exclude CHANGELOG.md --exclude LICENSE --exclude README.md \
     && rm "$file"
 
+RUN npm install -g pnpm typescript tsx vite create-vite @tailwindcss/cli @biomejs/biome prettier eslint oxlint oxfmt \
+    && npm cache clean --force
+
 RUN . /tmp/arch \
     && version="$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -n1)" \
     && curl -fsSL "https://go.dev/dl/${version}.linux-${go}.tar.gz" | tar -xz -C /usr/local

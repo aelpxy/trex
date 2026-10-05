@@ -99,10 +99,16 @@ pub fn user_message(text: &str, attachments: Vec<InputContent>) -> InputItem {
     if attachments.is_empty() {
         return EasyInputMessage::from(text).into();
     }
-    let mut parts = vec![InputContent::InputText(InputTextContent {
-        text: text.to_owned(),
-        prompt_cache_breakpoint: None,
-    })];
+    // a message can be attachments alone, and providers reject empty text parts
+    let mut parts: Vec<InputContent> = (!text.trim().is_empty())
+        .then(|| {
+            InputContent::InputText(InputTextContent {
+                text: text.to_owned(),
+                prompt_cache_breakpoint: None,
+            })
+        })
+        .into_iter()
+        .collect();
     parts.extend(attachments);
     InputItem::EasyMessage(EasyInputMessage {
         r#type: MessageType::Message,

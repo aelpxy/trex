@@ -250,6 +250,54 @@ impl Store {
             .context("failed to update session")
     }
 
+    pub async fn set_session_model(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        model: &str,
+        reasoning_effort: Option<&str>,
+        fast: bool,
+    ) -> anyhow::Result<Option<Session>> {
+        let sql = concat!(
+            "UPDATE sessions SET model = $3, reasoning_effort = $4, fast = $5, updated_at = NOW() ",
+            "WHERE id = $1 AND workspace_id = $2 RETURNING ",
+            columns!()
+        );
+        sqlx::query_as(sql)
+            .bind(id)
+            .bind(workspace)
+            .bind(model)
+            .bind(reasoning_effort)
+            .bind(fast)
+            .fetch_optional(&self.pg)
+            .await
+            .context("failed to update session model")
+    }
+
+    // reasoning is only readable by the model that wrote it, so a run on a different model than the
+    // last one ignores the reasoning saved before `items`; returns where readable reasoning starts
+    pub async fn start_reasoning(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        model: &str,
+        items: i32,
+    ) -> anyhow::Result<usize> {
+        let from: i32 = sqlx::query_scalar(concat!(
+            "UPDATE sessions SET reasoning_from = CASE WHEN reasoning_model IS DISTINCT FROM $3 ",
+            "AND reasoning_model IS NOT NULL THEN $4 ELSE reasoning_from END, reasoning_model = $3 ",
+            "WHERE id = $1 AND workspace_id = $2 RETURNING reasoning_from"
+        ))
+        .bind(id)
+        .bind(workspace)
+        .bind(model)
+        .bind(items)
+        .fetch_one(&self.pg)
+        .await
+        .context("failed to record the session's reasoning model")?;
+        Ok(usize::try_from(from).unwrap_or(0))
+    }
+
     // a generated title never replaces one the user set meanwhile
     pub async fn set_title_if_missing(
         &self,
