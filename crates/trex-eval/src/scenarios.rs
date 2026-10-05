@@ -691,13 +691,22 @@ async fn approve_blocked_network(cx: Arc<Ctx>) -> anyhow::Result<()> {
 
     let end = watch.until_end().await?;
     cx.check_completed(&end);
-    let reply = cx.reply(&session).await?;
+    // the model knows example.com's title, so only the command's own output proves it got through
     cx.check(
         "reached the site after approval, without being told to retry",
-        reply.contains("Example Domain"),
-        excerpt(&reply),
+        fetched(&watch, "Example Domain"),
+        names(&watch),
     );
     Ok(())
+}
+
+fn fetched(watch: &Watch, text: &str) -> bool {
+    watch.seen.iter().any(|event| {
+        event["type"] == "tool.result"
+            && event["output"]
+                .as_str()
+                .is_some_and(|output| output.contains(text))
+    })
 }
 
 // asked in plain words for something recurring, the agent sets up a scheduled task itself
@@ -773,11 +782,10 @@ async fn auto_approve_network(cx: Arc<Ctx>) -> anyhow::Result<()> {
         decided,
         "no automatic access.decided",
     );
-    let reply = cx.reply(&session).await?;
     cx.check(
         "reached the site",
-        reply.contains("Example Domain"),
-        excerpt(&reply),
+        fetched(&watch, "Example Domain"),
+        names(&watch),
     );
     Ok(())
 }

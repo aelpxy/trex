@@ -931,7 +931,7 @@ async fn forward(
 }
 
 // a lost event only degrades the live view; the run itself and its saved history are unaffected
-async fn publish(state: &AppState, session: Uuid, event: SessionEvent) {
+pub(crate) async fn publish(state: &AppState, session: Uuid, event: SessionEvent) {
     let result = match serde_json::to_value(&event) {
         Ok(value) => state.store.publish_event(session, &value).await,
         Err(error) => Err(error.into()),

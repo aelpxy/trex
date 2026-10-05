@@ -1,3 +1,4 @@
+mod access;
 mod api;
 mod config;
 mod credits;
@@ -76,6 +77,10 @@ async fn main() -> anyhow::Result<()> {
     });
     tokio::spawn(runs::resume_stale_runs(state.clone()));
     tokio::spawn(scheduler::run_due_tasks(state.clone()));
+    tokio::spawn(access::watch_between_runs(
+        state.clone(),
+        config.sandbox_idle_timeout,
+    ));
     tokio::spawn(idle::stop_idle_sandboxes(
         state.clone(),
         config.sandbox_idle_timeout,

@@ -6,6 +6,13 @@ use uuid::Uuid;
 
 use crate::Store;
 
+pub struct LiveSandbox {
+    pub session: Uuid,
+    pub workspace: Uuid,
+    pub sandbox: String,
+    pub auto_approve: bool,
+}
+
 // holds the session's row lock, so no run can start until the sandbox is marked stopped
 pub struct IdleSandbox {
     pub session: Uuid,
@@ -73,6 +80,30 @@ impl Store {
             sandbox: row.try_get("sandbox")?,
             tx,
         }))
+    }
+
+    // sandboxes that are up between runs, where background processes may still be denied access;
+    // runs watch their own
+    pub async fn live_sandboxes(&self, idle: Duration) -> anyhow::Result<Vec<LiveSandbox>> {
+        let rows = sqlx::query(
+            "SELECT id, workspace_id, sandbox, auto_approve FROM sessions \
+             WHERE sandbox IS NOT NULL AND NOT sandbox_stopped AND status <> 'running' \
+             AND updated_at >= NOW() - MAKE_INTERVAL(secs => $1)",
+        )
+        .bind(idle.as_secs_f64())
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to list live sandboxes")?;
+        rows.iter()
+            .map(|row| {
+                Ok(LiveSandbox {
+                    session: row.try_get("id")?,
+                    workspace: row.try_get("workspace_id")?,
+                    sandbox: row.try_get("sandbox")?,
+                    auto_approve: row.try_get("auto_approve")?,
+                })
+            })
+            .collect()
     }
 
     // using a session's sandbox, e.g. browsing its files, keeps it from being stopped as idle

@@ -119,6 +119,10 @@ impl AccessGate<'_> {
             }
         }
         let decided = self.wait_for_decisions(sandbox, &new).await?;
+        // the request reads approved before the sandbox loads the rule, which can take seconds
+        if decided.contains(&AccessStatus::Approved) {
+            self.openshell.wait_policy_current(sandbox).await?;
+        }
         if automatic
             && decided
                 .iter()

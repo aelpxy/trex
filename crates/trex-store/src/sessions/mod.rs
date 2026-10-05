@@ -12,7 +12,7 @@ use crate::Store;
 pub use self::{
     items::{UsageEntry, UsageRecord},
     runs::{Finish, Lease, StaleRun},
-    sandboxes::IdleSandbox,
+    sandboxes::{IdleSandbox, LiveSandbox},
 };
 
 // sqlx only accepts static sql, so the shared column list is spliced in at compile time

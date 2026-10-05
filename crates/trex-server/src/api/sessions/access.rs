@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
-use trex_sandbox::Sandbox;
+use trex_sandbox::{AccessState, Sandbox};
 use trex_store::sessions as store;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -81,7 +81,8 @@ pub async fn list_access(
 
 /// Approve an access request
 ///
-/// Adds the endpoints to the sandbox's network policy.
+/// Adds the endpoints to the sandbox's network policy. A request the sandbox already settled, by a
+/// newer request replacing it or an approval covering it, answers with where it stands.
 #[utoipa::path(
     post,
     operation_id = "approve_access_request",
@@ -94,6 +95,7 @@ pub async fn list_access(
     responses(
         (status = 200, body = AccessRequest),
         (status = 404, response = ErrorResponse),
+        (status = 409, response = ErrorResponse),
     ),
 )]
 pub async fn approve_access(
@@ -102,9 +104,28 @@ pub async fn approve_access(
     Path((id, request_id)): Path<(String, String)>,
 ) -> Result<Json<AccessRequest>, ApiError> {
     let session = find_session(&state, workspace, &id).await?;
-    let (sandbox, request) = find_access_request(&state, workspace, &session, &request_id).await?;
+    let (sandbox, request) =
+        match find_access_request(&state, workspace, &session, &request_id).await? {
+            Found::Pending(sandbox, request) => (sandbox, request),
+            Found::Decided(request, AccessStatus::Approved) => {
+                return Ok(Json(answered(
+                    request_id.clone(),
+                    request,
+                    AccessStatus::Approved,
+                )));
+            }
+            Found::Decided(..) => {
+                return Err(ApiError::Conflict(
+                    "the access request was already rejected".into(),
+                ));
+            }
+        };
     state.openshell.approve_access(&sandbox, &request).await?;
-    Ok(Json(access_request(request, AccessStatus::Approved)))
+    Ok(Json(answered(
+        request_id.clone(),
+        request,
+        AccessStatus::Approved,
+    )))
 }
 
 /// Reject an access request
@@ -121,6 +142,7 @@ pub async fn approve_access(
     responses(
         (status = 200, body = AccessRequest),
         (status = 404, response = ErrorResponse),
+        (status = 409, response = ErrorResponse),
     ),
 )]
 pub async fn reject_access(
@@ -130,7 +152,18 @@ pub async fn reject_access(
     body: Option<Json<RejectAccess>>,
 ) -> Result<Json<AccessRequest>, ApiError> {
     let session = find_session(&state, workspace, &id).await?;
-    let (sandbox, request) = find_access_request(&state, workspace, &session, &request_id).await?;
+    let (sandbox, request) =
+        match find_access_request(&state, workspace, &session, &request_id).await? {
+            Found::Pending(sandbox, request) => (sandbox, request),
+            Found::Decided(request, AccessStatus::Rejected) => {
+                return Ok(Json(answered(request_id, request, AccessStatus::Rejected)));
+            }
+            Found::Decided(..) => {
+                return Err(ApiError::Conflict(
+                    "the access request was already approved".into(),
+                ));
+            }
+        };
     let reason = body
         .and_then(|Json(body)| body.reason)
         .unwrap_or_else(|| "rejected by the user".into());
@@ -138,7 +171,14 @@ pub async fn reject_access(
         .openshell
         .reject_access(&sandbox, &request, &reason)
         .await?;
-    Ok(Json(access_request(request, AccessStatus::Rejected)))
+    Ok(Json(answered(request_id, request, AccessStatus::Rejected)))
+}
+
+// where a request the user answered stands now: still waiting, possibly as the newer request that
+// replaced it, or already decided without them
+enum Found {
+    Pending(Sandbox, trex_sandbox::AccessRequest),
+    Decided(trex_sandbox::AccessRequest, AccessStatus),
 }
 
 async fn find_access_request(
@@ -146,18 +186,40 @@ async fn find_access_request(
     workspace: Uuid,
     session: &store::Session,
     request_id: &str,
-) -> Result<(Sandbox, trex_sandbox::AccessRequest), ApiError> {
-    let not_found = || ApiError::NotFound(format!("no pending access request {request_id}"));
+) -> Result<Found, ApiError> {
+    let not_found = || ApiError::NotFound(format!("no access request {request_id}"));
     let sandbox = sandbox_of(workspace, session).ok_or_else(not_found)?;
-    let request = state
-        .openshell
-        .pending_access(&sandbox)
-        .await?
-        .into_iter()
-        // the user may be answering a request openshell has since refined into a new one
-        .find(|request| request.id == request_id || request.supersedes == request_id)
-        .ok_or_else(not_found)?;
-    Ok((sandbox, request))
+    Ok(
+        match state
+            .openshell
+            .access_state(&sandbox, request_id)
+            .await?
+            .ok_or_else(not_found)?
+        {
+            AccessState::Pending(request) => Found::Pending(sandbox, request),
+            AccessState::Decided(request, status) => Found::Decided(request, from_sandbox(status)),
+        },
+    )
+}
+
+fn from_sandbox(status: trex_sandbox::AccessStatus) -> AccessStatus {
+    match status {
+        trex_sandbox::AccessStatus::Pending => AccessStatus::Pending,
+        trex_sandbox::AccessStatus::Approved => AccessStatus::Approved,
+        trex_sandbox::AccessStatus::Rejected => AccessStatus::Rejected,
+    }
+}
+
+// answers under the id the user saw, which a newer request may have replaced
+fn answered(
+    id: String,
+    request: trex_sandbox::AccessRequest,
+    status: AccessStatus,
+) -> AccessRequest {
+    AccessRequest {
+        id,
+        ..access_request(request, status)
+    }
 }
 
 fn access_request(request: trex_sandbox::AccessRequest, status: AccessStatus) -> AccessRequest {
