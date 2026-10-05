@@ -21,6 +21,7 @@ export default [
       route("workspaces", "routes/admin/workspaces.tsx"),
       route("library", "routes/admin/library.tsx"),
       route("runs", "routes/admin/runs.tsx"),
+      route("sandboxes", "routes/admin/sandboxes.tsx"),
       route("usage", "routes/admin/usage.tsx"),
       route("logs", "routes/admin/logs.tsx"),
     ]),

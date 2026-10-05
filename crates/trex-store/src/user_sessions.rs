@@ -180,7 +180,10 @@ mod tests {
             (used.id, used.ip.as_deref(), used.last_ip.as_deref()),
             (a, Some("10.0.0.1"), Some("10.0.0.2"))
         );
-        assert!(store.set_user_suspended(user.id, true).await.unwrap());
+        assert_eq!(
+            store.set_user_suspended(user.id, true).await.unwrap(),
+            crate::admin::AdminChange::Changed
+        );
         assert!(
             store
                 .use_user_session(b"session-a", None)
@@ -191,7 +194,10 @@ mod tests {
         );
         let (suspended, _) = store.user(user.id).await.unwrap().unwrap();
         assert!(suspended.suspended_at.is_some());
-        assert!(store.set_user_suspended(user.id, false).await.unwrap());
+        assert_eq!(
+            store.set_user_suspended(user.id, false).await.unwrap(),
+            crate::admin::AdminChange::Changed
+        );
         assert!(
             store
                 .use_user_session(b"session-a", None)

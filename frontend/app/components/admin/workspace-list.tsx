@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useCallback, useState } from "react";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { LuFolderOpen } from "react-icons/lu";
 
@@ -13,6 +13,7 @@ import type { ApiAdminWorkspace } from "~/lib/trex";
 
 import { FilterInput } from "./filter-input";
 import { date } from "./format";
+import { useDrawerRecord } from "./use-drawer-record";
 import { useUrlFilter, useUrlSort } from "./use-url-filter";
 import { WorkspaceManager } from "./workspace-manager";
 
@@ -26,8 +27,17 @@ export function WorkspaceList() {
   const { data: plans } = useSuspenseQuery(queries.plans());
   const [selected, setSelected] = useState<ApiAdminWorkspace | null>(null);
   const [open, setOpen] = useState(false);
-  // the drawer follows refetches, and keeps the last workspace while it animates closed
-  const workspace = data.data.find((candidate) => candidate.id === selected?.id) ?? selected;
+  const lookup = useQuery({ ...queries.admin.workspaces(1, selected?.id ?? ""), enabled: selected !== null });
+  const close = useCallback(() => setOpen(false), []);
+  const workspace = useDrawerRecord({
+    selected,
+    rows: data.data,
+    fetched: lookup.data?.data,
+    settled: lookup.isSuccess && !lookup.isFetching,
+    open,
+    onGone: close,
+    gone: "That workspace was deleted",
+  });
   const planName = (id: string) => plans.find((plan) => plan.id === id)?.name ?? id;
 
   const columns = [

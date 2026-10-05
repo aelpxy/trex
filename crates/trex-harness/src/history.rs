@@ -312,11 +312,22 @@ pub fn plan_reminder(steps: &[String]) -> InputItem {
 }
 
 // a run that ended with the model's reply has nothing left to do, which matters when one is resumed
+// a reply, maybe followed by checkpoints from compacting the context after it, as the user can ask
 pub fn ends_with_reply(history: &[InputItem]) -> bool {
-    history.last().is_some_and(|item| {
-        let value = serde_json::to_value(item).unwrap_or_default();
-        value["type"] == "message" && value["role"] == "assistant"
-    })
+    history
+        .iter()
+        .rev()
+        .map(|item| serde_json::to_value(item).unwrap_or_default())
+        .find(|value| checkpoint_text(value).is_none())
+        .is_some_and(|value| value["type"] == "message" && value["role"] == "assistant")
+}
+
+// nothing new since the last checkpoint, so compacting again would only summarize the summary
+pub fn ends_with_checkpoint(history: &[InputItem]) -> bool {
+    history
+        .last()
+        .and_then(|item| serde_json::to_value(item).ok())
+        .is_some_and(|value| checkpoint_text(&value).is_some())
 }
 
 #[cfg(test)]
@@ -441,6 +452,17 @@ mod tests {
         assert!(ends_with_reply(&[user_message("hi"), assistant("hello")]));
         assert!(!ends_with_reply(&[assistant("hello"), user_message("hi")]));
         assert!(!ends_with_reply(&[]));
+        let compacted = [
+            user_message("hi"),
+            assistant("hello"),
+            checkpoint(&[], "said hello"),
+        ];
+        assert!(ends_with_reply(&compacted), "a checkpoint after a reply");
+        assert!(ends_with_checkpoint(&compacted));
+        assert!(!ends_with_reply(&[
+            user_message("hi"),
+            checkpoint(&[], "asked")
+        ]));
     }
 
     fn assistant(text: &str) -> InputItem {

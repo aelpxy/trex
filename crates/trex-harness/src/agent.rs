@@ -22,14 +22,14 @@ use trex_store::library::Library;
 use uuid::Uuid;
 
 use crate::{
-    access::AccessGate,
+    access::{AccessGate, looks_blocked},
     attachment,
     event::{Event, Usage},
     history,
     model::{Model, Turn},
     question::{self, ASK_USER},
     sandbox::LazySandbox,
-    tool::{ToolContext, ToolOutput, Tools},
+    tool::{SCHEDULE_TASK, TaskScheduler, ToolContext, ToolOutput, Tools},
 };
 
 // the model would otherwise assume files and installs from earlier in the conversation still exist
@@ -108,6 +108,8 @@ pub struct Agent<'a> {
     pub reasoning_from: usize,
     // nobody is there to answer, as in a scheduled run, so the agent can't ask questions
     pub unattended: bool,
+    // creates scheduled tasks for schedule_task; without it the tool isn't offered
+    pub scheduler: Option<&'a dyn TaskScheduler>,
 }
 
 #[derive(Clone, Copy)]
@@ -174,6 +176,22 @@ impl Agent<'_> {
         let outcome = result?;
         flushed?;
         Ok(outcome)
+    }
+
+    // only compacts the context, when the user asks to; the next run continues from the checkpoint
+    pub async fn compact_context(
+        &self,
+        history: &mut Vec<InputItem>,
+        events: &mpsc::Sender<Event>,
+    ) -> anyhow::Result<RunOutcome> {
+        let mut saved = history.len();
+        history::close_dangling_calls(history);
+        if !history::ends_with_checkpoint(history) {
+            self.compact(history, events).await?;
+        }
+        self.save(history, &mut saved).await?;
+        send(events, Event::Done).await?;
+        Ok(RunOutcome::Completed)
     }
 
     async fn run_turns(
@@ -484,6 +502,23 @@ impl Agent<'_> {
         }
     }
 
+    // ask_user needs someone to answer, and schedule_task a scheduler
+    fn tool_definitions(&self) -> Vec<Tool> {
+        let mut tools: Vec<Tool> = self
+            .tools
+            .definitions()
+            .into_iter()
+            .filter(|tool| {
+                self.scheduler.is_some()
+                    || !matches!(tool, Tool::Function(function) if function.name == SCHEDULE_TASK)
+            })
+            .collect();
+        if !self.unattended {
+            tools.push(Tool::Function(question::definition()));
+        }
+        tools
+    }
+
     // surfaces each network request the sandbox was denied once, so the user can approve it mid-run
     async fn watch_access(&self, events: &mpsc::Sender<Event>) -> anyhow::Error {
         let mut seen = HashSet::new();
@@ -521,15 +556,7 @@ impl Agent<'_> {
         let turn = Turn {
             instructions: self.instructions.clone(),
             input,
-            tools: if self.unattended {
-                self.tools.definitions()
-            } else {
-                [
-                    self.tools.definitions(),
-                    vec![Tool::Function(question::definition())],
-                ]
-                .concat()
-            },
+            tools: self.tool_definitions(),
             reasoning_effort: self.reasoning_effort.clone(),
             allow_tools: mode.tools,
             cache_key: self.cache_key.clone(),
@@ -731,6 +758,7 @@ impl Agent<'_> {
             sandbox: self.sandbox,
             call_id: &call.call_id,
             events,
+            scheduler: self.scheduler,
         };
 
         let (output, is_error) = match self
@@ -748,8 +776,10 @@ impl Agent<'_> {
         };
         let output = match &gate {
             Some(gate) => {
-                let failed = is_error || !output.text().trim_end().ends_with("[exit code 0]");
-                match gate.settle(&before, failed, events).await {
+                match gate
+                    .settle(&before, looks_blocked(&output.text()), events)
+                    .await
+                {
                     Ok(Some(note)) => output.append(&note),
                     Ok(None) => output,
                     Err(error) => {
@@ -1043,6 +1073,7 @@ mod tests {
             budget: None,
             reasoning_from: 0,
             unattended: false,
+            scheduler: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1106,6 +1137,7 @@ mod tests {
             budget: None,
             reasoning_from: 0,
             unattended: false,
+            scheduler: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1186,6 +1218,7 @@ mod tests {
             budget: None,
             reasoning_from: 0,
             unattended: false,
+            scheduler: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message("Reply with only the word one.")];
@@ -1245,6 +1278,7 @@ mod tests {
             budget: None,
             reasoning_from: 0,
             unattended: false,
+            scheduler: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message(
@@ -1334,6 +1368,7 @@ mod tests {
             budget: None,
             reasoning_from: 0,
             unattended: false,
+            scheduler: None,
         };
 
         let mut history = vec![
@@ -1410,6 +1445,7 @@ mod tests {
             budget: None,
             reasoning_from: 0,
             unattended: false,
+            scheduler: None,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1471,6 +1507,7 @@ mod tests {
             budget: None,
             reasoning_from: 0,
             unattended: false,
+            scheduler: None,
         };
 
         let script = "timeout 15 bash -c 'exec 3<>/dev/tcp/example.com/443'";
@@ -1545,6 +1582,7 @@ mod tests {
             budget: None,
             reasoning_from: 0,
             unattended: false,
+            scheduler: None,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1611,6 +1649,7 @@ mod tests {
             budget: None,
             reasoning_from: 0,
             unattended: false,
+            scheduler: None,
         };
         let mut history = vec![
             EasyInputMessage::from(

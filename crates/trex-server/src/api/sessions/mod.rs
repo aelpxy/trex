@@ -181,7 +181,7 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(session_object(&session))))
 }
 
-pub(super) fn check_settings(
+pub(crate) fn check_settings(
     state: &AppState,
     model: &str,
     effort: Option<&str>,

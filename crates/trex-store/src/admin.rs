@@ -127,6 +127,32 @@ pub struct LiveRun {
     pub responses: i64,
 }
 
+// what changing a user's role or suspension did
+#[derive(Debug, PartialEq, Eq)]
+pub enum AdminChange {
+    Changed,
+    NotFound,
+    // it would leave no active admin
+    LastAdmin,
+}
+
+// a chat that has a sandbox, in any workspace
+pub struct SandboxChat {
+    pub session: Uuid,
+    pub workspace: Uuid,
+    pub title: Option<String>,
+    pub sandbox: String,
+    pub running: bool,
+    // unix seconds; idle sandboxes are stopped a while after this
+    pub updated_at: i64,
+}
+
+pub struct WorkspaceOwner {
+    pub workspace: Uuid,
+    pub name: String,
+    pub owner_email: Option<String>,
+}
+
 pub struct DayUsage {
     // unix seconds at midnight utc
     pub day: i64,
@@ -333,14 +359,106 @@ impl Store {
     }
 
     // false when there's no such user
-    pub async fn set_user_role_by_id(&self, id: Uuid, role: UserRole) -> anyhow::Result<bool> {
-        let result = sqlx::query("UPDATE users SET role = $2, updated_at = NOW() WHERE id = $1")
+    pub async fn set_user_role_by_id(
+        &self,
+        id: Uuid,
+        role: UserRole,
+    ) -> anyhow::Result<AdminChange> {
+        // the active admins are locked, so two admins demoting each other at once can't both succeed
+        let result = sqlx::query(
+            "WITH active AS (SELECT id FROM users WHERE role = 'admin' AND suspended_at IS NULL FOR UPDATE) \
+             UPDATE users SET role = $2, updated_at = NOW() WHERE id = $1 \
+             AND ($2 = 'admin' OR NOT EXISTS (SELECT 1 FROM active WHERE id = $1) OR EXISTS (SELECT 1 FROM active WHERE id <> $1))",
+        )
+        .bind(id)
+        .bind(role.as_str())
+        .execute(&self.pg)
+        .await
+        .context("failed to set user role")?;
+        self.admin_change(id, result.rows_affected()).await
+    }
+
+    async fn admin_change(&self, id: Uuid, changed: u64) -> anyhow::Result<AdminChange> {
+        if changed > 0 {
+            return Ok(AdminChange::Changed);
+        }
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)")
             .bind(id)
-            .bind(role.as_str())
-            .execute(&self.pg)
+            .fetch_one(&self.pg)
             .await
-            .context("failed to set user role")?;
-        Ok(result.rows_affected() > 0)
+            .context("failed to look up user")?;
+        Ok(if exists {
+            AdminChange::LastAdmin
+        } else {
+            AdminChange::NotFound
+        })
+    }
+
+    pub async fn sandbox_chats(&self) -> anyhow::Result<Vec<SandboxChat>> {
+        let rows = sqlx::query(
+            "SELECT id, workspace_id, title, sandbox, status = 'running' AS running, \
+             EXTRACT(EPOCH FROM updated_at)::BIGINT AS updated_at FROM sessions WHERE sandbox IS NOT NULL",
+        )
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to list sandbox chats")?;
+        rows.iter()
+            .map(|row| {
+                Ok(SandboxChat {
+                    session: row.try_get("id")?,
+                    workspace: row.try_get("workspace_id")?,
+                    title: row.try_get("title")?,
+                    sandbox: row.try_get("sandbox")?,
+                    running: row.try_get("running")?,
+                    updated_at: row.try_get("updated_at")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn workspace_owners(&self) -> anyhow::Result<Vec<WorkspaceOwner>> {
+        let rows = sqlx::query(
+            "SELECT w.id, w.name, (SELECT u.email FROM workspace_members m JOIN users u ON u.id = m.user_id \
+             WHERE m.workspace_id = w.id ORDER BY m.role = 'owner' DESC, u.created_at LIMIT 1) AS owner_email \
+             FROM workspaces w",
+        )
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to list workspaces")?;
+        rows.iter()
+            .map(|row| {
+                Ok(WorkspaceOwner {
+                    workspace: row.try_get("id")?,
+                    name: row.try_get("name")?,
+                    owner_email: row.try_get("owner_email")?,
+                })
+            })
+            .collect()
+    }
+
+    // whether a chat in `workspace` is running with this sandbox, which an admin mustn't stop under it
+    pub async fn sandbox_in_use(&self, workspace: Uuid, sandbox: &str) -> anyhow::Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sessions WHERE workspace_id = $1 AND sandbox = $2 AND status = 'running')",
+        )
+        .bind(workspace)
+        .bind(sandbox)
+        .fetch_one(&self.pg)
+        .await
+        .context("failed to check sandbox use")
+    }
+
+    // an admin stopped it, so the idle sweep has nothing left to do for its chat
+    pub async fn mark_sandbox_stopped(&self, workspace: Uuid, sandbox: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET sandbox_stopped = TRUE WHERE workspace_id = $1 AND sandbox = $2",
+        )
+        .bind(workspace)
+        .bind(sandbox)
+        .execute(&self.pg)
+        .await
+        .context("failed to mark sandbox stopped")?;
+        Ok(())
     }
 
     // oldest first, so the longest running are on top
@@ -384,17 +502,23 @@ impl Store {
     }
 
     // false when there's no such user; suspending again keeps the first time
-    pub async fn set_user_suspended(&self, id: Uuid, suspended: bool) -> anyhow::Result<bool> {
+    pub async fn set_user_suspended(
+        &self,
+        id: Uuid,
+        suspended: bool,
+    ) -> anyhow::Result<AdminChange> {
         let result = sqlx::query(
-            "UPDATE users SET suspended_at = CASE WHEN $2 THEN COALESCE(suspended_at, NOW()) END, \
-             updated_at = NOW() WHERE id = $1",
+            "WITH active AS (SELECT id FROM users WHERE role = 'admin' AND suspended_at IS NULL FOR UPDATE) \
+             UPDATE users SET suspended_at = CASE WHEN $2 THEN COALESCE(suspended_at, NOW()) END, \
+             updated_at = NOW() WHERE id = $1 \
+             AND (NOT $2 OR NOT EXISTS (SELECT 1 FROM active WHERE id = $1) OR EXISTS (SELECT 1 FROM active WHERE id <> $1))",
         )
         .bind(id)
         .bind(suspended)
         .execute(&self.pg)
         .await
         .context("failed to suspend user")?;
-        Ok(result.rows_affected() > 0)
+        self.admin_change(id, result.rows_affected()).await
     }
 }
 
@@ -471,7 +595,44 @@ mod tests {
             "% is literal"
         );
 
+        let ann = created[0].0;
+        assert_eq!(
+            store
+                .set_user_role_by_id(ann, UserRole::Admin)
+                .await
+                .unwrap(),
+            AdminChange::Changed
+        );
+        assert_eq!(
+            store.set_user_suspended(ann, true).await.unwrap(),
+            AdminChange::Changed
+        );
+        assert_eq!(
+            store.set_user_suspended(ann, false).await.unwrap(),
+            AdminChange::Changed
+        );
+        assert_eq!(
+            store
+                .set_user_role_by_id(ann, UserRole::User)
+                .await
+                .unwrap(),
+            AdminChange::Changed
+        );
+        assert_eq!(
+            store
+                .set_user_role_by_id(Uuid::now_v7(), UserRole::User)
+                .await
+                .unwrap(),
+            AdminChange::NotFound
+        );
         store.live_runs().await.unwrap();
+        store.sandbox_chats().await.unwrap();
+        assert!(store.workspace_owners().await.unwrap().len() >= 3);
+        assert!(!store.sandbox_in_use(created[0].1, "none").await.unwrap());
+        store
+            .mark_sandbox_stopped(created[0].1, "none")
+            .await
+            .unwrap();
         let report = store.usage_report(30).await.unwrap();
         assert!(report.accounts.len() as i64 <= TOP_ACCOUNTS);
 

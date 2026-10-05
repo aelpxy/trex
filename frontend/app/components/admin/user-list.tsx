@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useCallback, useState, type FormEvent } from "react";
 import { Field } from "@base-ui/react/field";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { LuTrash2, LuX } from "react-icons/lu";
@@ -22,6 +22,7 @@ import { LoadError } from "./load-error";
 import { FilterInput } from "./filter-input";
 import { ago, date } from "./format";
 import { useDeleteUser, useDeleteUsers, useEndUserSession, useSetRole, useSetSuspended, useSetUserPassword, useSignOutUser } from "./mutations";
+import { useDrawerRecord } from "./use-drawer-record";
 import { useUrlFilter, useUrlSort } from "./use-url-filter";
 import { WorkspaceManager } from "./workspace-manager";
 
@@ -254,8 +255,17 @@ export function UserList() {
   const { data } = useSuspenseQuery(queries.admin.users(page, filter.trim(), sort));
   const [selected, setSelected] = useState<ApiAdminUser | null>(null);
   const [open, setOpen] = useState(false);
-  // the drawer follows refetches, and keeps the last user while it animates closed
-  const user = data.data.find((candidate) => candidate.id === selected?.id) ?? selected;
+  const lookup = useQuery({ ...queries.admin.users(1, selected?.email ?? ""), enabled: selected !== null });
+  const close = useCallback(() => setOpen(false), []);
+  const user = useDrawerRecord({
+    selected,
+    rows: data.data,
+    fetched: lookup.data?.data,
+    settled: lookup.isSuccess && !lookup.isFetching,
+    open,
+    onGone: close,
+    gone: "That user was deleted",
+  });
   const { profile } = useWorkspace();
   // ticks belong to one page, search and sort, so changing any of them clears them
   const view = `${page}|${filter.trim()}|${sort}`;

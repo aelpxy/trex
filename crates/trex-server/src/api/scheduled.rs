@@ -5,9 +5,8 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use trex_store::scheduled::{ScheduledTask as StoredTask, TaskFields};
+use trex_store::scheduled::ScheduledTask as StoredTask;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -16,13 +15,12 @@ use super::{
     auth::Auth,
     error::{ApiError, ErrorResponse},
     ids::{self, PROJECT, TASK},
-    sessions::{Session, check_settings, find_project_id, session_object},
+    sessions::{Session, find_project_id, session_object},
 };
-use crate::{runs, schedule::Schedule, scheduler};
-
-const MAX_TASKS: i64 = 20;
-const MAX_TITLE_CHARS: usize = 100;
-const MAX_PROMPT_CHARS: usize = 20_000;
+use crate::{
+    scheduler,
+    tasks::{self, TaskSettings},
+};
 
 /// A prompt that runs on a schedule. Each run starts a new chat, listed with
 /// `GET /v1/sessions?scheduled_task_id=`; the agent can't ask questions during it.
@@ -113,69 +111,6 @@ fn present<'de, D: serde::Deserializer<'de>>(
     Option::<String>::deserialize(deserializer).map(Some)
 }
 
-// a task's settings, checked and with its next run worked out
-struct Valid {
-    project: Option<Uuid>,
-    title: String,
-    prompt: String,
-    model: String,
-    reasoning_effort: Option<String>,
-    schedule: String,
-    timezone: String,
-    paused: bool,
-}
-
-impl Valid {
-    async fn check(self, state: &AppState, workspace: Uuid) -> Result<Self, ApiError> {
-        let title = self.title.trim().to_owned();
-        if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
-            return Err(ApiError::invalid(
-                format!("title must be 1 to {MAX_TITLE_CHARS} characters"),
-                "title",
-            ));
-        }
-        let prompt = self.prompt.trim().to_owned();
-        if prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_CHARS {
-            return Err(ApiError::invalid(
-                format!("prompt must be 1 to {MAX_PROMPT_CHARS} characters"),
-                "prompt",
-            ));
-        }
-        check_settings(state, &self.model, self.reasoning_effort.as_deref(), false)?;
-        runs::require_model(state, workspace, &self.model).await?;
-        Schedule::parse(&self.schedule, &self.timezone)
-            .map_err(|error| ApiError::invalid(error, "schedule"))?;
-        Ok(Self {
-            title,
-            prompt,
-            schedule: self.schedule.trim().to_owned(),
-            ..self
-        })
-    }
-
-    fn fields(&self) -> TaskFields<'_> {
-        let next_run_at = (!self.paused)
-            .then(|| {
-                Schedule::parse(&self.schedule, &self.timezone)
-                    .ok()?
-                    .next_after(Utc::now())
-            })
-            .flatten()
-            .map(|at| at.timestamp());
-        TaskFields {
-            project: self.project,
-            title: &self.title,
-            prompt: &self.prompt,
-            model: &self.model,
-            reasoning_effort: self.reasoning_effort.as_deref(),
-            schedule: &self.schedule,
-            timezone: &self.timezone,
-            paused: self.paused,
-            next_run_at,
-        }
-    }
-}
-
 async fn find_task(state: &AppState, workspace: Uuid, id: &str) -> Result<StoredTask, ApiError> {
     let not_found = || ApiError::NotFound(format!("no scheduled task {id}"));
     let task = ids::decode(TASK, id).ok_or_else(not_found)?;
@@ -205,32 +140,25 @@ pub async fn create(
     Auth { workspace, .. }: Auth,
     Json(body): Json<CreateTask>,
 ) -> Result<(StatusCode, Json<ScheduledTask>), ApiError> {
-    if state.store.count_scheduled_tasks(workspace).await? >= MAX_TASKS {
-        return Err(ApiError::Conflict(format!(
-            "a workspace can have up to {MAX_TASKS} scheduled tasks"
-        )));
-    }
     let project = match body.project_id.as_deref() {
         Some(id) => Some(find_project_id(&state, workspace, id).await?),
         None => None,
     };
-    let valid = Valid {
-        project,
-        title: body.title,
-        prompt: body.prompt,
-        model: body.model,
-        reasoning_effort: body.reasoning_effort,
-        schedule: body.schedule,
-        timezone: body.timezone,
-        paused: body.paused,
-    }
-    .check(&state, workspace)
+    let task = tasks::create(
+        &state,
+        workspace,
+        TaskSettings {
+            project,
+            title: body.title,
+            prompt: body.prompt,
+            model: body.model,
+            reasoning_effort: body.reasoning_effort,
+            schedule: body.schedule,
+            timezone: body.timezone,
+            paused: body.paused,
+        },
+    )
     .await?;
-    let task = state
-        .store
-        .create_scheduled_task(workspace, &valid.fields())
-        .await?
-        .ok_or_else(|| ApiError::NotFound("no such project".into()))?;
     Ok((StatusCode::CREATED, Json(task_object(&task))))
 }
 
@@ -298,7 +226,7 @@ pub async fn update(
         Some(None) => None,
         None => task.project_id,
     };
-    let valid = Valid {
+    let valid = TaskSettings {
         project,
         title: body.title.unwrap_or(task.title),
         prompt: body.prompt.unwrap_or(task.prompt),

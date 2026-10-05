@@ -11,7 +11,7 @@ mod library;
 mod previews;
 mod projects;
 mod scheduled;
-mod sessions;
+pub(crate) mod sessions;
 
 use std::sync::Arc;
 
@@ -125,6 +125,9 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(admin::usage::usage))
         .routes(routes!(admin::runs::list_runs))
         .routes(routes!(admin::runs::cancel_run))
+        .routes(routes!(admin::sandboxes::list_sandboxes))
+        .routes(routes!(admin::sandboxes::stop_sandbox))
+        .routes(routes!(admin::sandboxes::delete_sandbox))
         .routes(routes!(admin::users::list_users))
         .routes(routes!(
             admin::users::update_user,
@@ -171,6 +174,7 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(sessions::questions::create_answers))
         .routes(routes!(sessions::messages::cancel))
         .routes(routes!(sessions::messages::retry))
+        .routes(routes!(sessions::messages::compact))
         .routes(routes!(sessions::messages::branch))
         .routes(routes!(events::stream_events))
         .routes(routes!(sessions::access::list_access))
@@ -427,6 +431,9 @@ mod tests {
                 "/v1/admin/usage",
                 "/v1/admin/runs",
                 "/v1/admin/runs/{id}/cancel",
+                "/v1/admin/sandboxes",
+                "/v1/admin/sandboxes/{workspace}/{name}/stop",
+                "/v1/admin/sandboxes/{workspace}/{name}",
                 "/v1/admin/users",
                 "/v1/admin/users/{id}",
                 "/v1/admin/users/{id}/sign_out",
@@ -454,6 +461,7 @@ mod tests {
                 "/v1/sessions/{id}/answers",
                 "/v1/sessions/{id}/cancel",
                 "/v1/sessions/{id}/retry",
+                "/v1/sessions/{id}/compact",
                 "/v1/sessions/{id}/branch",
                 "/v1/sessions/{id}/events",
                 "/v1/sessions/{id}/access_requests",

@@ -7,6 +7,7 @@ mod preview;
 mod runs;
 mod schedule;
 mod scheduler;
+mod tasks;
 mod users;
 mod web;
 

@@ -19,6 +19,7 @@ use trex_harness::{
     event::Event,
     files, history,
     sandbox::{LazySandbox, Provided, SandboxProvider},
+    tool::TaskScheduler,
 };
 use trex_sandbox::{Sandbox, SandboxHealth, workspace_name};
 use trex_store::{
@@ -33,6 +34,7 @@ use crate::api::{
     events::{SessionEvent, to_api},
 };
 use crate::credits::{self, WorkspaceBudget};
+use crate::tasks::ChatScheduler;
 
 const MAX_TURNS: usize = 50;
 const SEND_ATTEMPTS: usize = 3;
@@ -101,6 +103,14 @@ fn queued_item(value: Value) -> Value {
             .unwrap_or(Value::Null),
         item => item,
     }
+}
+
+// how a run begins: with new input, picked up after a restart, or only to compact the context
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Start {
+    New,
+    Resumed,
+    Compact,
 }
 
 /// How `start` handled the input.
@@ -188,6 +198,25 @@ pub async fn start(
             "a run is already in progress for this session".into(),
         ));
     }
+    Ok(())
+}
+
+// summarizes an idle chat's context into a checkpoint when the user asks; it runs like any run, so
+// its progress streams and it can be stopped
+pub async fn compact(
+    state: &Arc<AppState>,
+    workspace: Uuid,
+    session: &Session,
+) -> Result<(), ApiError> {
+    require_model(state, workspace, &session.model).await?;
+    credits::require(state, workspace).await?;
+    let run_id = Uuid::now_v7();
+    if !state.store.start_run(workspace, session.id, run_id).await? {
+        return Err(ApiError::Conflict(
+            "a run is already in progress for this session".into(),
+        ));
+    }
+    spawn(state, workspace, session.id, run_id, Start::Compact);
     Ok(())
 }
 
@@ -297,12 +326,12 @@ async fn claim(
         .store
         .append_session_items(workspace, session.id, input)
         .await?;
-    spawn(state, workspace, session.id, run_id, false);
+    spawn(state, workspace, session.id, run_id, Start::New);
     Ok(true)
 }
 
-// stops the session's run here at once, and on any other instance at its next heartbeat;
-// `workspace` is none for admins. false when nothing is running
+// stops the session's run here at once, and on any other instance at its next heartbeat, or drops
+// the question a run is waiting on; `workspace` is none for admins. false when nothing is running
 pub async fn cancel(
     state: &AppState,
     workspace: Option<Uuid>,
@@ -311,6 +340,10 @@ pub async fn cancel(
     let requested = state.store.request_cancel(workspace, session).await?;
     let local = requested && state.runs.cancel(session);
     tracing::debug!(session = %session, requested, local, "cancel requested");
+    if !requested && state.store.dismiss_question(workspace, session).await? {
+        publish(state, session, SessionEvent::RunCancelled).await;
+        return Ok(true);
+    }
     Ok(requested)
 }
 
@@ -327,7 +360,7 @@ pub async fn resume_stale_runs(state: Arc<AppState>) {
             Ok(stale) => {
                 for run in stale {
                     tracing::info!(session = %run.session, "resuming interrupted run");
-                    spawn(&state, run.workspace, run.session, run.run, true);
+                    spawn(&state, run.workspace, run.session, run.run, Start::Resumed);
                 }
             }
             Err(error) => {
@@ -340,7 +373,7 @@ pub async fn resume_stale_runs(state: Arc<AppState>) {
     }
 }
 
-fn spawn(state: &Arc<AppState>, workspace: Uuid, session: Uuid, run_id: RunId, resumed: bool) {
+fn spawn(state: &Arc<AppState>, workspace: Uuid, session: Uuid, run_id: RunId, start: Start) {
     let (cancel, interrupts) = state.runs.insert(session, run_id);
     let span = tracing::info_span!("run", session = %session, workspace = %workspace);
     let task = run(
@@ -348,7 +381,7 @@ fn spawn(state: &Arc<AppState>, workspace: Uuid, session: Uuid, run_id: RunId, r
         workspace,
         session,
         run_id,
-        resumed,
+        start,
         cancel,
         interrupts,
     );
@@ -361,7 +394,7 @@ async fn run(
     workspace: Uuid,
     session: Uuid,
     run: RunId,
-    resumed: bool,
+    start: Start,
     cancel: CancellationToken,
     interrupts: watch::Receiver<()>,
 ) {
@@ -382,14 +415,14 @@ async fn run(
             tracing::warn!(session = %session, error = format!("{error:#}"), "failed to count session usage");
             0
         });
-    let started = if resumed {
+    let started = if start == Start::Resumed {
         SessionEvent::RunResumed { items, usage }
     } else {
         SessionEvent::RunStarted { items, usage }
     };
     publish(&state, session, started).await;
     let result = tokio::select! {
-        result = drive(&state, workspace, session, run, &cancel, interrupts) => result,
+        result = drive(&state, workspace, session, run, start, &cancel, interrupts) => result,
         _ = keep_lease(&state, session, run, &cancel) => Ok(Finished::LostLease),
     };
 
@@ -512,6 +545,7 @@ async fn drive(
     workspace: Uuid,
     id: Uuid,
     run: RunId,
+    start: Start,
     cancel: &CancellationToken,
     interrupts: watch::Receiver<()>,
 ) -> anyhow::Result<Finished> {
@@ -569,6 +603,12 @@ async fn drive(
         workspace,
         session: id,
     };
+    let scheduler = ChatScheduler {
+        state,
+        workspace,
+        session: &session,
+    };
+    let unattended = session.scheduled_task_id.is_some();
     let agent = Agent {
         workspace,
         library: &state.library,
@@ -588,17 +628,29 @@ async fn drive(
         fast: session.fast,
         budget: Some(&budget),
         reasoning_from,
-        unattended: session.scheduled_task_id.is_some(),
+        unattended,
+        // a scheduled run can't schedule more tasks, so they can't multiply
+        scheduler: (!unattended).then_some(&scheduler as &dyn TaskScheduler),
     };
 
     // the agent saves every item as it goes, so whatever happens the session can be continued
+    let mut compacting = start == Start::Compact;
     loop {
         let (tx, rx) = mpsc::channel(256);
         let forwarder = tokio::spawn(forward(state.clone(), workspace, id, session.fast, rx));
+        let work = async {
+            if compacting {
+                agent.compact_context(&mut history, &tx).await
+            } else {
+                agent.run(&mut history, &tx).await
+            }
+        };
         let result = tokio::select! {
-            result = agent.run(&mut history, &tx) => Some(result),
+            result = work => Some(result),
             _ = cancel.cancelled() => None,
         };
+        // messages sent while it compacted get a normal reply
+        compacting = false;
         drop(tx);
         let question = forwarder.await.context("event forwarder panicked")?;
 

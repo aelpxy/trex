@@ -6,9 +6,36 @@ use trex_sandbox::{AccessRequest, AccessStatus, OpenShell};
 
 use crate::{event::Event, sandbox::LazySandbox};
 
-// a denied connection reaches the gateway's review queue a moment after the command fails
-const SETTLE_POLLS: usize = 6;
-const SETTLE_INTERVAL: Duration = Duration::from_millis(500);
+// the sandbox batches denials into requests about every 10 seconds, so a command that looks
+// blocked waits a little longer than that for its request to show up
+const SETTLE_POLLS: usize = 15;
+const SETTLE_INTERVAL: Duration = Duration::from_secs(1);
+// how tools commonly report a connection the sandbox's proxy refused, lowercased
+const BLOCKED_SIGNS: &[&str] = &[
+    "failed to connect",
+    "couldn't connect",
+    "could not connect",
+    "unable to connect",
+    "connection refused",
+    "connection reset",
+    "connect tunnel failed",
+    "tunnel connection failed",
+    "proxyerror",
+    "403 forbidden",
+    "network is unreachable",
+    "could not resolve",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "econnrefused",
+    "econnreset",
+    "eai_again",
+];
+
+// whether a command's output reads like a connection the sandbox denied
+pub fn looks_blocked(output: &str) -> bool {
+    let output = output.to_lowercase();
+    BLOCKED_SIGNS.iter().any(|sign| output.contains(sign))
+}
 const DECISION_INTERVAL: Duration = Duration::from_secs(1);
 // how long a run waits for the user before it carries on without an answer
 const DECISION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -41,18 +68,19 @@ impl AccessGate<'_> {
         }
     }
 
-    // after a command: the note for its output about access it was denied, once the user decided
+    // after a command: the note for its output about access it was denied, once the user decided;
+    // `blocked` is whether its output suggests a denial, which is worth waiting a moment for
     pub async fn settle(
         &self,
         before: &HashSet<String>,
-        failed: bool,
+        blocked: bool,
         events: &mpsc::Sender<Event>,
     ) -> anyhow::Result<Option<String>> {
         let Some(sandbox) = self.sandbox.get_if_ready() else {
             return Ok(None);
         };
         let mut new = Vec::new();
-        for poll in 0..if failed { SETTLE_POLLS } else { 1 } {
+        for poll in 0..if blocked { SETTLE_POLLS } else { 1 } {
             if poll > 0 {
                 sleep(SETTLE_INTERVAL).await;
             }
@@ -167,6 +195,17 @@ mod tests {
             security_notes: String::new(),
             hit_count: 1,
         }
+    }
+
+    #[test]
+    fn spots_blocked_connections() {
+        assert!(looks_blocked(
+            "curl: (7) Failed to connect to example.com port 443 after 0 ms: Couldn't connect to server"
+        ));
+        assert!(looks_blocked("npm error code ECONNREFUSED"));
+        assert!(!looks_blocked(
+            "error: expected `;`, found `}`\n[exit code 1]"
+        ));
     }
 
     #[test]

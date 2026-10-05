@@ -523,6 +523,7 @@ mod tests {
                 sandbox: &sandbox,
                 call_id: "call_test",
                 events: &events,
+                scheduler: None,
             };
             let tools = &tools;
             let args = json!({ "patch": patch }).to_string();

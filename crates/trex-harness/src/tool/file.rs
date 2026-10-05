@@ -377,6 +377,7 @@ mod tests {
             sandbox: &sandbox,
             call_id: "call_test",
             events: &events,
+            scheduler: None,
         };
         let path = "/tmp/trex test/$(touch pwned).txt";
         let call = |name: &'static str, args: Value| {

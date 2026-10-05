@@ -33,6 +33,7 @@ export const queries = {
     library: (workspace: string) => queryOptions({ queryKey: ["admin", "library", workspace], queryFn: () => trex.admin.library(workspace) }),
     usage: (days: number) => queryOptions({ queryKey: ["admin", "usage", days], queryFn: () => trex.admin.usage(days) }),
     runs: () => queryOptions({ queryKey: ["admin", "runs"], queryFn: trex.admin.runs, refetchInterval: RUNS_POLL_MS, staleTime: 0 }),
+    sandboxes: () => queryOptions({ queryKey: ["admin", "sandboxes"], queryFn: trex.admin.sandboxes, refetchInterval: RUNS_POLL_MS }),
     logs: () => queryOptions({ queryKey: ["admin", "logs"], queryFn: trex.admin.logs, refetchInterval: LOG_POLL_MS, staleTime: 0 }),
   },
 };

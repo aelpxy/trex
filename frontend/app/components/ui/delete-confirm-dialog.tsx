@@ -3,7 +3,7 @@ import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { Button } from "./button";
 import { backdrop, dialogDescription, dialogPopup, dialogTitle, dialogViewport } from "./styles";
 
-export type DeleteTarget = { kind: "project" | "chat" | "file" | "task" | "user" | "users" | "folder" | "items"; id: string; name: string };
+export type DeleteTarget = { kind: "project" | "chat" | "file" | "task" | "user" | "users" | "folder" | "items" | "sandbox" | "sandboxes"; id: string; name: string };
 
 type DeleteConfirmDialogProps = {
   target: DeleteTarget | null;

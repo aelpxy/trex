@@ -6,6 +6,7 @@ mod patch;
 mod plan;
 mod preview;
 mod process;
+mod schedule;
 mod search;
 mod time;
 mod web;
@@ -30,6 +31,7 @@ pub use self::{
     plan::UpdatePlan,
     preview::ShowPreview,
     process::{ProcessOutput, StopProcess},
+    schedule::{CreatedTask, NewTask, SCHEDULE_TASK, ScheduleTask, TaskScheduler},
     search::{Glob, Grep},
     time::CurrentTime,
     web::WebFetch,
@@ -47,6 +49,8 @@ pub struct ToolContext<'a> {
     pub sandbox: &'a LazySandbox<'a>,
     pub call_id: &'a str,
     pub events: &'a mpsc::Sender<Event>,
+    // none where tasks can't be scheduled, such as in a scheduled run
+    pub scheduler: Option<&'a dyn TaskScheduler>,
 }
 
 impl ToolContext<'_> {
@@ -162,6 +166,7 @@ impl Tools {
             Box::new(StopProcess),
             Box::new(ViewImage),
             Box::new(ShowPreview),
+            Box::new(ScheduleTask),
         ]))
     }
 
@@ -243,6 +248,7 @@ mod tests {
                 sandbox: &sandbox,
                 call_id: "call_test",
                 events: &events,
+                scheduler: None,
             };
             let tools = &tools;
             async move { tools.call(ctx, name, &args.to_string()).await }

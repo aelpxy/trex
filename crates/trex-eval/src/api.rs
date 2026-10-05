@@ -92,6 +92,17 @@ impl Api {
         Ok((status, response.json().await.unwrap_or(Value::Null)))
     }
 
+    pub async fn scheduled_tasks(&self) -> anyhow::Result<Vec<Value>> {
+        let tasks = self.call(Method::GET, "/scheduled_tasks", None).await?;
+        Ok(tasks["data"].as_array().cloned().unwrap_or_default())
+    }
+
+    pub async fn delete_scheduled_task(&self, id: &str) -> anyhow::Result<()> {
+        self.call(Method::DELETE, &format!("/scheduled_tasks/{id}"), None)
+            .await?;
+        Ok(())
+    }
+
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let mut request = self.request(method.clone(), path);
         if let Some(body) = body {

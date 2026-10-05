@@ -1,6 +1,7 @@
 pub mod library;
 pub mod logs;
 pub mod runs;
+pub mod sandboxes;
 pub mod usage;
 pub mod users;
 pub mod workspaces;

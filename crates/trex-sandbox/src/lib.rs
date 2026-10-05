@@ -629,6 +629,25 @@ impl OpenShell {
         Ok(())
     }
 
+    // every sandbox in every workspace on the gateway; callers keep only their own workspaces
+    pub async fn list_all(&self) -> anyhow::Result<Vec<ListedSandbox>> {
+        let sandboxes = self
+            .client
+            .list_all_sandboxes_all_workspaces(ListOptions::default())
+            .await
+            .context("failed to list sandboxes")?;
+        Ok(sandboxes
+            .into_iter()
+            .map(|listed| ListedSandbox {
+                state: listed.phase.into(),
+                sandbox: Sandbox {
+                    workspace: listed.workspace,
+                    name: listed.name,
+                },
+            })
+            .collect())
+    }
+
     pub async fn delete(&self, sandbox: &Sandbox) -> anyhow::Result<()> {
         self.client
             .workspace(&sandbox.workspace)
@@ -641,6 +660,37 @@ impl OpenShell {
             .await?;
         Ok(())
     }
+}
+
+// a sandbox's lifecycle as the gateway reports it, for admins looking across workspaces
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxState {
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Error,
+    Deleting,
+    Unknown,
+}
+
+impl From<SandboxPhase> for SandboxState {
+    fn from(phase: SandboxPhase) -> Self {
+        match phase {
+            SandboxPhase::Provisioning | SandboxPhase::Starting => Self::Starting,
+            SandboxPhase::Ready => Self::Running,
+            SandboxPhase::Stopping => Self::Stopping,
+            SandboxPhase::Stopped | SandboxPhase::Completed => Self::Stopped,
+            SandboxPhase::Error => Self::Error,
+            SandboxPhase::Deleting => Self::Deleting,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+pub struct ListedSandbox {
+    pub sandbox: Sandbox,
+    pub state: SandboxState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -843,6 +893,30 @@ mod tests {
         let policy = Policy::from_yaml(yaml).unwrap();
         assert!(policy.0.network_policies.contains_key("package_registries"));
         assert!(Policy::from_yaml("version: 1\nbogus: true\n").is_err());
+    }
+
+    // needs the gateway tunnel on 127.0.0.1:17670 and certs in <workspace>/certs/openshell
+    #[tokio::test]
+    #[ignore]
+    async fn lists_sandboxes_across_workspaces() {
+        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
+        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
+            .await
+            .unwrap();
+        let user = Uuid::now_v7();
+        let workspace = openshell.ensure_workspace(user).await.unwrap();
+        let sandbox = openshell.create(&workspace, None, None).await.unwrap();
+
+        let listed = openshell.list_all().await.unwrap();
+        let found = listed
+            .iter()
+            .find(|listed| {
+                listed.sandbox.workspace == workspace && listed.sandbox.name == sandbox.name
+            })
+            .expect("the new sandbox is listed");
+        assert_eq!(found.state, SandboxState::Running);
+
+        openshell.delete_workspace(user).await.unwrap();
     }
 
     // needs the gateway tunnel on 127.0.0.1:17670, certs in <workspace>/certs/openshell, and internet on the gateway host

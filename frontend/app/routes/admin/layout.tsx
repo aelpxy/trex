@@ -22,6 +22,7 @@ const TABS = [
   { to: "/admin/workspaces", label: "Workspaces" },
   { to: "/admin/library", label: "Library" },
   { to: "/admin/runs", label: "Runs" },
+  { to: "/admin/sandboxes", label: "Sandboxes" },
   { to: "/admin/usage", label: "Usage" },
   { to: "/admin/logs", label: "Logs" },
 ];

@@ -55,7 +55,7 @@ function PartView({ part, onRespond, onRetry }: { part: Part; onRespond: Respond
     case "access":
       return <AccessRequest part={part} onResolve={(approved) => onRespond(part.id, { kind: "access", approved })} />;
     case "question":
-      return <QuestionCard part={part} onAnswer={(value) => onRespond(part.id, { kind: "answer", value })} />;
+      return <QuestionCard part={part} onAnswer={(value) => onRespond(part.id, { kind: "answer", value })} onSkip={() => onRespond(part.id, { kind: "skip" })} />;
   }
 }
 

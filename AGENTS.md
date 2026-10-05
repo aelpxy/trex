@@ -35,7 +35,7 @@ Loaded once in `trex-server/src/config.rs` from env (`.env`, real env wins) and 
 
 - The workspace is the tenant: chats, projects, library, sandboxes, usage and credits belong to it; users are members (`workspace_members`, one personal workspace each for now). Every store function on tenant data takes the workspace id and filters by it. Admin queries are the only cross-tenant ones.
 - Auth: email + password (argon2id on a blocking thread) → `session` cookie (`HttpOnly; SameSite=Lax; Secure` unless `TREX_INSECURE_COOKIES`), 30-day `user_sessions` rows. No bearer tokens. Writes need an `X-Requested-With` header (CSRF). `api::auth::Account` is the user; `api::auth::Auth` adds the workspace (`Trex-Workspace` header or their first).
-- Roles `user` | `admin` (`trex admin grant|revoke <email>`). Suspended users (`users.suspended_at`) can't sign in, their sessions stop resolving, and scheduled tasks in workspaces with no unsuspended member wait. Deleting a user (`users.rs`) removes every workspace only they belong to, with its sandboxes, library and events. Admins can't change, suspend or delete themselves.
+- Roles `user` | `admin` (`trex admin grant|revoke <email>`). Suspended users (`users.suspended_at`) can't sign in, their sessions stop resolving, and scheduled tasks in workspaces with no unsuspended member wait. Deleting a user (`users.rs`) removes every workspace only they belong to, with its sandboxes, library and events. Admins can't change, suspend or delete themselves, and a change that would leave no active admin is refused (409).
 - OpenShell: one OpenShell workspace per trex workspace (`workspace_name(uuid)`, labelled `trex-workspace=<uuid>`). trex's identity is a gateway admin, so trex enforces tenancy: never address a sandbox for a request from another workspace.
 
 ## Agent and runs
@@ -43,16 +43,16 @@ Loaded once in `trex-server/src/config.rs` from env (`.env`, real env wins) and 
 - Model: the OpenAI Responses API via `async-openai`, `store=false`; trex persists every output item (encrypted reasoning included) and sends them back verbatim; `prompt_cache_key` is the session id. Reasoning from a different model is left out (`Agent::reasoning_from`).
 - System prompt `instructions.md` plus date and project instructions. It's model-facing: never name the agent trex there or anywhere the model reads.
 - Retries: 5 attempts with backoff on dropped/stalled streams, 408/429/5xx; tools run only after a response completes, so retries are side-effect free (`model.retrying`).
-- Compaction: at 80% of `context_window` or on `context_length_exceeded`, the model writes a handoff summary appended as a developer checkpoint; requests start from the latest one.
+- Compaction: at 80% of `context_window` or on `context_length_exceeded`, the model writes a handoff summary appended as a developer checkpoint; requests start from the latest one. `POST /v1/sessions/{id}/compact` does it on request as a compaction-only run (`Agent::compact_context`); a checkpoint right after a reply still counts as replied, so a resumed or retried run doesn't answer again.
 - History is append-only, saved item by item; dangling tool calls are closed by appending outputs.
 - Runs (`runs.rs`): one per session via a conditional update, holding a lease (`run_id`, `run_heartbeat_at` renewed every 10s; stale after 30s and resumed by any instance). Cancelling sets `run_cancel_requested`; the holder sees it at its next heartbeat, so cancels work across instances (`runs::cancel`), and a stopping run takes no more queued messages. Suspending or deleting a user cancels this way; deleting waits for their runs to stop before removing sandboxes and files.
 - Steering: mid-run messages queue in `sessions.queued_messages` and are read before each step; a run only finishes with an empty queue. Interrupts are in-memory per instance.
 - Credits are US dollars in millionths (`1_000_000` = $1), charged per response from the model's `price` with a ledger entry in one transaction. Plans top balances up monthly; new messages are refused at $0 (402), and a running agent stops with `code: insufficient_credits`.
-- Scheduled tasks: cron (five fields, IANA timezone, at most hourly, 20 per workspace) claimed with `FOR UPDATE SKIP LOCKED` every 30s; each run is a new hidden chat, `unattended` (no `ask_user`); a missed slot runs once.
+- Scheduled tasks: cron (five fields, IANA timezone, at most hourly, 20 per workspace) claimed with `FOR UPDATE SKIP LOCKED` every 30s; each run is a new hidden chat, `unattended` (no `ask_user`, no `schedule_task`); a missed slot runs once. Creation and validation live in `tasks.rs`, shared by the API and the agent's `schedule_task` tool (`tasks::ChatScheduler`, the harness's `TaskScheduler`), which schedules with the chat's model and project.
 
 ## Tools and sandboxes
 
-- Tools: `bash` (with `background`), file tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `grep`, `glob`), `web_fetch`, `library_*`, `view_image`, `process_output`, `stop_process`, `update_plan`, `get_current_time`, `show_preview`, `ask_user`. File tools emit `file.changed` with a diff.
+- Tools: `bash` (with `background`), file tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `grep`, `glob`), `web_fetch`, `library_*`, `view_image`, `process_output`, `stop_process`, `update_plan`, `get_current_time`, `show_preview`, `schedule_task`, `ask_user`. File tools emit `file.changed` with a diff.
 - Background processes run under a `setsid` wrapper in `/tmp/.processes/<id>/`; `stop_process` drops a `stop` file since one exec can't signal another.
 - Attachments are content-addressed at `workspaces/{uuid}/attachments/{sha256}`, referenced as `attachment://` in history and inlined right before each request; they're also copied to `/sandbox/uploads/`.
 - One sandbox per chat, created lazily; idle ones are stopped after `TREX_SANDBOX_IDLE_SECS`; ones in Error or gone are replaced (`sandbox.replaced`).
@@ -73,6 +73,7 @@ Loaded once in `trex-server/src/config.rs` from env (`.env`, real env wins) and 
 - URL state (search, folder, tabs, pages, sorts) lives in search params.
 - Shared UI in `components/ui/`: `data-table.tsx` (TanStack Table: sorting, row selection, per-row props), `side-drawer.tsx` for record details, `toaster.tsx`, `meter.tsx`, `checkbox.tsx`, `switch.tsx`, `select-field.tsx`, `pagination.tsx`, `empty-state.tsx`, dialogs. Build on Base UI parts, never native controls.
 - Library (`components/library/`): a file manager over the flat library api; folders are path prefixes (`entries.ts`), so folder renames and moves move every file under them. Rows share one action list for the ⋯ menu and right-click, drag onto folders and breadcrumbs to move, and accept desktop files.
+- The composer takes slash commands (`chat/slash-commands.ts`, built per chat in `chat-commands.ts`): `/compact`, `/new`, `/model`, `/effort`, `/fast`, `/rename`, `/retry`, `/stop`, offered only when they can run; the context meter beside Send shows the last response's tokens against the model's window.
 - Previews of agent output run in sandboxed iframes (`lib/react-preview.ts`).
 
 ## UX rules

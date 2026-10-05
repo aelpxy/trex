@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@base-ui/react/button";
 import { LuArrowUp, LuBrain, LuClock, LuFileText, LuPaperclip, LuSquare, LuX } from "react-icons/lu";
 
@@ -6,9 +6,11 @@ import { isMac, isTouch } from "~/components/command/shortcuts";
 import { focusRingOutset, iconButton } from "~/components/ui/styles";
 import { ATTACHMENT_TYPES, kindOf, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_MESSAGE_CHARS, readAsDataUrl } from "~/lib/attachments";
 
+import { COMMAND_MENU_ID, CommandMenu, optionId } from "./command-menu";
 import { FastToggle } from "./fast-toggle";
 import { effortsFor, MODELS, supportsFast, type ChatSettings } from "./models";
 import { OptionSelect } from "./option-select";
+import { commandFor, suggestionsFor, type SlashCommand, type Suggestion } from "./slash-commands";
 import type { OutgoingAttachment, QueuedMessage } from "./use-chat";
 
 const MAX_HEIGHT_PX = 200;
@@ -23,6 +25,10 @@ type ComposerProps = {
   onStop: () => void;
   // files dropped on the chat, attached once each
   dropped?: { files: File[]; id: number };
+  // what `/` at the start of the message offers
+  commands?: SlashCommand[];
+  // shown before the send button, like how full the context is
+  status?: ReactNode;
 };
 
 const roundButton = `inline-flex size-8 cursor-pointer items-center justify-center rounded-full bg-ink text-on-solid transition-colors hover:bg-ink/85 data-disabled:cursor-not-allowed data-disabled:opacity-30 ${focusRingOutset}`;
@@ -50,13 +56,36 @@ function AttachmentChip({ attachment, onRemove }: { attachment: OutgoingAttachme
   );
 }
 
-export function Composer({ streaming, settings, queued = [], dropped, onSettingsChange, onSend, onStop }: ComposerProps) {
+export function Composer({ streaming, settings, queued = [], dropped, onSettingsChange, onSend, onStop, commands = [], status }: ComposerProps) {
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<OutgoingAttachment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const canSend = value.trim().length > 0 || attachments.length > 0;
+  // Esc hides the menu until the text changes
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const [active, setActive] = useState(0);
+  const suggestions = dismissed === value ? [] : suggestionsFor(value, commands);
+  const highlighted = suggestions[Math.min(active, suggestions.length - 1)];
+
+  function runCommand(command: SlashCommand, argument: string) {
+    command.run(argument);
+    setValue("");
+    setActive(0);
+    setError(null);
+  }
+
+  // a command's option runs it; a command that takes more is completed so the rest can be typed
+  function pick(suggestion: Suggestion) {
+    if (suggestion.argument !== undefined) return runCommand(suggestion.command, suggestion.argument);
+    if (suggestion.command.argument) {
+      setValue(`/${suggestion.command.name} `);
+      setActive(0);
+      return;
+    }
+    runCommand(suggestion.command, "");
+  }
 
   useLayoutEffect(() => {
     const element = textarea.current;
@@ -93,6 +122,11 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
   function submit(event?: FormEvent, interrupt = false) {
     event?.preventDefault();
     if (!canSend) return;
+    const typed = commandFor(value, commands);
+    if (typed) {
+      if (typed.command.argument && !typed.argument) return setValue(`/${typed.command.name} `);
+      return runCommand(typed.command, typed.argument);
+    }
     onSend(value.trim(), attachments, streaming && interrupt);
     setValue("");
     setAttachments([]);
@@ -100,6 +134,24 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (highlighted) {
+      const move = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+      if (move) {
+        event.preventDefault();
+        setActive((current) => (Math.min(current, suggestions.length - 1) + move + suggestions.length) % suggestions.length);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDismissed(value);
+        return;
+      }
+      if ((event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) || event.key === "Tab") {
+        event.preventDefault();
+        pick(highlighted);
+        return;
+      }
+    }
     if (event.key === "Escape" && streaming) {
       event.preventDefault();
       onStop();
@@ -119,8 +171,9 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
   return (
     <form
       onSubmit={submit}
-      className="glass rounded-2xl border border-line p-2 shadow-sm transition-colors focus-within:border-muted/50"
+      className="glass relative rounded-2xl border border-line p-2 shadow-sm transition-colors focus-within:border-muted/50"
     >
+      {suggestions.length > 0 && <CommandMenu suggestions={suggestions} active={suggestions.indexOf(highlighted)} onPick={pick} onHover={setActive} />}
       {queued.length > 0 && (
         <ul aria-label="Queued messages" className="mb-1 space-y-0.5 border-b border-line px-2 pb-2">
           {queued.map((message) => (
@@ -142,13 +195,21 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
       <textarea
         ref={textarea}
         value={value}
-        onChange={(event) => setValue(event.target.value)}
+        onChange={(event) => {
+          setValue(event.target.value);
+          setActive(0);
+        }}
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={suggestions.length > 0}
+        aria-controls={suggestions.length > 0 ? COMMAND_MENU_ID : undefined}
+        aria-activedescendant={highlighted ? optionId(highlighted) : undefined}
         onKeyDown={onKeyDown}
         onPaste={onPaste}
         rows={1}
         autoFocus={!isTouch()}
         aria-label="Message"
-        placeholder={streaming ? "Add to the task" : "Ask anything"}
+        placeholder={streaming ? "Add to the task" : commands.length > 0 ? "Ask anything, or type / for commands" : "Ask anything"}
         className="block max-h-50 w-full resize-none bg-transparent px-2 py-1.5 text-sm leading-6 text-ink outline-none placeholder:text-muted"
       />
       {streaming && canSend && !error && (
@@ -181,6 +242,7 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
           <OptionSelect label="Thinking effort" options={effortsFor(settings.model)} value={settings.effort} onChange={(effort) => onSettingsChange({ effort })} icon={<LuBrain size={13} className="shrink-0" />} />
           {supportsFast(settings.model) && <FastToggle pressed={settings.fast} onChange={(fast) => onSettingsChange({ fast })} />}
         </div>
+        {status}
         {streaming && canSend && (
           <Button
             type="button"

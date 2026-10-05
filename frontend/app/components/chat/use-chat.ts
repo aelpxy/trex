@@ -5,6 +5,9 @@ import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { ApiError, streamEvents, type StreamEvent } from "~/lib/api";
 import { kindOf, type MessageAttachment } from "~/lib/attachments";
 import { partialString } from "~/lib/partial-json";
+import { queries } from "~/lib/queries";
+import { queryClient } from "~/lib/query-client";
+import { errorMessage, toasts } from "~/lib/toasts";
 import { trex, type ApiAccessRequest, type ApiItem, type ApiItemAttachment, type ApiQuestion, type ApiSession, type ApiUsage } from "~/lib/trex";
 
 import { applyEvent } from "./events";
@@ -16,6 +19,7 @@ const SANDBOX_ROOT = "/sandbox/";
 const ASK_USER = "ask_user";
 const UPDATE_PLAN = "update_plan";
 const APPLY_PATCH = "apply_patch";
+const SCHEDULE_TASK = "schedule_task";
 const COMPACTING_LABEL = "Summarizing context";
 
 export type ChatData = { session: ApiSession; items: ApiItem[]; access: ApiAccessRequest[]; usage: ApiUsage[] };
@@ -130,6 +134,8 @@ function toolView(name: string, args: Record<string, unknown>): { name: ToolName
       return { name: "process", title: "Stop process", input: { detail: text(args.id) } };
     case "get_current_time":
       return { name: "time", input: { detail: text(args.timezone) } };
+    case SCHEDULE_TASK:
+      return { name: "time", title: "Schedule task", input: { detail: `${text(args.title)} · ${text(args.schedule)} ${text(args.timezone)}` } };
     case "show_preview":
       return { name: "web", title: "Open preview", input: { detail: `localhost:${String(args.port ?? "")}${text(args.path) || "/"}` } };
     default: {
@@ -208,6 +214,12 @@ function draftEvent(id: string, name: string, args: string): ChatEvent | null {
   return null;
 }
 
+// stream ids are the server's millisecond clock and a sequence, as `1696500000000-0`
+function eventTime(event: StreamEvent) {
+  const ms = Number(event.id.split("-")[0]);
+  return Number.isFinite(ms) && ms > 0 ? ms : Date.now();
+}
+
 // previews reparse the whole arguments, so long files redraw a few times a second rather than per token
 const DRAFT_REFRESH_MS = 100;
 
@@ -270,7 +282,8 @@ function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: { ite
 
   for (const item of items) {
     if (item.type === "message" && item.role === "user") turns.push({ started: item.created_at, ended: item.created_at });
-    else if (turns.length) turns[turns.length - 1].ended = item.created_at;
+    // compacting later, on request, isn't time the reply took
+    else if (turns.length && item.type !== "compaction") turns[turns.length - 1].ended = item.created_at;
     if (item.type === "message" && item.role === "user") messages.push({ id: crypto.randomUUID(), role: "user", content: item.text, attachments: savedAttachments(item) });
     else if (item.type === "message") apply([{ type: "text.delta", delta: item.text }]);
     else if (item.type === "reasoning") {
@@ -327,6 +340,14 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
     }
     return data ? messagesFrom(data, calls.current) : [];
   });
+  // what the last response sent and got back, which is about what the next request starts with;
+  // unknown right after compacting, until the next response
+  const [contextTokens, setContextTokens] = useState<number | null>(() => {
+    const last = data?.usage.at(-1);
+    return last ? last.input_tokens + last.output_tokens : null;
+  });
+  // a compaction the user asked for belongs to the reply it follows, not a new one
+  const compacting = useRef(false);
   const [title, setTitle] = useState<string | undefined>(data?.session.title ?? (fresh ? titleFrom(fresh.content) : undefined));
   const usage = useRef<Usage>(EMPTY_USAGE);
   // a chat reloaded mid-run replays that run from its start, rebuilt on top of the items saved before it
@@ -360,11 +381,17 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
     });
   }, []);
 
-  const emit = useCallback((...events: ChatEvent[]) => updateLast((message) => events.reduce((current, event) => applyEvent(current, event), message)), [updateLast]);
+  // `at` is when the event happened, so replayed events keep their real times
+  const emitAt = useCallback(
+    (at: number, ...events: ChatEvent[]) => updateLast((message) => events.reduce((current, event) => applyEvent(current, event, at), message)),
+    [updateLast],
+  );
+  const emit = useCallback((...events: ChatEvent[]) => emitAt(Date.now(), ...events), [emitAt]);
 
   const onEvent = useCallback(
     (event: StreamEvent) => {
       const data = event.data;
+      const at = eventTime(event);
       // the replay begins at the run's start; when that was trimmed from the stream, there's nothing to rebuild
       if (replaying.current && event.type !== "run.started" && event.type !== "run.resumed") replaying.current = false;
       if ((event.type === "run.started" || event.type === "run.resumed") && replaying.current && chat) {
@@ -383,10 +410,11 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
         case "run.started":
           setMessages((current) => {
             const last = current.at(-1);
-            // answering a question or retrying continues the same reply, so its usage keeps adding up
-            const continuing = last?.role === "assistant" && last.state === "running";
+            // answering a question, retrying or compacting continues the same reply, so its usage keeps adding up
+            const continuing = last?.role === "assistant" && (last.state === "running" || compacting.current);
             usage.current = continuing ? (last.usage ?? EMPTY_USAGE) : EMPTY_USAGE;
-            return continuing ? current : [...current, newAssistant()];
+            if (continuing && last.state !== "running") return [...current.slice(0, -1), { ...last, state: "running" }];
+            return continuing ? current : [...current, newAssistant(at)];
           });
           break;
         case "run.resumed":
@@ -400,22 +428,22 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
           break;
         case "sandbox.creating":
         case "sandbox.starting":
-          emit({ type: "sandbox.creating" });
+          emitAt(at, { type: "sandbox.creating" });
           break;
         case "sandbox.ready":
-          emit({ type: "sandbox.ready" });
+          emitAt(at, { type: "sandbox.ready" });
           break;
         case "sandbox.replaced":
           updateLast((message) => setStatus(message, `${String(data.reason ?? "The sandbox stopped working")}, so it was replaced with a new one. Files from before are gone.`, true));
           break;
         case "text.delta":
         case "reasoning.delta":
-          emit({ type: event.type, delta: String(data.delta ?? "") });
+          emitAt(at, { type: event.type, delta: String(data.delta ?? "") });
           break;
         case "tool.call.started": {
           const draft = { name: String(data.name), args: "", shownAt: Date.now() };
           drafts.current.set(String(data.call_id), draft);
-          emit(draftEvent(String(data.call_id), draft.name, "") ?? { type: "tool.writing", label: writingLabel(draft.name) });
+          emitAt(at, draftEvent(String(data.call_id), draft.name, "") ?? { type: "tool.writing", label: writingLabel(draft.name) });
           break;
         }
         case "tool.call.delta": {
@@ -425,23 +453,25 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
           if (Date.now() - draft.shownAt < DRAFT_REFRESH_MS) break;
           draft.shownAt = Date.now();
           const preview = draftEvent(String(data.call_id), draft.name, draft.args);
-          if (preview) emit(preview);
+          if (preview) emitAt(at, preview);
           break;
         }
         case "tool.call": {
           drafts.current.delete(String(data.call_id));
           // apply_patch's files appear one by one from file.changed, so its draft goes
-          if (data.name === APPLY_PATCH) emit({ type: "tool.discard", id: String(data.call_id) });
+          if (data.name === APPLY_PATCH) emitAt(at, { type: "tool.discard", id: String(data.call_id) });
           const call = { name: String(data.name), args: parseArgs(String(data.arguments ?? "")) };
           calls.current.set(String(data.call_id), call);
-          emit(...callEvents(String(data.call_id), call));
+          emitAt(at, ...callEvents(String(data.call_id), call));
           break;
         }
         case "tool.output":
-          if (calls.current.get(String(data.call_id))?.name === "bash") emit({ type: "tool.output", id: String(data.call_id), delta: String(data.chunk ?? "") });
+          if (calls.current.get(String(data.call_id))?.name === "bash") emitAt(at, { type: "tool.output", id: String(data.call_id), delta: String(data.chunk ?? "") });
           break;
         case "tool.result":
-          emit(...resultEvents(String(data.call_id), calls.current.get(String(data.call_id)), String(data.output ?? ""), data.is_error === true, true));
+          emitAt(at, ...resultEvents(String(data.call_id), calls.current.get(String(data.call_id)), String(data.output ?? ""), data.is_error === true, true));
+          // a task the agent scheduled shows on the Scheduled page right away
+          if (calls.current.get(String(data.call_id))?.name === SCHEDULE_TASK) void queryClient.invalidateQueries({ queryKey: queries.scheduled.all });
           break;
         case "file.changed": {
           const callId = String(data.call_id);
@@ -451,7 +481,7 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
           const call = calls.current.get(callId);
           if (call?.name === APPLY_PATCH) {
             const id = `${callId}:${path}`;
-            emit({ type: "tool.call", id, name: "edit_file", input: { path, before, after } }, { type: "tool.result", id, ok: true });
+            emitAt(at, { type: "tool.call", id, name: "edit_file", input: { path, before, after } }, { type: "tool.result", id, ok: true });
           } else if (call?.name === "edit_file" && typeof data.before === "string" && typeof data.after === "string") {
             // the whole file replaces the edited snippet, so the diff and the files panel show the real file
             updateLast((message) => ({ ...message, parts: message.parts.map((part) => (part.type === "tool" && part.id === callId ? { ...part, input: { ...part.input, before, after } } : part)) }));
@@ -459,15 +489,16 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
           break;
         }
         case "plan.updated":
-          emit(planEvent(data.explanation, data.steps));
+          emitAt(at, planEvent(data.explanation, data.steps));
           break;
         case "preview.opened":
-          emit({ type: "preview.opened", port: Number(data.port), path: String(data.path ?? "/") });
+          emitAt(at, { type: "preview.opened", port: Number(data.port), path: String(data.path ?? "/") });
           break;
         case "context.compacting":
           updateLast((message) => setStatus(message, COMPACTING_LABEL, false));
           break;
         case "context.compacted":
+          setContextTokens(null);
           updateLast((message) => setStatus(message, "Context summarized", true, (part) => part.type === "status" && part.label === COMPACTING_LABEL));
           break;
         case "usage":
@@ -482,7 +513,8 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
             duration_ms: Number(data.duration_ms ?? 0),
             first_token_ms: typeof data.time_to_first_token_ms === "number" ? data.time_to_first_token_ms : null,
           });
-          emit({ type: "usage", usage: usage.current });
+          emitAt(at, { type: "usage", usage: usage.current });
+          setContextTokens(Number(data.input_tokens ?? 0) + Number(data.output_tokens ?? 0));
           break;
         case "access.requested":
           // denials can be reported after the run finished, which must not reopen it
@@ -495,7 +527,7 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
         case "question":
           questions.current = (data.questions as ApiQuestion[]) ?? [];
           answers.current.clear();
-          emit(...questionEvents(questions.current));
+          emitAt(at, ...questionEvents(questions.current));
           break;
         case "message.received": {
           usage.current = EMPTY_USAGE;
@@ -505,8 +537,8 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
           if (sent) changeQueued((current) => current.filter((message) => message !== sent));
           setMessages((current) => {
             const last = current.at(-1);
-            const settled: Message[] = last?.role === "assistant" ? [...current.slice(0, -1), { ...last, state: "completed", endedAt: Date.now() }] : current;
-            return [...settled, { id: crypto.randomUUID(), role: "user", content, attachments: sent?.attachments }, newAssistant()];
+            const settled: Message[] = last?.role === "assistant" ? [...current.slice(0, -1), { ...last, state: "completed", endedAt: at }] : current;
+            return [...settled, { id: crypto.randomUUID(), role: "user", content, attachments: sent?.attachments }, newAssistant(at)];
           });
           break;
         }
@@ -517,20 +549,25 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
           }
           break;
         case "run.completed":
-          emit({ type: "run.completed" });
+          // a compaction keeps the reply's own end time
+          if (compacting.current) updateLast((message) => ({ ...message, state: "completed" }));
+          else emitAt(at, { type: "run.completed" });
+          compacting.current = false;
           break;
         case "run.cancelled":
-          emit({ type: "run.cancelled" });
+          compacting.current = false;
+          emitAt(at, { type: "run.cancelled" });
           flushQueued();
           break;
         case "run.failed": {
-          emit(failedEvent(typeof data.code === "string" ? data.code : undefined, String(data.error ?? "")));
+          compacting.current = false;
+          emitAt(at, failedEvent(typeof data.code === "string" ? data.code : undefined, String(data.error ?? "")));
           flushQueued();
           break;
         }
       }
     },
-    [chatId, chat, emit, updateLast, renameChat, changeQueued, flushQueued],
+    [chatId, chat, emitAt, updateLast, renameChat, changeQueued, flushQueued],
   );
 
   // one stream per open chat, kept across re-renders and loader refreshes so no event is missed;
@@ -631,6 +668,13 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
         trex.decideAccess(chatId, key, response.approved).catch((error) => console.warn("could not decide the access request", error));
         return;
       }
+      if (response.kind === "skip") {
+        // skipping drops every open question and ends the reply; the server confirms with run.cancelled
+        answers.current.clear();
+        updateLast((message) => ({ ...message, parts: message.parts.map((part) => (part.type === "question" && part.answer === undefined ? { ...part, answer: "Skipped" } : part)) }));
+        trex.cancel(chatId).catch(fail);
+        return;
+      }
       answers.current.set(key, response.value);
       emit({ type: "question.answered", id: key, answer: response.value });
       if (answers.current.size < questions.current.length) return updateLast((message) => ({ ...message, state: "needs_input" }));
@@ -655,5 +699,15 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
     [chatId, renameChat],
   );
 
-  return { messages, running, queued, send, stop, retry, branch, respond, title, rename };
+  // summarizes the conversation now instead of when the context fills up
+  const compact = useCallback(() => {
+    if (!chatId) return;
+    compacting.current = true;
+    trex.compact(chatId).catch((error) => {
+      compacting.current = false;
+      toasts.add({ title: "Couldn't compact the conversation", description: errorMessage(error), type: "error" });
+    });
+  }, [chatId]);
+
+  return { messages, running, queued, send, stop, retry, branch, respond, title, rename, compact, contextTokens };
 }

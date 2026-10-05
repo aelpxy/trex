@@ -8,10 +8,13 @@ import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { previewOf } from "~/lib/preview";
 import type { Project } from "~/lib/workspace";
 
+import { useChatCommands } from "./chat-commands";
 import { ChatHeader } from "./chat-header";
 import { Composer } from "./composer";
+import { ContextMeter } from "./context-meter";
 import { DropZone } from "./drop-zone";
 import { MessageItem } from "./message-item";
+import { contextWindowOf } from "./models";
 import { ScrollToBottom } from "./scroll-to-bottom";
 import { Suggestions } from "./suggestions";
 import { useChat, type ChatData, type FreshChat, type OutgoingAttachment } from "./use-chat";
@@ -86,7 +89,9 @@ export function ChatView({ chatId, data, fresh, project: newIn, children }: Chat
   const { requestDelete, projects } = useWorkspace();
   const project = newIn ?? projects.find((candidate) => candidate.chats.some((chat) => chat.id === chatId));
   const { settings, update } = useChatSettings(data?.session);
-  const { messages, running, queued, send, stop, retry, branch, respond, title, rename: setTitle } = useChat({ chatId, data, fresh, settings, projectId: newIn?.id });
+  const { messages, running, queued, send, stop, retry, branch, respond, title, rename: setTitle, compact, contextTokens } = useChat({ chatId, data, fresh, settings, projectId: newIn?.id });
+  const commands = useChatCommands({ chatId, project, messages, running, settings, update, compact, rename: setTitle, retry, stop });
+  const contextWindow = contextWindowOf(settings.model);
   const { scroller, atBottom, follow, scrollToBottom } = useFollowScroll(messages);
   const files = useMemo(() => filesFrom(messages), [messages]);
   const [dropped, setDropped] = useState<{ files: File[]; id: number }>();
@@ -99,7 +104,10 @@ export function ChatView({ chatId, data, fresh, project: newIn, children }: Chat
     send(content, attachments, interrupt);
   }
 
-  const composer = <Composer dropped={dropped} streaming={running} settings={settings} queued={queued} onSettingsChange={update} onSend={sendAndFollow} onStop={stop} />;
+  const meter = chatId && contextWindow ? <ContextMeter used={contextTokens} window={contextWindow} onCompact={running ? undefined : compact} /> : null;
+  const composer = (
+    <Composer dropped={dropped} streaming={running} settings={settings} queued={queued} onSettingsChange={update} onSend={sendAndFollow} onStop={stop} commands={commands} status={meter} />
+  );
 
   return (
     <FilesProvider sessionId={chatId} generated={files} writing={writing} running={running}>

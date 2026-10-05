@@ -103,4 +103,4 @@ export type ChatEvent =
   | { type: "run.failed"; title: string; detail?: string; retry: boolean }
   | { type: "run.cancelled" };
 
-export type Response = { kind: "answer"; value: string } | { kind: "access"; approved: boolean };
+export type Response = { kind: "answer"; value: string } | { kind: "access"; approved: boolean } | { kind: "skip" };

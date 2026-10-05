@@ -1,3 +1,5 @@
+import { useRef } from "react";
+
 import { download } from "~/lib/api";
 import { errorMessage, toasts, trackToast } from "~/lib/toasts";
 import type { ApiFile } from "~/lib/trex";
@@ -16,8 +18,17 @@ export function useLibraryActions(files: ApiFile[], onDone: () => void) {
   const deletes = useDeleteFiles();
 
   function run<T>(mutation: { mutateAsync: (items: T[]) => Promise<void> }, items: T[], messages: Messages) {
-    trackToast(mutation.mutateAsync(items), messages).then(onDone, () => {});
+    return trackToast(mutation.mutateAsync(items), messages).then(onDone, () => {});
   }
+
+  // folders with uploads still going; deleting or moving one would bring it back half filled
+  const uploading = useRef(new Map<string, number>());
+  const busy = (entries: Entry[], verb: string) => {
+    const folder = entries.find((entry) => entry.kind === "folder" && [...uploading.current.keys()].some((target) => target.startsWith(entry.path)));
+    if (!folder) return false;
+    toasts.add({ title: `Can't ${verb} ${folder.name} yet`, description: "Files are still uploading into it.", type: "error" });
+    return true;
+  };
 
   // every path a file or folder already has; a new file can't take a folder's name or the reverse
   const taken = () => new Set([...files.map((file) => file.path), ...foldersOf(files).map((folder) => folder.slice(0, -1))]);
@@ -25,6 +36,7 @@ export function useLibraryActions(files: ApiFile[], onDone: () => void) {
   // each entry lands at `folder` + its name; nothing starts if one would land on something that
   // exists or on another, so a folder is never merged into another or left half moved
   function relocate(entries: Entry[], folder: string, messages: Messages, name?: string) {
+    if (busy(entries, name === undefined ? "move" : "rename")) return;
     const existing = taken();
     const landing = new Set<string>();
     const moving = entries.filter((entry) => parentOf(entry.path) !== folder || (name !== undefined && name !== baseName(entry.path)));
@@ -37,7 +49,7 @@ export function useLibraryActions(files: ApiFile[], onDone: () => void) {
       landing.add(target);
     }
     if (moving.length === 0) return;
-    run(
+    void run(
       mover,
       moving.flatMap((entry) => movesOf(entry, filesOf(entry, files), folder, name)),
       messages,
@@ -54,7 +66,12 @@ export function useLibraryActions(files: ApiFile[], onDone: () => void) {
       return { path: `${folder}${name}`, file };
     });
     const what = picked.length === 1 ? picked[0].name : plural(picked.length, "file");
-    run(uploads, items, { loading: `Uploading ${what}…`, success: `Uploaded ${what} to ${placeName(folder)}`, error: `Couldn't upload ${what}` });
+    uploading.current.set(folder, (uploading.current.get(folder) ?? 0) + 1);
+    void run(uploads, items, { loading: `Uploading ${what}…`, success: `Uploaded ${what} to ${placeName(folder)}`, error: `Couldn't upload ${what}` }).finally(() => {
+      const left = (uploading.current.get(folder) ?? 1) - 1;
+      if (left > 0) uploading.current.set(folder, left);
+      else uploading.current.delete(folder);
+    });
   }
 
   // names in `folder` that uploading `picked` would overwrite, or that a folder already has
@@ -74,8 +91,9 @@ export function useLibraryActions(files: ApiFile[], onDone: () => void) {
   }
 
   function remove(entries: Entry[]) {
+    if (busy(entries, "delete")) return;
     const what = describe(entries);
-    run(
+    void run(
       deletes,
       entries.flatMap((entry) => filesOf(entry, files)),
       { loading: `Deleting ${what}…`, success: `Deleted ${what}`, error: `Couldn't delete ${what}` },

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use tokio::time::{Instant, sleep};
+use trex_store::admin::AdminChange;
 use uuid::Uuid;
 
 use crate::{
@@ -60,9 +61,10 @@ pub async fn set_suspended(
     state: &AppState,
     user: Uuid,
     suspended: bool,
-) -> Result<bool, ApiError> {
-    if !state.store.set_user_suspended(user, suspended).await? {
-        return Ok(false);
+) -> Result<AdminChange, ApiError> {
+    let change = state.store.set_user_suspended(user, suspended).await?;
+    if change != AdminChange::Changed {
+        return Ok(change);
     }
     if suspended {
         state.store.delete_user_sessions(user, None).await?;
@@ -72,7 +74,7 @@ pub async fn set_suspended(
             }
         }
     }
-    Ok(true)
+    Ok(AdminChange::Changed)
 }
 
 // a new password from an admin, for users locked out; it signs them out everywhere

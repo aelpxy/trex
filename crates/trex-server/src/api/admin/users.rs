@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use trex_store::accounts::UserRole;
+use trex_store::{accounts::UserRole, admin::AdminChange};
 use utoipa::ToSchema;
 
 use super::{Admin, PageQuery, USER_SORTS};
@@ -124,18 +124,28 @@ pub async fn update_user(
         ));
     }
     if let Some(role) = body.role.map(UserRole::from) {
-        if !state.store.set_user_role_by_id(user, role).await? {
-            return Err(not_found());
-        }
+        applied(state.store.set_user_role_by_id(user, role).await?, &id)?;
         tracing::info!(admin = %admin.user, user = %user, role = role.as_str(), "changed user role");
     }
     if let Some(suspended) = body.suspended {
-        if !crate::users::set_suspended(&state, user, suspended).await? {
-            return Err(not_found());
-        }
+        applied(
+            crate::users::set_suspended(&state, user, suspended).await?,
+            &id,
+        )?;
         tracing::info!(admin = %admin.user, user = %user, suspended, "changed user suspension");
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// there's always an active admin left, or no one could manage the server without the cli
+fn applied(change: AdminChange, id: &str) -> Result<(), ApiError> {
+    match change {
+        AdminChange::Changed => Ok(()),
+        AdminChange::NotFound => Err(ApiError::NotFound(format!("no user {id}"))),
+        AdminChange::LastAdmin => Err(ApiError::Conflict(
+            "they're the last active admin; make someone else an admin first".into(),
+        )),
+    }
 }
 
 #[derive(Deserialize, ToSchema)]

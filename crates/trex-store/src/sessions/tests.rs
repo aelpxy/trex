@@ -388,6 +388,33 @@ async fn session_lifecycle() {
         Some(resumed[0].id.as_str())
     );
 
+    sqlx::query(
+        "UPDATE sessions SET status = 'needs_input', pending_question = '{}'::JSONB WHERE id = $1",
+    )
+    .bind(session.id)
+    .execute(&store.pg)
+    .await
+    .unwrap();
+    assert!(
+        !store
+            .dismiss_question(Some(mallory), session.id)
+            .await
+            .unwrap(),
+        "only its workspace"
+    );
+    assert!(
+        store
+            .dismiss_question(Some(alice), session.id)
+            .await
+            .unwrap()
+    );
+    let dismissed = store.session(alice, session.id).await.unwrap().unwrap();
+    assert_eq!(dismissed.status, SessionStatus::Idle);
+    assert!(
+        !store.dismiss_question(None, session.id).await.unwrap(),
+        "nothing to dismiss"
+    );
+
     store
         .delete_session(alice, session.id)
         .await

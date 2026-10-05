@@ -239,6 +239,7 @@ mod tests {
                 sandbox: &sandbox,
                 call_id: "call_test",
                 events: &events,
+                scheduler: None,
             };
             let tools = &tools;
             async move { tools.call(ctx, name, &args.to_string()).await.unwrap() }
@@ -293,6 +294,7 @@ mod tests {
                     sandbox: &sandbox,
                     call_id: "call_test",
                     events: &events,
+                    scheduler: None,
                 },
                 "process_output",
                 &json!({"id": "nope", "wait_seconds": null}).to_string(),

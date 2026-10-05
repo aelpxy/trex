@@ -36,6 +36,10 @@ export const useEndUserSession = () =>
 
 export const useCancelRun = () => useAdminMutation((session: string) => trex.admin.cancelRun(session));
 
+export const useStopSandbox = () => useAdminMutation(({ workspace, name }: { workspace: string; name: string }) => trex.admin.stopSandbox(workspace, name));
+
+export const useDeleteSandbox = () => useAdminMutation(({ workspace, name }: { workspace: string; name: string }) => trex.admin.deleteSandbox(workspace, name));
+
 export const useDeleteUser = () => useAdminMutation((user: string) => trex.admin.deleteUser(user));
 
 // one at a time, since each tears down sandboxes and files; the list refreshes even when one fails part way

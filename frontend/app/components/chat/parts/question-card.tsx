@@ -7,9 +7,9 @@ import { focusRing, focusRingOutset } from "~/components/ui/styles";
 
 import type { QuestionPart } from "../types";
 
-type QuestionCardProps = { part: QuestionPart; onAnswer: (answer: string) => void };
+type QuestionCardProps = { part: QuestionPart; onAnswer: (answer: string) => void; onSkip: () => void };
 
-export function QuestionCard({ part, onAnswer }: QuestionCardProps) {
+export function QuestionCard({ part, onAnswer, onSkip }: QuestionCardProps) {
   const [other, setOther] = useState("");
 
   if (part.answer !== undefined) {
@@ -55,6 +55,11 @@ export function QuestionCard({ part, onAnswer }: QuestionCardProps) {
           Send
         </Button>
       </form>
+      <div className="mt-2 pl-7.5">
+        <BaseButton onClick={onSkip} className={`cursor-pointer rounded text-xs text-muted hover:text-ink ${focusRing}`}>
+          Skip question
+        </BaseButton>
+      </div>
     </section>
   );
 }

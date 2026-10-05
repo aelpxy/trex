@@ -142,6 +142,15 @@ export type ApiLiveRun = {
   credits: number;
   responses: number;
 };
+export type ApiSandboxState = "starting" | "running" | "stopping" | "stopped" | "error" | "deleting" | "unknown";
+export type ApiAdminSandbox = {
+  name: string;
+  workspace: string;
+  workspace_name: string;
+  owner_email: string | null;
+  state: ApiSandboxState;
+  chat: { session: string; title: string | null; running: boolean; active_at: number } | null;
+};
 export type ApiLogLine = { seq: number; time: number; level: "error" | "warn" | "info" | "debug" | "trace"; target: string; message: string; fields: string };
 
 export type ApiPlan = { id: string; name: string; monthly_credits: number };
@@ -206,6 +215,9 @@ export const trex = {
     usage: (days: number) => api<ApiUsageReport>("GET", `/admin/usage?days=${days}`),
     runs: () => api<List<ApiLiveRun>>("GET", "/admin/runs").then((list) => list.data),
     cancelRun: (session: string) => api<void>("POST", `/admin/runs/${session}/cancel`),
+    sandboxes: () => api<List<ApiAdminSandbox>>("GET", "/admin/sandboxes").then((list) => list.data),
+    stopSandbox: (workspace: string, name: string) => api<void>("POST", `/admin/sandboxes/${workspace}/${encodeURIComponent(name)}/stop`),
+    deleteSandbox: (workspace: string, name: string) => api<void>("DELETE", `/admin/sandboxes/${workspace}/${encodeURIComponent(name)}`),
     users: (page: number, perPage: number, search: string, sort = "") => api<Paged<ApiAdminUser>>("GET", `/admin/users?${pageQuery(page, perPage, search, sort)}`),
     updateUser: (user: string, changes: { role?: "user" | "admin"; suspended?: boolean }) => api<void>("PATCH", `/admin/users/${user}`, changes),
     setPassword: (user: string, password: string) => api<void>("POST", `/admin/users/${user}/password`, { password }),
@@ -247,6 +259,7 @@ export const trex = {
   answer: (id: string, answers: { selected: string[]; text: string | null }[]) => api<unknown>("POST", `/sessions/${id}/answers`, { answers }),
   branch: (id: string, body: { message: number; content?: string }) => api<ApiSession>("POST", `/sessions/${id}/branch`, body),
   retry: (id: string) => api<unknown>("POST", `/sessions/${id}/retry`),
+  compact: (id: string) => api<unknown>("POST", `/sessions/${id}/compact`),
   cancel: (id: string) => api<unknown>("POST", `/sessions/${id}/cancel`),
   accessRequests: (id: string) => api<List<ApiAccessRequest>>("GET", `/sessions/${id}/access_requests`).then((list) => list.data),
   decideAccess: (id: string, request: string, approve: boolean) => api<unknown>("POST", `/sessions/${id}/access_requests/${request}/${approve ? "approve" : "reject"}`),

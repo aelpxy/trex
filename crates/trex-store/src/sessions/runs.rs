@@ -176,6 +176,25 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    // a run waiting on the user's answer has nothing running to stop, so cancelling just drops the
+    // question; the next run closes its call like any unfinished one. `workspace` is none for admins
+    pub async fn dismiss_question(
+        &self,
+        workspace: Option<Uuid>,
+        id: Uuid,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE sessions SET status = 'idle', pending_question = NULL, updated_at = NOW() \
+             WHERE id = $1 AND ($2::UUID IS NULL OR workspace_id = $2) AND status = 'needs_input'",
+        )
+        .bind(id)
+        .bind(workspace)
+        .execute(&self.pg)
+        .await
+        .context("failed to dismiss question")?;
+        Ok(result.rows_affected() > 0)
+    }
+
     // a run's leftover messages, only while `run` still holds the session; another instance that took
     // the run over reads them itself
     pub async fn take_run_leftovers(

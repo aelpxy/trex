@@ -279,3 +279,47 @@ pub(super) fn run_object(session: &store::Session, queued: bool) -> Run {
         queued,
     }
 }
+
+/// Compact the context
+///
+/// Summarizes the conversation into a checkpoint that later requests start from, as happens on its
+/// own when the context fills up. Runs like a reply (202): it streams `context.compacting` and
+/// `context.compacted`, then `run.completed`, and can be cancelled.
+#[utoipa::path(
+    post,
+    operation_id = "compact_session",
+    path = "/sessions/{id}/compact",
+    tag = "sessions",
+    params(("id" = String, Path, description = "Session id")),
+    responses(
+        (status = 202, body = Run),
+        (status = 402, response = ErrorResponse),
+        (status = 404, response = ErrorResponse),
+        (status = 409, description = "A run is in progress, the session is waiting for answers, or there is nothing to compact", body = ErrorResponse),
+    ),
+)]
+pub async fn compact(
+    State(state): State<Arc<AppState>>,
+    Auth { workspace, .. }: Auth,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<Run>), ApiError> {
+    let session = find_session(&state, workspace, &id).await?;
+    match session.status {
+        SessionStatus::Running => {
+            return Err(ApiError::Conflict("a run is already in progress".into()));
+        }
+        // compacting would close the question unanswered
+        SessionStatus::NeedsInput => {
+            return Err(ApiError::Conflict(
+                "answer or skip the agent's question first".into(),
+            ));
+        }
+        SessionStatus::Idle | SessionStatus::Failed => {}
+    }
+    let history = history::from_json(state.store.session_items(workspace, session.id).await?)?;
+    if history.is_empty() || history::ends_with_checkpoint(&history) {
+        return Err(ApiError::Conflict("there is nothing new to compact".into()));
+    }
+    runs::compact(&state, workspace, &session).await?;
+    Ok((StatusCode::ACCEPTED, Json(run_object(&session, false))))
+}

@@ -175,6 +175,7 @@ scenarios![
     build_and_package,
     ask_then_continue,
     approve_blocked_network,
+    schedule_from_chat,
     serve_in_the_background,
     preview_a_site,
     run_a_long_job,
@@ -182,6 +183,7 @@ scenarios![
     edit_in_a_branch,
     interrupt_a_long_command,
     compact_a_long_task,
+    compact_on_request,
     sandbox_survives_idle_stop,
     resume_after_crash: exclusive,
 ];
@@ -696,6 +698,51 @@ async fn approve_blocked_network(cx: Arc<Ctx>) -> anyhow::Result<()> {
     Ok(())
 }
 
+// asked in plain words for something recurring, the agent sets up a scheduled task itself
+async fn schedule_from_chat(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let before: Vec<String> = cx
+        .api
+        .scheduled_tasks()
+        .await?
+        .iter()
+        .filter_map(|task| task["id"].as_str().map(str::to_owned))
+        .collect();
+    let prompt = "Every weekday at 9am Berlin time, fetch https://example.com and tell me whether its title \
+        still says Example Domain. Please set that up.";
+    let (_, watch) = cx.one_shot(MODEL, prompt).await?;
+    cx.check(
+        "called schedule_task",
+        called(&watch, "schedule_task"),
+        names(&watch),
+    );
+    let created: Vec<Value> = cx
+        .api
+        .scheduled_tasks()
+        .await?
+        .into_iter()
+        .filter(|task| {
+            task["id"]
+                .as_str()
+                .is_some_and(|id| !before.iter().any(|old| old == id))
+        })
+        .collect();
+    let task = created.first();
+    cx.check(
+        "scheduled for 9:00 on weekdays in Berlin",
+        task.is_some_and(|task| {
+            task["schedule"].as_str().map(str::trim) == Some("0 9 * * 1-5")
+                && task["timezone"] == "Europe/Berlin"
+        }),
+        format!("{created:?}"),
+    );
+    for task in &created {
+        if let Some(id) = task["id"].as_str() {
+            cx.api.delete_scheduled_task(id).await?;
+        }
+    }
+    Ok(())
+}
+
 fn started_in_background(watch: &Watch) -> bool {
     tool_calls(&watch.seen)
         .iter()
@@ -932,6 +979,62 @@ async fn compact_a_long_task(cx: Arc<Ctx>) -> anyhow::Result<()> {
     cx.check(
         "remembered the code word",
         reply.contains("ORCHID-7"),
+        excerpt(&reply),
+    );
+    Ok(())
+}
+
+// compacting when the user asks keeps what matters and adds no reply of its own
+async fn compact_on_request(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let (session, mut watch) = cx
+        .one_shot(MODEL, "My code word is MAPLE-42. Reply with only ok.")
+        .await?;
+    let replies_before = cx
+        .api
+        .items(&session)
+        .await?
+        .iter()
+        .filter(|item| item["type"] == "message" && item["role"] == "assistant")
+        .count();
+    cx.api
+        .post(
+            &format!("/sessions/{session}/compact"),
+            serde_json::json!({}),
+        )
+        .await?;
+    let end = watch.until_end().await?;
+    cx.check_completed(&end);
+    let items = cx.api.items(&session).await?;
+    cx.check(
+        "saved a checkpoint",
+        items
+            .last()
+            .is_some_and(|item| item["type"] == "compaction"),
+        format!("{:?}", items.last()),
+    );
+    let replies_after = items
+        .iter()
+        .filter(|item| item["type"] == "message" && item["role"] == "assistant")
+        .count();
+    cx.check(
+        "added no reply",
+        replies_after == replies_before,
+        format!("{replies_before} replies before, {replies_after} after"),
+    );
+
+    cx.api
+        .send(
+            &session,
+            "What is my code word? Reply with only the word.",
+            false,
+        )
+        .await?;
+    let end = watch.until_end().await?;
+    cx.check_completed(&end);
+    let reply = cx.reply(&session).await?;
+    cx.check(
+        "remembered the code word",
+        reply.contains("MAPLE-42"),
         excerpt(&reply),
     );
     Ok(())

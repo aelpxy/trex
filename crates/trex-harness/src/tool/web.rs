@@ -401,6 +401,7 @@ mod tests {
                 sandbox: &sandbox,
                 call_id: "call_test",
                 events: &events,
+                scheduler: None,
             };
             let tools = &tools;
             async move { tools.call(ctx, "web_fetch", &args.to_string()).await }
