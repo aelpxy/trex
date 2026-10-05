@@ -10,6 +10,7 @@ mod process;
 mod schedule;
 mod search;
 mod time;
+mod transcribe;
 mod web;
 
 use anyhow::Context;
@@ -36,6 +37,7 @@ pub use self::{
     schedule::{CreatedTask, NewTask, SCHEDULE_TASK, ScheduleTask, TaskScheduler},
     search::{Glob, Grep},
     time::CurrentTime,
+    transcribe::{Transcribe, TranscriptionConfig},
     web::WebFetch,
 };
 use crate::{event::Event, sandbox::LazySandbox};
@@ -174,6 +176,14 @@ impl Tools {
             Box::new(Browse),
             Box::new(ScheduleTask),
         ]))
+    }
+
+    // transcription needs a speech-to-text server, so the tool is only offered with one configured
+    pub fn with_transcription(mut self, config: Option<TranscriptionConfig>) -> Self {
+        if let Some(config) = config {
+            self.tools.push(Box::new(Transcribe::new(config)));
+        }
+        self
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {

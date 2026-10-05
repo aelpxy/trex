@@ -1,7 +1,7 @@
 use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, bail};
-use trex_harness::model::Models;
+use trex_harness::{model::Models, tool::TranscriptionConfig};
 use trex_sandbox::Policy;
 
 use crate::credits::Plans;
@@ -24,6 +24,8 @@ pub struct Config {
     pub redis_url: String,
     pub models: Models,
     pub plans: Plans,
+    // none leaves the agent without the transcribe tool
+    pub transcription: Option<TranscriptionConfig>,
     pub sandbox_image: String,
     pub sandbox_policy: Policy,
     pub sandbox_idle_timeout: Duration,
@@ -125,6 +127,8 @@ impl Config {
         let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {path}"))?;
         let models = Models::from_toml(&raw).with_context(|| format!("invalid {path}"))?;
         let plans = Plans::from_toml(&raw).with_context(|| format!("invalid plans in {path}"))?;
+        let transcription = TranscriptionConfig::from_toml(&raw)
+            .with_context(|| format!("invalid transcription in {path}"))?;
         Ok(Self {
             addr,
             preview_addr,
@@ -138,6 +142,7 @@ impl Config {
             redis_url,
             models,
             plans,
+            transcription,
             sandbox_image,
             sandbox_policy,
             sandbox_idle_timeout,

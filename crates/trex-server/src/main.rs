@@ -50,13 +50,16 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("no plans configured, so balances only change when an admin adds funds");
     }
+    if config.transcription.is_none() {
+        tracing::info!("no transcription configured, so the agent can't transcribe audio");
+    }
 
     let state = Arc::new(AppState {
         store,
         openshell,
         models,
         plans: config.plans,
-        tools: Tools::standard()?,
+        tools: Tools::standard()?.with_transcription(config.transcription),
         library: config.library,
         sandbox_image: config.sandbox_image,
         sandbox_policy: config.sandbox_policy,

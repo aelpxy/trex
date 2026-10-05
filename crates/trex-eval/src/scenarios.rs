@@ -180,6 +180,7 @@ scenarios![
     serve_in_the_background,
     preview_a_site,
     check_a_page_in_the_browser,
+    transcribe_a_video,
     run_a_long_job,
     steer_mid_run,
     edit_in_a_branch,
@@ -815,6 +816,33 @@ async fn serve_in_the_background(cx: Arc<Ctx>) -> anyhow::Result<()> {
     cx.check(
         "fetched the page",
         reply.contains("hello from the background"),
+        excerpt(&reply),
+    );
+    Ok(())
+}
+
+// the agent gets the words out of a video with the transcribe tool, which needs `[transcription]` in
+// trex.toml, after making the video itself with ffmpeg
+async fn transcribe_a_video(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let prompt = "Download https://github.com/openai/whisper/raw/main/tests/jfk.flac into /sandbox/media, turn it \
+        into /sandbox/media/speech.mp4 with a plain black picture using ffmpeg, then transcribe that video and \
+        tell me what's said.";
+    let (session, watch) = cx.one_shot(MODEL, prompt).await?;
+    cx.check(
+        "called transcribe",
+        called(&watch, "transcribe"),
+        names(&watch),
+    );
+    // the model knows the speech, so only the tool's own output proves the transcription worked
+    cx.check(
+        "transcribed the speech",
+        fetched(&watch, "ask not what your country can do for you"),
+        names(&watch),
+    );
+    let reply = cx.reply(&session).await?;
+    cx.check(
+        "said what's in it",
+        reply.to_lowercase().contains("country"),
         excerpt(&reply),
     );
     Ok(())

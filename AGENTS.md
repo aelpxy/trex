@@ -31,7 +31,7 @@ Shared dependency versions live in the root `[workspace.dependencies]`.
 
 ## Config
 
-Loaded once in `trex-server/src/config.rs` from env (`.env`, real env wins) and `trex.toml`; nothing else reads env or config files. `.env.example` lists every variable; `TREX_DATABASE_URL` and `TREX_REDIS_URL` hold credentials, never log them. `trex.toml` (gitignored, template `trex.toml.example`) is the model catalog: providers with api keys, `[[models]]` (`id`, `name`, `provider`, `upstream`, `context_window`, `reasoning_efforts`, `fast`, `price` in credits per million tokens) and optional `[plans.*]` with `monthly_credits`.
+Loaded once in `trex-server/src/config.rs` from env (`.env`, real env wins) and `trex.toml`; nothing else reads env or config files. `.env.example` lists every variable; `TREX_DATABASE_URL` and `TREX_REDIS_URL` hold credentials, never log them. `trex.toml` (gitignored, template `trex.toml.example`) is the model catalog: providers with api keys, `[[models]]` (`id`, `name`, `provider`, `upstream`, `context_window`, `reasoning_efforts`, `fast`, `price` in credits per million tokens) optional `[plans.*]` with `monthly_credits`, and optional `[transcription]` (`base_url`, `api_key`, `model`) for any server speaking the OpenAI audio api, like a local Speaches.
 
 ## Tenancy and accounts
 
@@ -54,8 +54,9 @@ Loaded once in `trex-server/src/config.rs` from env (`.env`, real env wins) and 
 
 ## Tools and sandboxes
 
-- Tools: `bash` (with `background`), file tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `grep`, `glob`), `web_fetch`, `library_*`, `view_image`, `process_output`, `stop_process`, `update_plan`, `get_current_time`, `show_preview`, `browse`, `schedule_task`, `ask_user`. File tools emit `file.changed` with a diff.
+- Tools: `bash` (with `background`), file tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `grep`, `glob`), `web_fetch`, `library_*`, `view_image`, `process_output`, `stop_process`, `update_plan`, `get_current_time`, `show_preview`, `browse`, `schedule_task`, `transcribe` (only with `[transcription]`), `ask_user`. File tools emit `file.changed` with a diff.
 - `browse` drives headless Chromium in the sandbox (Playwright from the image; the script `tool/browse.mjs` is sent with each call, so changing it needs no new image) and returns a screenshot, console errors, failed requests and an aria outline. Chromium runs with `--no-sandbox --no-zygote`, since OpenShell's seccomp filter crashes its zygote; local servers are opened at `localhost`. Image results read as `[image: attachment://…]` in tool output, which the chat shows.
+- `transcribe` extracts the audio in the sandbox with ffmpeg (mono 16 kHz opus, up to 3 hours; the file as it is without ffmpeg), sends it with `async-openai`'s `create_raw` and parses the reply leniently, since Speaches omits fields the typed response requires. Don't enable async-openai's `byot` feature: it breaks the agent's response streaming. The transcript is saved beside the file as `<name>.transcript.txt`.
 - Background processes run under a `setsid` wrapper in `/tmp/.processes/<id>/`; `stop_process` drops a `stop` file since one exec can't signal another.
 - Attachments are content-addressed at `workspaces/{uuid}/attachments/{sha256}`, referenced as `attachment://` in history and inlined right before each request; they're also copied to `/sandbox/uploads/`.
 - One sandbox per chat, created lazily; idle ones are stopped after `TREX_SANDBOX_IDLE_SECS`; ones in Error or gone are replaced (`sandbox.replaced`).

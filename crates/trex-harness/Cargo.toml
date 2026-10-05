@@ -9,7 +9,7 @@ trex-sandbox.workspace = true
 trex-store.workspace = true
 
 anyhow.workspace = true
-async-openai = { workspace = true, features = ["responses", "rustls"] }
+async-openai = { workspace = true, features = ["audio", "responses", "rustls"] }
 base64.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 chrono-tz.workspace = true

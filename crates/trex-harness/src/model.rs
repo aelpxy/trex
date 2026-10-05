@@ -78,6 +78,9 @@ struct Catalog {
     #[serde(default)]
     #[allow(dead_code, reason = "parsed by the server's plan config")]
     plans: toml::Table,
+    #[serde(default)]
+    #[allow(dead_code, reason = "parsed by the transcribe tool's config")]
+    transcription: toml::Table,
 }
 
 #[derive(Deserialize)]

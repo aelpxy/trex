@@ -19,3 +19,10 @@ provider = "local"
 # [plans.free]
 # name = "Free"
 # monthly_credits = 5_000_000   # $5; the balance is topped up to this once a month
+
+# speech-to-text for the agent's transcribe tool; any server speaking the openai audio api, such
+# as a local speaches (faster-whisper) or openai; without it the tool isn't offered
+# [transcription]
+# base_url = "http://127.0.0.1:8000/v1"
+# api_key = ""
+# model = "deepdml/faster-whisper-large-v3-turbo-ct2"

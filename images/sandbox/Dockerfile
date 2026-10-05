@@ -68,6 +68,11 @@ RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
     && npm cache clean --force
 
+# media tools in their own layer, so adding them doesn't rebuild the ones above
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 1500 agent \
     && useradd --uid 1500 --gid agent --home-dir /sandbox --shell /bin/bash agent \
     && install -d -o agent -g agent /sandbox
