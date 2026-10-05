@@ -6,8 +6,8 @@ import { focusRing } from "~/components/ui/styles";
 import { useFiles } from "./files-provider";
 
 export function FilesButton() {
-  const { paths, panelOpen, showPanel, close } = useFiles();
-  if (paths.length === 0) return null;
+  const { paths, canBrowse, panelOpen, showPanel, close } = useFiles();
+  if (paths.length === 0 && !canBrowse) return null;
 
   return (
     <Button
@@ -17,7 +17,7 @@ export function FilesButton() {
     >
       <LuFolderTree size={14} />
       Files
-      <span className="rounded bg-subtle px-1 font-mono text-[10px] tabular-nums">{paths.length}</span>
+      {paths.length > 0 && <span className="rounded bg-subtle px-1 font-mono text-[10px] tabular-nums">{paths.length}</span>}
     </Button>
   );
 }

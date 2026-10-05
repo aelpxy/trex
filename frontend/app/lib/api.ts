@@ -98,6 +98,22 @@ export async function download(path: string): Promise<Blob> {
   return response.blob();
 }
 
+// a file in a session's sandbox, under its home folder
+export async function sandboxFile(sessionId: string, path: string): Promise<Blob> {
+  const response = await fetch(`${BASE}/v1/sessions/${sessionId}/files/${encodePath(path)}`, { headers: headers() });
+  if (!response.ok) await failure(response);
+  return response.blob();
+}
+
+export async function putSandboxFile(sessionId: string, path: string, content: Blob | string): Promise<void> {
+  const response = await fetch(`${BASE}/v1/sessions/${sessionId}/files/${encodePath(path)}`, {
+    method: "PUT",
+    headers: headers({ "content-type": "application/octet-stream" }),
+    body: content,
+  });
+  if (!response.ok) await failure(response);
+}
+
 export async function attachment(id: string): Promise<Blob> {
   const response = await fetch(`${BASE}/v1/attachments/${id}`, { headers: headers() });
   if (!response.ok) await failure(response);

@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Button } from "@base-ui/react/button";
 import { Tabs } from "@base-ui/react/tabs";
-import { LuCheck, LuCode, LuCopy, LuDownload, LuEye, LuFileDiff, LuUndo2, LuFolderTree, LuPanelLeftClose, LuPanelLeftOpen, LuX } from "react-icons/lu";
+import { LuCheck, LuCode, LuCopy, LuFileCode, LuDownload, LuEye, LuFileDiff, LuUndo2, LuFolderTree, LuPanelLeftClose, LuPanelLeftOpen, LuX } from "react-icons/lu";
 
 import { DiffView } from "~/components/diff/diff-view";
 import { Markdown } from "~/components/markdown/markdown";
@@ -28,6 +28,10 @@ function download(path: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
+function saveUrl(path: string, url: string) {
+  Object.assign(document.createElement("a"), { href: url, download: path.split("/").pop() ?? "file" }).click();
+}
+
 function EditorFallback() {
   return (
     <div className="space-y-2 p-4" role="status" aria-label="Loading editor">
@@ -40,7 +44,7 @@ function EditorFallback() {
 
 function FileBody({ path }: { path: string }) {
   const { read, write, revert, writing } = useFiles();
-  const { content, status, original } = read(path);
+  const { content, status, original, binary } = read(path);
   const preview = previewOf(path);
   const busy = writing.includes(path);
   // a file the agent is still writing shows its code, then its preview once it's done
@@ -55,6 +59,16 @@ function FileBody({ path }: { path: string }) {
       <CodeEditor path={path} value={content} onChange={(next) => write(path, next)} />
     </Suspense>
   );
+
+  if (binary) {
+    return binary.type.startsWith("image/") ? (
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-6">
+        <img src={binary.url} alt={path} className="max-h-full max-w-full rounded-lg border border-line" />
+      </div>
+    ) : (
+      <EmptyState icon={LuFileCode} title="No preview" description="This file isn't text. Download it to open it." />
+    );
+  }
 
   if (!preview && !changed) return <div className="min-h-0 flex-1">{editor}</div>;
 
@@ -170,7 +184,7 @@ export function FilePanel() {
               <Button onClick={() => copy(file.content)} aria-label={copied ? "Copied" : "Copy file"} title="Copy" className={iconButton}>
                 {copied ? <LuCheck size={15} /> : <LuCopy size={15} />}
               </Button>
-              <Button onClick={() => download(openPath, file.content)} aria-label="Download file" title="Download" className={iconButton}>
+              <Button onClick={() => (file.binary ? saveUrl(openPath, file.binary.url) : download(openPath, file.content))} aria-label="Download file" title="Download" className={iconButton}>
                 <LuDownload size={15} />
               </Button>
             </>

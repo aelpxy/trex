@@ -1,4 +1,4 @@
-import { api } from "./api";
+import { api, encodePath } from "./api";
 
 // shapes of the trex api, see /docs on the trex server
 
@@ -58,6 +58,8 @@ export type ApiAttachmentInput = { data: string; filename: string };
 
 export type ApiAccessRequest = { id: string; status: string; endpoints: string[]; binary: string; rationale: string };
 
+export type ApiSandboxFile = { path: string; size: number; modified_at: number };
+
 export type ApiFile = { path: string; size: number; modified_at: number };
 
 export type ApiCredits = { balance: number; plan: { id: string; name: string; monthly_credits: number } | null; enforced: boolean };
@@ -101,6 +103,10 @@ export const trex = {
   cancel: (id: string) => api<unknown>("POST", `/sessions/${id}/cancel`),
   accessRequests: (id: string) => api<List<ApiAccessRequest>>("GET", `/sessions/${id}/access_requests`).then((list) => list.data),
   decideAccess: (id: string, request: string, approve: boolean) => api<unknown>("POST", `/sessions/${id}/access_requests/${request}/${approve ? "approve" : "reject"}`),
+
+  sandboxFiles: (id: string) => api<List<ApiSandboxFile>>("GET", `/sessions/${id}/files`),
+  moveSandboxFile: (id: string, from: string, to: string) => api<ApiSandboxFile>("POST", `/sessions/${id}/files/move`, { from, to }),
+  deleteSandboxFile: (id: string, path: string) => api<unknown>("DELETE", `/sessions/${id}/files/${encodePath(path)}`),
 
   files: () => api<List<ApiFile>>("GET", "/library").then((list) => list.data),
   deleteFile: (path: string) => api<unknown>("DELETE", `/library/files/${path.split("/").map(encodeURIComponent).join("/")}`),

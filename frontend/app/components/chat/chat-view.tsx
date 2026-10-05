@@ -69,7 +69,7 @@ export function ChatView({ chatId, data, fresh }: ChatViewProps) {
   const composer = <Composer streaming={running} settings={settings} queued={queued} onSettingsChange={update} onSend={sendAndFollow} onStop={stop} />;
 
   return (
-    <FilesProvider generated={files} writing={writing}>
+    <FilesProvider sessionId={chatId} generated={files} writing={writing} running={running}>
       <OpenWhileWriting writing={writing} />
       <div className="flex min-h-0 flex-1">
         <div ref={scroller} className="flex min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain">

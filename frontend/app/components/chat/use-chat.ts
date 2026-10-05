@@ -322,6 +322,9 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
         case "sandbox.ready":
           emit({ type: "sandbox.ready" });
           break;
+        case "sandbox.replaced":
+          updateLast((message) => setStatus(message, `${String(data.reason ?? "The sandbox stopped working")}, so it was replaced with a new one. Files from before are gone.`, true));
+          break;
         case "text.delta":
         case "reasoning.delta":
           emit({ type: event.type, delta: String(data.delta ?? "") });

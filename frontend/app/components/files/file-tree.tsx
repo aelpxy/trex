@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Button } from "@base-ui/react/button";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { ContextMenu } from "@base-ui/react/context-menu";
-import { LuChevronRight, LuFile, LuFilePlus, LuFolder, LuFolderOpen, LuPencil, LuTrash2 } from "react-icons/lu";
+import { LuChevronRight, LuFile, LuFilePlus, LuFolder, LuFolderOpen, LuPencil, LuRefreshCw, LuTrash2 } from "react-icons/lu";
 
 import { collapsiblePanel, dangerMenuItem, focusRing, iconButton, menuItem, popup } from "~/components/ui/styles";
 
@@ -115,7 +115,7 @@ function TreeItems({ nodes, depth, renamingPath, onRename }: { nodes: TreeNode[]
 }
 
 export function FileTree() {
-  const { paths, create } = useFiles();
+  const { paths, create, refresh, loading, error, canBrowse } = useFiles();
   const [creating, setCreating] = useState(false);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const tree = useMemo(() => buildTree(paths), [paths]);
@@ -124,10 +124,22 @@ export function FileTree() {
     <div className="flex h-full flex-col">
       <div className="flex h-9 shrink-0 items-center justify-between pr-1 pl-3">
         <span className="text-xs font-medium text-muted">Files</span>
-        <Button onClick={() => setCreating(true)} aria-label="New file" title="New file" className={`${iconButton} size-7`}>
-          <LuFilePlus size={14} />
-        </Button>
+        <div className="flex items-center">
+          {canBrowse && (
+            <Button onClick={refresh} disabled={loading} aria-label="Refresh files" title="Refresh" className={`${iconButton} size-7`}>
+              <LuRefreshCw size={13} className={loading ? "animate-spin" : undefined} />
+            </Button>
+          )}
+          <Button onClick={() => setCreating(true)} aria-label="New file" title="New file" className={`${iconButton} size-7`}>
+            <LuFilePlus size={14} />
+          </Button>
+        </div>
       </div>
+      {error && (
+        <p role="alert" className="px-3 pb-1.5 text-xs text-danger">
+          {error}
+        </p>
+      )}
       <nav aria-label="Files" className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
         {creating && (
           <PathInput
@@ -141,7 +153,7 @@ export function FileTree() {
           />
         )}
         {tree.length === 0 && !creating ? (
-          <p className="px-2 py-1.5 text-xs text-muted">No files yet</p>
+          <p className="px-2 py-1.5 text-xs text-muted">{loading ? "Loading files…" : "No files yet"}</p>
         ) : (
           <TreeItems nodes={tree} depth={0} renamingPath={renamingPath} onRename={setRenamingPath} />
         )}
