@@ -257,6 +257,28 @@ impl<T> List<T> {
     }
 }
 
+/// A numbered page of a list, for views that jump between pages.
+#[derive(Serialize, ToSchema)]
+pub struct Page<T> {
+    #[schema(example = "list")]
+    object: &'static str,
+    data: Vec<T>,
+    has_more: bool,
+    /// Items on every page together.
+    total_count: i64,
+}
+
+impl<T> Page<T> {
+    pub fn new(data: Vec<T>, has_more: bool, total_count: i64) -> Self {
+        Self {
+            object: "list",
+            data,
+            has_more,
+            total_count,
+        }
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 struct Model {
     #[schema(example = "gpt-6.1-sol")]

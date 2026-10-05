@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
+import { useNavigate } from "react-router";
 import { LuPlus } from "react-icons/lu";
 
 import { Button } from "~/components/ui/button";
@@ -10,13 +11,16 @@ import { backdrop, dialogDescription, dialogPopup, dialogTitle, dialogViewport, 
 export function NewProjectDialog() {
   const [open, setOpen] = useState(false);
   const { createProject: create } = useWorkspace();
+  const navigate = useNavigate();
 
   function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const name = String(new FormData(event.currentTarget).get("name") ?? "").trim();
     if (!name) return;
     setOpen(false);
-    create(name).catch((error) => console.warn("could not create the project", error));
+    create(name)
+      .then((project) => navigate(`/projects/${project.id}`))
+      .catch((error) => console.warn("could not create the project", error));
   }
 
   return (
@@ -33,7 +37,7 @@ export function NewProjectDialog() {
         <Dialog.Viewport className={dialogViewport}>
           <Dialog.Popup className={`${dialogPopup} max-w-sm`}>
             <Dialog.Title className={dialogTitle}>New project</Dialog.Title>
-            <Dialog.Description className={dialogDescription}>Projects group related chats together.</Dialog.Description>
+            <Dialog.Description className={dialogDescription}>Projects group related chats, and their instructions apply to every chat inside.</Dialog.Description>
             <form onSubmit={createProject} className="mt-5">
               <Field.Root name="name">
                 <Field.Label className="mb-1.5 block text-xs font-medium text-muted">Name</Field.Label>

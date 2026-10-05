@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { FilePanel } from "~/components/files/file-panel";
 import { PreviewPanel } from "~/components/files/preview-panel";
@@ -6,6 +6,7 @@ import { FilesButton } from "~/components/files/files-button";
 import { FilesProvider, useFiles } from "~/components/files/files-provider";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { previewOf } from "~/lib/preview";
+import type { Project } from "~/lib/workspace";
 
 import { ChatHeader } from "./chat-header";
 import { Composer } from "./composer";
@@ -74,12 +75,14 @@ function OpenLivePreviews({ messages }: { messages: Message[] }) {
   return null;
 }
 
-type ChatViewProps = { chatId?: string; data?: ChatData; fresh?: FreshChat };
+// a new chat started from a project page belongs to the project, which fills the empty state
+type ChatViewProps = { chatId?: string; data?: ChatData; fresh?: FreshChat; project?: Project; children?: ReactNode };
 
-export function ChatView({ chatId, data, fresh }: ChatViewProps) {
-  const { requestDelete } = useWorkspace();
+export function ChatView({ chatId, data, fresh, project: newIn, children }: ChatViewProps) {
+  const { requestDelete, projects } = useWorkspace();
+  const project = newIn ?? projects.find((candidate) => candidate.chats.some((chat) => chat.id === chatId));
   const { settings, update } = useChatSettings(data?.session);
-  const { messages, running, queued, send, stop, retry, branch, respond, title, rename: setTitle } = useChat({ chatId, data, fresh, settings });
+  const { messages, running, queued, send, stop, retry, branch, respond, title, rename: setTitle } = useChat({ chatId, data, fresh, settings, projectId: newIn?.id });
   const { scroller, atBottom, follow, scrollToBottom } = useFollowScroll(messages);
   const files = useMemo(() => filesFrom(messages), [messages]);
   const [dropped, setDropped] = useState<{ files: File[]; id: number }>();
@@ -102,13 +105,13 @@ export function ChatView({ chatId, data, fresh }: ChatViewProps) {
         <DropZone onFiles={(files) => setDropped((current) => ({ files, id: (current?.id ?? 0) + 1 }))}>
           <div ref={scroller} className="flex min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain">
             {messages.length > 0 && <h1 className="sr-only">{title}</h1>}
-            {title && <ChatHeader title={title} onRename={setTitle} onDelete={chatId ? () => requestDelete({ kind: "chat", id: chatId, name: title }) : undefined} actions={<FilesButton />} />}
+            {title && <ChatHeader title={title} chatId={chatId} project={project} onRename={setTitle} onDelete={chatId ? () => requestDelete({ kind: "chat", id: chatId, name: title }) : undefined} actions={<FilesButton />} />}
             {messages.length === 0 ? (
               <div className="flex flex-1 flex-col items-center justify-center px-4 pb-[12vh]">
                 <div className="w-full max-w-2xl">
-                  <h1 className="mb-6 text-center text-2xl font-medium tracking-tight">{title ? "Continue the conversation" : "What are we building?"}</h1>
+                  <h1 className="mb-6 text-center text-2xl font-medium tracking-tight">{title ? "Continue the conversation" : (newIn?.name ?? "What are we building?")}</h1>
                   {composer}
-                  {!title && <Suggestions onPick={sendAndFollow} />}
+                  {children ?? (!title && <Suggestions onPick={sendAndFollow} />)}
                 </div>
               </div>
             ) : (

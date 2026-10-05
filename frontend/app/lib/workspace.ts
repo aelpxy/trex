@@ -1,14 +1,14 @@
 import type { ApiMe, ApiProject, ApiSession, ApiWorkspace } from "./trex";
 
-export type Chat = { id: string; title: string };
-export type Project = { id: string; name: string; chats: Chat[] };
+export type Chat = { id: string; title: string; projectId: string | null };
+export type Project = { id: string; name: string; instructions: string | null; chats: Chat[] };
 export type Workspace = { id: string; name: string; plan: string; projects: Project[]; recents: Chat[] };
 
 export type Account = { me: ApiMe; workspaceId: string; projects: ApiProject[]; sessions: ApiSession[] };
 
 export const UNTITLED = "New chat";
 
-export const chatOf = (session: ApiSession): Chat => ({ id: session.id, title: session.title ?? UNTITLED });
+export const chatOf = (session: ApiSession): Chat => ({ id: session.id, title: session.title ?? UNTITLED, projectId: session.project_id });
 
 const planLabel = (plan: string) => plan.charAt(0).toUpperCase() + plan.slice(1);
 
@@ -21,6 +21,7 @@ export function workspaceOf(workspace: ApiWorkspace, projects: ApiProject[], ses
     projects: projects.map((project) => ({
       id: project.id,
       name: project.name,
+      instructions: project.instructions,
       chats: sessions.filter((session) => session.project_id === project.id).map(chatOf),
     })),
     recents: sessions.filter((session) => !session.project_id || !projects.some((project) => project.id === session.project_id)).map(chatOf),

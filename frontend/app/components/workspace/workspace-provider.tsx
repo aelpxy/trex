@@ -16,7 +16,9 @@ type WorkspaceContextValue = {
   projects: Workspace["projects"];
   recents: Workspace["recents"];
   requestDelete: (target: DeleteTarget) => void;
-  createProject: (name: string) => Promise<void>;
+  createProject: (name: string) => Promise<ApiProject>;
+  updateProject: (id: string, patch: { name?: string; instructions?: string | null }) => Promise<void>;
+  moveChat: (id: string, projectId: string | null) => void;
   addChat: (session: ApiSession) => void;
   renameChat: (id: string, title: string) => void;
   logout: () => void;
@@ -70,7 +72,23 @@ export function WorkspaceProvider({ account, children }: { account: Account; chi
   const createProject = useCallback(async (name: string) => {
     const project = await trex.createProject(name);
     setProjects((current) => [project, ...current]);
+    return project;
   }, []);
+
+  const updateProject = useCallback(async (id: string, patch: { name?: string; instructions?: string | null }) => {
+    const project = await trex.updateProject(id, patch);
+    setProjects((current) => current.map((existing) => (existing.id === id ? project : existing)));
+  }, []);
+
+  const moveChat = useCallback((id: string, projectId: string | null) => {
+    const previous = sessions.find((session) => session.id === id)?.project_id ?? null;
+    const place = (project_id: string | null) => setSessions((current) => current.map((session) => (session.id === id ? { ...session, project_id } : session)));
+    place(projectId);
+    trex.updateSession(id, { project_id: projectId }).catch((error) => {
+      console.warn("could not move the chat", error);
+      place(previous);
+    });
+  }, [sessions]);
 
   const addChat = useCallback((session: ApiSession) => setSessions((current) => [session, ...current.filter((existing) => existing.id !== session.id)]), []);
 
@@ -96,7 +114,8 @@ export function WorkspaceProvider({ account, children }: { account: Account; chi
   async function confirmDelete(target: DeleteTarget) {
     const chatIds = chatIdsOf(target);
     setPending(null);
-    if (chatIds.some((id) => location.pathname === `/chat/${id}`)) navigate("/");
+    const open = chatIds.some((id) => location.pathname === `/chat/${id}`) || (target.kind === "project" && location.pathname === `/projects/${target.id}`);
+    if (open) navigate("/");
     setSessions((current) => current.filter((session) => !chatIds.includes(session.id)));
     if (target.kind === "project") setProjects((current) => current.filter((project) => project.id !== target.id));
     try {
@@ -120,11 +139,13 @@ export function WorkspaceProvider({ account, children }: { account: Account; chi
       recents: current.recents,
       requestDelete,
       createProject,
+      updateProject,
+      moveChat,
       addChat,
       renameChat,
       logout,
     }),
-    [workspaces, current, account.me.user, switchWorkspace, requestDelete, createProject, addChat, renameChat, logout],
+    [workspaces, current, account.me.user, switchWorkspace, requestDelete, createProject, updateProject, moveChat, addChat, renameChat, logout],
   );
 
   return (

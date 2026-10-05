@@ -33,6 +33,8 @@ pub struct UserSummary {
     pub name: String,
     pub role: UserRole,
     pub workspaces: i64,
+    // the balance of the first workspace they own
+    pub credits: Option<i64>,
     pub created_at: i64,
     // when any of their sessions last made a request; none if they have no live session
     pub last_active_at: Option<i64>,
@@ -173,13 +175,25 @@ impl Store {
         })
     }
 
-    pub async fn all_users(&self) -> anyhow::Result<Vec<UserSummary>> {
+    // a page of users, newest first, whose name or email contains `search`
+    pub async fn users_page(
+        &self,
+        search: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<UserSummary>> {
         let rows = sqlx::query(
             "SELECT u.id, u.email, u.name, u.role, EXTRACT(EPOCH FROM u.created_at)::BIGINT AS created_at, \
              (SELECT COUNT(*) FROM workspace_members m WHERE m.user_id = u.id) AS workspaces, \
+             (SELECT w.credits FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id \
+              WHERE m.user_id = u.id AND m.role = 'owner' ORDER BY w.created_at LIMIT 1) AS credits, \
              (SELECT EXTRACT(EPOCH FROM MAX(t.last_used_at))::BIGINT FROM user_sessions t WHERE t.user_id = u.id) AS last_active_at \
-             FROM users u ORDER BY u.created_at DESC",
+             FROM users u WHERE $1::TEXT IS NULL OR u.email ILIKE $1 OR u.name ILIKE $1 \
+             ORDER BY u.created_at DESC, u.id DESC LIMIT $2 OFFSET $3",
         )
+        .bind(search.map(contains_pattern))
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pg)
         .await
         .context("failed to list users")?;
@@ -195,11 +209,22 @@ impl Store {
                         UserRole::User
                     },
                     workspaces: row.try_get("workspaces")?,
+                    credits: row.try_get("credits")?,
                     created_at: row.try_get("created_at")?,
                     last_active_at: row.try_get("last_active_at")?,
                 })
             })
             .collect()
+    }
+
+    pub async fn user_count(&self, search: Option<&str>) -> anyhow::Result<i64> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users u WHERE $1::TEXT IS NULL OR u.email ILIKE $1 OR u.name ILIKE $1",
+        )
+        .bind(search.map(contains_pattern))
+        .fetch_one(&self.pg)
+        .await
+        .context("failed to count users")
     }
 
     // false when there's no such user
@@ -211,5 +236,80 @@ impl Store {
             .await
             .context("failed to set user role")?;
         Ok(result.rows_affected() > 0)
+    }
+}
+
+// an ILIKE pattern matching text that contains `search` literally
+pub(crate) fn contains_pattern(search: &str) -> String {
+    let escaped = search
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn searches_match_text_literally() {
+        assert_eq!(contains_pattern("ada"), "%ada%");
+        assert_eq!(contains_pattern(r"50%_a\b"), r"%50\%\_a\\b%");
+    }
+
+    // needs TREX_DATABASE_URL and TREX_REDIS_URL: cargo test -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn pages_and_searches_users_and_workspaces() {
+        dotenvy::dotenv().ok();
+        let store = Store::connect(
+            &std::env::var("TREX_DATABASE_URL").unwrap(),
+            &std::env::var("TREX_REDIS_URL").unwrap(),
+        )
+        .await
+        .unwrap();
+        let tag = Uuid::now_v7().simple().to_string();
+        let mut created = Vec::new();
+        for name in ["Ann", "Bob", "Cy"] {
+            let email = format!("{name}-{tag}@test.trex");
+            let (user, workspace) = store.create_user(&email, name, "x").await.unwrap().unwrap();
+            created.push((user.id, workspace.id, email));
+        }
+
+        assert_eq!(store.user_count(Some(&tag)).await.unwrap(), 3);
+        let first = store.users_page(Some(&tag), 2, 0).await.unwrap();
+        let second = store.users_page(Some(&tag), 2, 2).await.unwrap();
+        let names: Vec<_> = first
+            .iter()
+            .chain(&second)
+            .map(|u| u.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["Cy", "Bob", "Ann"],
+            "newest first, split across pages"
+        );
+        assert_eq!(second[0].credits, Some(0));
+        assert_eq!(
+            store.user_count(Some(&format!("ann-{tag}"))).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            store.user_count(Some("%")).await.unwrap(),
+            0,
+            "% is literal"
+        );
+
+        assert_eq!(store.workspace_count(Some(&tag), None).await.unwrap(), 3);
+        let (_, bob_workspace, bob_email) = &created[1];
+        let found = store
+            .workspaces_page(None, Some(*bob_workspace), 20, 0)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].owner_email.as_deref(), Some(bob_email.as_str()));
+        let page = store.workspaces_page(Some(&tag), None, 2, 2).await.unwrap();
+        assert_eq!(page.len(), 1);
     }
 }

@@ -5,6 +5,7 @@ export default [
   layout("routes/layout.tsx", [
     index("routes/home.tsx"),
     route("chat/:chatId", "routes/chat.tsx"),
+    route("projects/:projectId", "routes/project.tsx"),
     route("scheduled", "routes/scheduled.tsx"),
     route("scheduled/:taskId", "routes/scheduled-task.tsx"),
     route("library", "routes/library.tsx"),

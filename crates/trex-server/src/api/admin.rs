@@ -13,12 +13,51 @@ use utoipa::{IntoParams, ToSchema};
 use trex_store::accounts::UserRole;
 
 use super::{
-    AppState, List,
+    AppState, List, Page,
     auth::Account,
     error::{ApiError, ErrorResponse},
     ids::{self, USER, WORKSPACE},
     library::{File, FileContent, file, library_error},
 };
+
+const DEFAULT_PAGE_SIZE: i64 = 20;
+const MAX_PAGE_SIZE: i64 = 100;
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PageQuery {
+    /// Page size, 1 to 100.
+    #[param(default = 20, minimum = 1, maximum = 100)]
+    limit: Option<i64>,
+    /// A page number, from 1.
+    #[param(default = 1, minimum = 1)]
+    page: Option<i64>,
+    /// Text to search for.
+    #[param(example = "ada@example.com")]
+    q: Option<String>,
+}
+
+impl PageQuery {
+    // the page size and how many items come before the page
+    fn window(&self) -> Result<(i64, i64), ApiError> {
+        let limit = self.limit.unwrap_or(DEFAULT_PAGE_SIZE);
+        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+            return Err(ApiError::invalid(
+                format!("limit must be between 1 and {MAX_PAGE_SIZE}"),
+                "limit",
+            ));
+        }
+        let page = self.page.unwrap_or(1);
+        if page < 1 {
+            return Err(ApiError::invalid("page starts at 1", "page"));
+        }
+        Ok((limit, (page - 1) * limit))
+    }
+
+    fn search(&self) -> Option<&str> {
+        self.q.as_deref().map(str::trim).filter(|q| !q.is_empty())
+    }
+}
 
 // a signed-in user with the admin role; admins are made with `trex admin grant <email>`
 pub struct Admin {
@@ -69,25 +108,36 @@ pub struct AdminWorkspace {
 
 /// List all workspaces
 ///
-/// Every workspace on the server, newest first.
+/// Every workspace on the server, newest first. `q` matches a workspace id, or text in the name or
+/// a member's email.
 #[utoipa::path(
     get,
     operation_id = "list_all_workspaces",
     path = "/admin/workspaces",
     tag = "admin",
+    params(PageQuery),
     responses(
-        (status = 200, body = List<AdminWorkspace>),
+        (status = 200, body = Page<AdminWorkspace>),
+        (status = 400, response = ErrorResponse),
         (status = 403, response = ErrorResponse),
     ),
 )]
 pub async fn list_workspaces(
     State(state): State<Arc<AppState>>,
     _: Admin,
-) -> Result<Json<List<AdminWorkspace>>, ApiError> {
-    let data = state
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Page<AdminWorkspace>>, ApiError> {
+    let (limit, offset) = query.window()?;
+    let id = query.search().and_then(|q| ids::decode(WORKSPACE, q));
+    let search = if id.is_some() { None } else { query.search() };
+    let total_count = state.store.workspace_count(search, id).await?;
+    let mut workspaces = state
         .store
-        .all_workspaces()
-        .await?
+        .workspaces_page(search, id, limit + 1, offset)
+        .await?;
+    let has_more = workspaces.len() as i64 > limit;
+    workspaces.truncate(limit as usize);
+    let data = workspaces
         .into_iter()
         .map(|workspace| AdminWorkspace {
             id: ids::encode(WORKSPACE, workspace.id),
@@ -100,7 +150,7 @@ pub async fn list_workspaces(
             created_at: workspace.created_at,
         })
         .collect();
-    Ok(Json(List::new(data, false)))
+    Ok(Json(Page::new(data, has_more, total_count)))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -377,28 +427,39 @@ pub struct AdminUser {
     workspaces: i64,
     /// Unix seconds.
     created_at: i64,
+    /// The balance of the first workspace they own, in millionths of a dollar.
+    credits: Option<i64>,
     /// Unix seconds, the last request from any of their signed-in devices.
     last_active_at: Option<i64>,
 }
 
 /// List users
 ///
-/// Every user, newest first.
+/// Every user, newest first. `q` matches text in the name or email.
 #[utoipa::path(
     get,
     operation_id = "list_users",
     path = "/admin/users",
     tag = "admin",
-    responses((status = 200, body = List<AdminUser>), (status = 403, response = ErrorResponse)),
+    params(PageQuery),
+    responses(
+        (status = 200, body = Page<AdminUser>),
+        (status = 400, response = ErrorResponse),
+        (status = 403, response = ErrorResponse),
+    ),
 )]
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     _: Admin,
-) -> Result<Json<List<AdminUser>>, ApiError> {
-    let data = state
-        .store
-        .all_users()
-        .await?
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Page<AdminUser>>, ApiError> {
+    let (limit, offset) = query.window()?;
+    let search = query.search();
+    let total_count = state.store.user_count(search).await?;
+    let mut users = state.store.users_page(search, limit + 1, offset).await?;
+    let has_more = users.len() as i64 > limit;
+    users.truncate(limit as usize);
+    let data = users
         .into_iter()
         .map(|user| AdminUser {
             id: ids::encode(USER, user.id),
@@ -407,11 +468,12 @@ pub async fn list_users(
             name: user.name,
             role: super::account::Role::from(user.role),
             workspaces: user.workspaces,
+            credits: user.credits,
             created_at: user.created_at,
             last_active_at: user.last_active_at,
         })
         .collect();
-    Ok(Json(List::new(data, false)))
+    Ok(Json(Page::new(data, has_more, total_count)))
 }
 
 #[derive(Deserialize, ToSchema)]

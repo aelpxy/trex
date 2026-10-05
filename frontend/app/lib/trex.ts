@@ -44,6 +44,7 @@ export type ApiSignInSession = {
 };
 export type ApiMe = { user: ApiUser; workspaces: ApiWorkspace[] };
 export type List<T> = { object: "list"; data: T[]; has_more: boolean };
+export type Paged<T> = List<T> & { total_count: number };
 
 export type ApiModel = {
   id: string;
@@ -105,7 +106,7 @@ export type ApiSandboxFile = { path: string; size: number; modified_at: number }
 export type ApiFile = { path: string; size: number; modified_at: number };
 
 export type ApiAdminWorkspace = { id: string; name: string; plan: string; credits: number; owner_email: string | null; allowed_models: string[] | null; created_at: number };
-export type ApiAdminUser = { id: string; email: string; name: string; role: "user" | "admin"; workspaces: number; created_at: number; last_active_at: number | null };
+export type ApiAdminUser = { id: string; email: string; name: string; role: "user" | "admin"; workspaces: number; credits: number | null; created_at: number; last_active_at: number | null };
 export type ApiModelUsage = { model: string; credits: number; input_tokens: number; output_tokens: number; responses: number };
 export type ApiOverview = {
   users: number;
@@ -133,6 +134,9 @@ export type ApiLedgerEntry = { id: string; amount: number; balance: number; kind
 export type ApiCredits = { balance: number; plan: { id: string; name: string; monthly_credits: number } | null };
 
 const MAX_PAGE = 100;
+
+const pageQuery = (page: number, perPage: number, search: string) =>
+  new URLSearchParams({ page: String(page), limit: String(perPage), ...(search.trim() ? { q: search.trim() } : {}) }).toString();
 
 // every page, since the sidebar shows all chats and projects
 async function all<T extends { id: string }>(path: string): Promise<T[]> {
@@ -167,7 +171,7 @@ export const trex = {
   models: () => api<List<ApiModel>>("GET", "/models").then((list) => list.data),
   credits: () => api<ApiCredits>("GET", "/credits"),
   admin: {
-    workspaces: () => api<List<ApiAdminWorkspace>>("GET", "/admin/workspaces").then((list) => list.data),
+    workspaces: (page: number, perPage: number, search: string) => api<Paged<ApiAdminWorkspace>>("GET", `/admin/workspaces?${pageQuery(page, perPage, search)}`),
     adjustCredits: (workspace: string, body: { amount: number; description: string }) =>
       api<{ workspace: string; balance: number }>("POST", `/admin/workspaces/${workspace}/credits`, body),
     setPlan: (workspace: string, plan: string) => api<void>("POST", `/admin/workspaces/${workspace}/plan`, { plan }),
@@ -175,7 +179,7 @@ export const trex = {
     models: () => api<List<ApiModel>>("GET", "/admin/models").then((list) => list.data),
     overview: () => api<ApiOverview>("GET", "/admin/overview"),
     usage: (days: number) => api<ApiUsageReport>("GET", `/admin/usage?days=${days}`),
-    users: () => api<List<ApiAdminUser>>("GET", "/admin/users").then((list) => list.data),
+    users: (page: number, perPage: number, search: string) => api<Paged<ApiAdminUser>>("GET", `/admin/users?${pageQuery(page, perPage, search)}`),
     setRole: (user: string, role: "user" | "admin") => api<void>("PATCH", `/admin/users/${user}`, { role }),
     signOut: (user: string) => api<void>("POST", `/admin/users/${user}/sign_out`),
     signInSessions: (user: string) => api<List<ApiSignInSession>>("GET", `/admin/users/${user}/sessions`).then((list) => list.data),
@@ -184,12 +188,13 @@ export const trex = {
     logs: () => api<List<ApiLogLine>>("GET", "/admin/logs?limit=1000").then((list) => list.data),
   },
   plans: () => api<List<ApiPlan>>("GET", "/plans").then((list) => list.data),
-  ledger: (page: number, perPage: number) => api<List<ApiLedgerEntry> & { total_count: number }>("GET", `/credits/ledger?page=${page}&limit=${perPage}`),
+  ledger: (page: number, perPage: number) => api<Paged<ApiLedgerEntry>>("GET", `/credits/ledger?page=${page}&limit=${perPage}`),
   updateMe: (body: { name: string }) => api<ApiUser>("PATCH", "/me", body),
   changePassword: (body: { current_password: string; new_password: string }) => api<void>("POST", "/me/password", body),
 
   projects: () => all<ApiProject>("/projects"),
   createProject: (name: string) => api<ApiProject>("POST", "/projects", { name }),
+  updateProject: (id: string, body: { name?: string; instructions?: string | null }) => api<ApiProject>("PATCH", `/projects/${id}`, body),
   deleteProject: (id: string) => api<unknown>("DELETE", `/projects/${id}`),
 
   sessions: () => all<ApiSession>("/sessions"),

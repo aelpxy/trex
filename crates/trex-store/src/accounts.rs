@@ -169,13 +169,27 @@ impl Store {
     }
 
     // every workspace, newest first, for admins
-    pub async fn all_workspaces(&self) -> anyhow::Result<Vec<WorkspaceSummary>> {
+    // a page of workspaces, newest first, matching `id` or whose name or a member's email contains
+    // `search`
+    pub async fn workspaces_page(
+        &self,
+        search: Option<&str>,
+        id: Option<Uuid>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<WorkspaceSummary>> {
         let rows = sqlx::query(
             "SELECT w.id, w.name, w.plan, w.credits, w.allowed_models, EXTRACT(EPOCH FROM w.created_at)::BIGINT AS created_at, \
              (SELECT u.email FROM workspace_members m JOIN users u ON u.id = m.user_id \
               WHERE m.workspace_id = w.id ORDER BY m.role = 'owner' DESC, u.created_at LIMIT 1) AS owner_email \
-             FROM workspaces w ORDER BY w.created_at DESC",
+             FROM workspaces w WHERE ($1::TEXT IS NULL OR w.name ILIKE $1 OR EXISTS (SELECT 1 FROM workspace_members m JOIN users u ON u.id = m.user_id \
+             WHERE m.workspace_id = w.id AND u.email ILIKE $1)) AND ($2::UUID IS NULL OR w.id = $2) \
+             ORDER BY w.created_at DESC, w.id DESC LIMIT $3 OFFSET $4",
         )
+        .bind(search.map(crate::admin::contains_pattern))
+        .bind(id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pg)
         .await
         .context("failed to list workspaces")?;
@@ -192,6 +206,22 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    pub async fn workspace_count(
+        &self,
+        search: Option<&str>,
+        id: Option<Uuid>,
+    ) -> anyhow::Result<i64> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workspaces w WHERE ($1::TEXT IS NULL OR w.name ILIKE $1 OR EXISTS (SELECT 1 FROM workspace_members m JOIN users u ON u.id = m.user_id \
+             WHERE m.workspace_id = w.id AND u.email ILIKE $1)) AND ($2::UUID IS NULL OR w.id = $2)",
+        )
+        .bind(search.map(crate::admin::contains_pattern))
+        .bind(id)
+        .fetch_one(&self.pg)
+        .await
+        .context("failed to count workspaces")
     }
 
     // the models a workspace may use; none means every model

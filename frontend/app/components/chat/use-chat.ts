@@ -294,9 +294,9 @@ function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: numbe
   return timeTurns(untimed, turns, data.usage, running);
 }
 
-type UseChatOptions = { chatId?: string; data?: ChatData; fresh?: FreshChat; settings: ChatSettings };
+type UseChatOptions = { chatId?: string; data?: ChatData; fresh?: FreshChat; settings: ChatSettings; projectId?: string };
 
-export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
+export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOptions) {
   const chat = data;
   const calls = useRef(new Map<string, ToolCall>());
   const drafts = useRef(new Map<string, { name: string; args: string; shownAt: number }>());
@@ -571,7 +571,7 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
       if (!chatId) {
         // a new chat gets its session first, then continues on its own route
         trex
-          .createSession(sessionSettings(settings))
+          .createSession({ ...sessionSettings(settings), project_id: projectId ?? null })
           .then(async (session) => {
             addChat(session);
             await trex.sendMessage(session.id, content, body);
@@ -583,7 +583,7 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
       if (!title) setTitle(titleFrom(content));
       trex.sendMessage(chatId, content, body).catch(fail);
     },
-    [chatId, running, settings, title, addChat, navigate, fail, changeQueued],
+    [chatId, running, settings, projectId, title, addChat, navigate, fail, changeQueued],
   );
 
   const stop = useCallback(() => {

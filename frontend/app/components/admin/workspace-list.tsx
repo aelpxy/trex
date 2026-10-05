@@ -1,23 +1,25 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 
+import { Pagination, usePage } from "~/components/ui/pagination";
 import { formatUsd } from "~/lib/credits";
-import { queries } from "~/lib/queries";
+import { ADMIN_PAGE_SIZE, queries } from "~/lib/queries";
 
 import { ExpandableRow } from "./expandable-row";
 import { FilterInput } from "./filter-input";
-import { matches, useUrlFilter } from "./use-url-filter";
+import { useUrlFilter } from "./use-url-filter";
 import { WorkspaceManager } from "./workspace-manager";
 
 export function WorkspaceList() {
-  const { data: workspaces } = useSuspenseQuery(queries.admin.workspaces());
-  const { data: plans } = useSuspenseQuery(queries.plans());
+  const page = usePage();
   const [filter, setFilter] = useUrlFilter();
-  const shown = workspaces.filter((workspace) => matches(filter, workspace.name, workspace.owner_email, workspace.id));
+  const { data } = useSuspenseQuery(queries.admin.workspaces(page, filter.trim()));
+  const { data: plans } = useSuspenseQuery(queries.plans());
+  const shown = data.data;
   const planName = (id: string) => plans.find((plan) => plan.id === id)?.name ?? id;
 
   return (
     <div>
-      <FilterInput value={filter} onChange={setFilter} label="Filter by name, owner email or id" />
+      <FilterInput value={filter} onChange={setFilter} label="Search by name, member email or id" />
       {shown.length === 0 ? (
         <p className="mt-6 text-sm text-muted">{filter ? "Nothing matches that filter." : "No workspaces yet."}</p>
       ) : (
@@ -42,6 +44,7 @@ export function WorkspaceList() {
           ))}
         </ul>
       )}
+      {(shown.length > 0 || page > 1) && <Pagination page={page} perPage={ADMIN_PAGE_SIZE} total={data.total_count} noun="workspaces" />}
     </div>
   );
 }

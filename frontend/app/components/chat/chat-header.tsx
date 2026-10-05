@@ -1,12 +1,15 @@
 import { useState, type KeyboardEvent, type ReactNode } from "react";
 import { Menu } from "@base-ui/react/menu";
+import { Link } from "react-router";
 import { LuChevronDown, LuLink, LuPencil, LuTrash2 } from "react-icons/lu";
 
 import { dangerMenuItem, focusRing, menuItem, menuSeparator, popup } from "~/components/ui/styles";
+import { MoveToProject } from "~/components/workspace/move-to-project";
+import type { Project } from "~/lib/workspace";
 
-type ChatHeaderProps = { title: string; onRename: (title: string) => void; onDelete?: () => void; actions?: ReactNode };
+type ChatHeaderProps = { title: string; chatId?: string; project?: Project; onRename: (title: string) => void; onDelete?: () => void; actions?: ReactNode };
 
-export function ChatHeader({ title, onRename, onDelete, actions }: ChatHeaderProps) {
+export function ChatHeader({ title, chatId, project, onRename, onDelete, actions }: ChatHeaderProps) {
   const [editing, setEditing] = useState(false);
 
   function commit(value: string) {
@@ -22,6 +25,14 @@ export function ChatHeader({ title, onRename, onDelete, actions }: ChatHeaderPro
 
   return (
     <header className="glass sticky top-0 z-10 flex h-12 shrink-0 items-center px-3">
+      {project && (
+        <>
+          <Link to={`/projects/${project.id}`} className={`max-w-48 shrink-0 truncate rounded-md px-2 py-1 text-sm text-muted transition-colors hover:bg-subtle hover:text-ink ${focusRing}`}>
+            {project.name}
+          </Link>
+          <span className="text-sm text-muted/60">/</span>
+        </>
+      )}
       {editing ? (
         <input
           autoFocus
@@ -43,6 +54,7 @@ export function ChatHeader({ title, onRename, onDelete, actions }: ChatHeaderPro
               <Menu.Popup className={`w-48 rounded-lg p-1 ${popup}`}>
                 <Menu.Item onClick={() => setEditing(true)} className={menuItem}><LuPencil size={14} />Rename</Menu.Item>
                 <Menu.Item onClick={() => navigator.clipboard.writeText(window.location.href).catch((error) => console.warn("could not copy link", error))} className={menuItem}><LuLink size={14} />Copy link</Menu.Item>
+                {chatId && <MoveToProject chatId={chatId} />}
                 {onDelete && (
                   <>
                     <Menu.Separator className={menuSeparator} />

@@ -3,9 +3,10 @@ import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { SessionList } from "~/components/account/session-list";
 
 import { Button } from "~/components/ui/button";
+import { Pagination, usePage } from "~/components/ui/pagination";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { formatUsd } from "~/lib/credits";
-import { queries } from "~/lib/queries";
+import { ADMIN_PAGE_SIZE, queries } from "~/lib/queries";
 import type { ApiAdminUser } from "~/lib/trex";
 
 import { ActionStatus } from "./action-status";
@@ -13,7 +14,7 @@ import { ExpandableRow } from "./expandable-row";
 import { FilterInput } from "./filter-input";
 import { ago, date } from "./format";
 import { useEndUserSession, useSetRole, useSignOutUser } from "./mutations";
-import { matches, useUrlFilter } from "./use-url-filter";
+import { useUrlFilter } from "./use-url-filter";
 import { WorkspaceManager } from "./workspace-manager";
 
 // a user's signed-in browsers, loaded when their row opens
@@ -69,22 +70,28 @@ function UserActions({ user }: { user: ApiAdminUser }) {
   );
 }
 
+// the workspaces a user owns, loaded when their row opens
+function OwnedWorkspaces({ user }: { user: ApiAdminUser }) {
+  const workspaces = useQuery(queries.admin.workspaces(1, user.email));
+  if (workspaces.isPending) return <p className="border-t border-line px-4 py-3 text-xs text-muted">Loading workspaces…</p>;
+  if (workspaces.error) return <div className="border-t border-line px-4 py-3"><ActionStatus error={workspaces.error} success={null} /></div>;
+  return workspaces.data.data.filter((workspace) => workspace.owner_email === user.email).map((workspace) => <WorkspaceManager key={workspace.id} workspace={workspace} />);
+}
+
 export function UserList() {
-  const { data: users } = useSuspenseQuery(queries.admin.users());
-  const { data: workspaces } = useSuspenseQuery(queries.admin.workspaces());
+  const page = usePage();
   const [filter, setFilter] = useUrlFilter();
-  const shown = users.filter((user) => matches(filter, user.name, user.email));
+  const { data } = useSuspenseQuery(queries.admin.users(page, filter.trim()));
+  const shown = data.data;
 
   return (
     <div>
-      <FilterInput value={filter} onChange={setFilter} label="Filter by name or email" />
+      <FilterInput value={filter} onChange={setFilter} label="Search by name or email" />
       {shown.length === 0 ? (
         <p className="mt-6 text-sm text-muted">{filter ? "Nobody matches that filter." : "No one has signed up yet."}</p>
       ) : (
         <ul className="ui-card mt-4 overflow-hidden">
-          {shown.map((user) => {
-            const owned = workspaces.filter((workspace) => workspace.owner_email === user.email);
-            return (
+          {shown.map((user) => (
               <ExpandableRow
                 key={user.id}
                 summary={
@@ -97,20 +104,18 @@ export function UserList() {
                       <span className="block truncate text-xs text-muted">{user.email}</span>
                     </span>
                     <span className="hidden shrink-0 text-xs text-muted sm:block">Active {ago(user.last_active_at).toLowerCase()}</span>
-                    <span className="w-24 shrink-0 text-right tabular-nums">{owned[0] ? formatUsd(owned[0].credits) : "—"}</span>
+                    <span className="w-24 shrink-0 text-right tabular-nums">{user.credits === null ? "—" : formatUsd(user.credits)}</span>
                   </>
                 }
               >
                 <UserActions user={user} />
                 <UserDevices user={user} />
-                {owned.map((workspace) => (
-                  <WorkspaceManager key={workspace.id} workspace={workspace} />
-                ))}
+                <OwnedWorkspaces user={user} />
               </ExpandableRow>
-            );
-          })}
+          ))}
         </ul>
       )}
+      {(shown.length > 0 || page > 1) && <Pagination page={page} perPage={ADMIN_PAGE_SIZE} total={data.total_count} noun="users" />}
     </div>
   );
 }

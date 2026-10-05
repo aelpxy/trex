@@ -15,7 +15,7 @@ export async function clientLoader({ request }: Route.ClientLoaderArgs) {
 export default function AccountBilling() {
   return (
     <>
-      <Section title="Balance" description="Each model response is charged by its tokens. At $0 you can't send messages; a plan tops the balance up monthly, or an admin adds funds.">
+      <Section title="Balance" description="Each model response is charged by its tokens.">
         <BalanceCard />
       </Section>
       <Section title="Activity">
