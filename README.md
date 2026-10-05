@@ -20,9 +20,8 @@ Trex is under active development.
 | `trex-sandbox` | OpenShell connectivity over mutual TLS, sandbox lifecycle, command streaming, port forwarding, and network access review. |
 | `trex-store`   | PostgreSQL persistence, Redis events and coordination, and local or S3-compatible file storage.                           |
 | `trex-server`  | The `trex` HTTP API, authentication, agent runs, credits, preview proxy, and sandbox idle management.                     |
-
-| `trex-eval` | Live end-to-end scenarios against a managed server instance. |
-| `frontend` | React, React Router, TypeScript, and Tailwind web interface. |
+| `trex-eval`    | Live end-to-end scenarios against a managed server instance.                                                              |
+| `frontend`     | React, React Router, TypeScript, and Tailwind web interface.                                                              |
 
 The repository also includes a development sandbox image in [`images/sandbox/Dockerfile`](images/sandbox/Dockerfile) and a network policy in [`sandbox-policy.yaml`](sandbox-policy.yaml).
 
