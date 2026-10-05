@@ -89,7 +89,7 @@ function parseArgs(raw: string): Record<string, unknown> {
 
 // tools other than bash and the file editors show as a command line: the tool and its main argument
 function failedEvent(code: string | undefined, error: string): ChatEvent {
-  if (code === "insufficient_credits") return { type: "run.failed", title: "You're out of credits", detail: "The run stopped after its last step.", retry: false };
+  if (code === "insufficient_credits") return { type: "run.failed", title: "Your balance ran out", detail: "The run stopped after its last step. Your balance tops up with your plan each month.", retry: false };
   return { type: "run.failed", title: "The run failed", detail: error || undefined, retry: true };
 }
 
@@ -514,7 +514,7 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
   const fail = useCallback((error: unknown) => {
     const event: ChatEvent =
       error instanceof ApiError && error.type === "insufficient_credits_error"
-        ? { type: "run.failed", title: "You're out of credits", detail: "Add credits to keep chatting.", retry: false }
+        ? { type: "run.failed", title: "Your balance ran out", detail: "It tops up with your plan each month, or ask an admin to add funds.", retry: false }
         : { type: "run.failed", title: "Couldn't send the message", detail: error instanceof Error ? error.message : String(error), retry: false };
     updateLast((message) => applyEvent(message, event));
   }, [updateLast]);

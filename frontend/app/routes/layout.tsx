@@ -7,6 +7,8 @@ import { AppearanceProvider } from "~/components/appearance/appearance-provider"
 import { Background } from "~/components/appearance/background";
 import { SettingsDialog } from "~/components/appearance/settings-dialog";
 import { ChatSkeleton } from "~/components/chat/chat-skeleton";
+import { CommandPalette } from "~/components/command/command-palette";
+import { useGlobalShortcuts } from "~/components/command/shortcuts";
 import { DesktopSidebar } from "~/components/sidebar/desktop-sidebar";
 import { MobileHeader } from "~/components/sidebar/mobile-header";
 import { setModels } from "~/components/chat/models";
@@ -61,6 +63,8 @@ export default function Layout({ loaderData }: Route.ComponentProps) {
                   </div>
                 </div>
                 <SettingsDialog />
+                <CommandPalette />
+                <GlobalShortcuts />
               </Tooltip.Provider>
             </WorkspaceProvider>
           </AppearanceProvider>
@@ -68,4 +72,9 @@ export default function Layout({ loaderData }: Route.ComponentProps) {
       </IconContext.Provider>
     </MotionConfig>
   );
+}
+
+function GlobalShortcuts() {
+  useGlobalShortcuts();
+  return null;
 }

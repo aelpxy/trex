@@ -2,7 +2,7 @@ import { api, encodePath } from "./api";
 
 // shapes of the trex api, see /docs on the trex server
 
-export type ApiUser = { id: string; email: string; name: string; created_at: number };
+export type ApiUser = { id: string; email: string; name: string; role: "user" | "admin"; created_at: number };
 export type ApiWorkspace = { id: string; name: string; plan: string; role: string; credits: number; created_at: number };
 export type ApiToken = { token: string; user: ApiUser; workspaces: ApiWorkspace[] };
 export type ApiMe = { user: ApiUser; workspaces: ApiWorkspace[] };
@@ -64,6 +64,11 @@ export type ApiSandboxFile = { path: string; size: number; modified_at: number }
 
 export type ApiFile = { path: string; size: number; modified_at: number };
 
+export type ApiAdminWorkspace = { id: string; name: string; plan: string; credits: number; owner_email: string | null; created_at: number };
+
+export type ApiPlan = { id: string; name: string; monthly_credits: number };
+export type ApiLedgerEntry = { id: string; amount: number; balance: number; kind: "grant" | "usage" | "adjustment"; description: string; created_at: number };
+
 export type ApiCredits = { balance: number; plan: { id: string; name: string; monthly_credits: number } | null; enforced: boolean };
 
 const MAX_PAGE = 100;
@@ -87,6 +92,16 @@ export const trex = {
   me: () => api<ApiMe>("GET", "/me"),
   models: () => api<List<ApiModel>>("GET", "/models").then((list) => list.data),
   credits: () => api<ApiCredits>("GET", "/credits"),
+  admin: {
+    workspaces: () => api<List<ApiAdminWorkspace>>("GET", "/admin/workspaces").then((list) => list.data),
+    adjustCredits: (workspace: string, body: { amount: number; description: string }) =>
+      api<{ workspace: string; balance: number }>("POST", `/admin/workspaces/${workspace}/credits`, body),
+    setPlan: (workspace: string, plan: string) => api<void>("POST", `/admin/workspaces/${workspace}/plan`, { plan }),
+  },
+  plans: () => api<List<ApiPlan>>("GET", "/plans").then((list) => list.data),
+  ledger: (startingAfter?: string) => api<List<ApiLedgerEntry>>("GET", `/credits/ledger?limit=50${startingAfter ? `&starting_after=${startingAfter}` : ""}`),
+  updateMe: (body: { name: string }) => api<ApiUser>("PATCH", "/me", body),
+  changePassword: (body: { current_password: string; new_password: string }) => api<void>("POST", "/me/password", body),
 
   projects: () => all<ApiProject>("/projects"),
   createProject: (name: string) => api<ApiProject>("POST", "/projects", { name }),

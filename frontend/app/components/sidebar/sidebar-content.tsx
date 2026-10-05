@@ -9,6 +9,7 @@ import { Fade } from "./fade";
 import { NewProjectDialog } from "./new-project-dialog";
 import { ProfileMenu } from "./profile-menu";
 import { ProjectFolder } from "./project-folder";
+import { SearchButton } from "./search-button";
 import { SidebarNav } from "./sidebar-nav";
 import { SidebarSection } from "./sidebar-section";
 
@@ -21,6 +22,9 @@ export function SidebarContent({ collapsed = false, onNavigate }: SidebarContent
       <ScrollArea.Root className="relative min-h-0 flex-1">
         <ScrollArea.Viewport className="h-full overscroll-contain py-1">
           <SidebarNav items={MAIN_NAV} label="Main" className="px-2" collapsed={collapsed} onNavigate={onNavigate} />
+          <div className="mt-0.5 px-2">
+            <SearchButton collapsed={collapsed} onNavigate={onNavigate} />
+          </div>
           <Fade show={!collapsed} as="div" className="mt-4 block space-y-3 px-2">
             <SidebarSection
               id="projects"

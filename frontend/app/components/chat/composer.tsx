@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type
 import { Button } from "@base-ui/react/button";
 import { LuArrowUp, LuBrain, LuClock, LuFileText, LuPaperclip, LuSquare, LuX } from "react-icons/lu";
 
+import { isMac } from "~/components/command/shortcuts";
 import { focusRingOutset, iconButton } from "~/components/ui/styles";
 import { ATTACHMENT_TYPES, kindOf, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_MESSAGE_CHARS, readAsDataUrl } from "~/lib/attachments";
 
@@ -23,8 +24,6 @@ type ComposerProps = {
   // files dropped on the chat, attached once each
   dropped?: { files: File[]; id: number };
 };
-
-const isMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
 const roundButton = `inline-flex size-8 cursor-pointer items-center justify-center rounded-full bg-ink text-on-solid transition-colors hover:bg-ink/85 data-disabled:cursor-not-allowed data-disabled:opacity-30 ${focusRingOutset}`;
 
@@ -101,6 +100,11 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Escape" && streaming) {
+      event.preventDefault();
+      onStop();
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) submit(event, event.metaKey || event.ctrlKey);
   }
 

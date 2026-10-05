@@ -2,6 +2,7 @@ import { Tooltip } from "@base-ui/react/tooltip";
 import { LuBan, LuClock, LuCoins, LuGauge, LuInfo } from "react-icons/lu";
 
 import { focusRing, tooltip } from "~/components/ui/styles";
+import { formatUsd } from "~/lib/credits";
 
 import type { AssistantMessage, Usage } from "../types";
 import { formatDuration, formatTokens } from "./format";
@@ -42,7 +43,7 @@ function UsageDetails({ usage, workedMs }: { usage: Usage; workedMs: number }) {
       {usage.credits > 0 && (
         <>
           <div className="my-1.5 h-px bg-line" />
-          <Row label="Credits" value={number(usage.credits)} />
+          <Row label="Cost" value={formatUsd(usage.credits)} />
         </>
       )}
     </dl>
@@ -92,7 +93,7 @@ export function RunFooter({ message }: { message: AssistantMessage }) {
       {usage && tokens !== null && (
         <span className="flex items-center gap-1 tabular-nums">
           <LuCoins size={12} />
-          {formatTokens(tokens)} tokens{usage.credits > 0 && ` · ${usage.credits.toLocaleString()} ${usage.credits === 1 ? "credit" : "credits"}`}
+          {formatTokens(tokens)} tokens{usage.credits > 0 && ` · ${formatUsd(usage.credits)}`}
         </span>
       )}
       {speed !== null && (

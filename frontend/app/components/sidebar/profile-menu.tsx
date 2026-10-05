@@ -1,11 +1,14 @@
+import { useState } from "react";
 import { Link } from "react-router";
 import { Menu } from "@base-ui/react/menu";
-import { LuCheck, LuChevronUp, LuLogOut, LuMoon, LuSettings, LuShield, LuUser } from "react-icons/lu";
+import { LuCheck, LuChevronUp, LuCoins, LuLogOut, LuMoon, LuSettings, LuShield, LuUser, LuUserCog } from "react-icons/lu";
 
 import { useAppearance } from "~/components/appearance/appearance-provider";
 import { useTheme } from "~/components/appearance/use-theme";
 import { focusRing, menuItem, menuSeparator, popup } from "~/components/ui/styles";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
+import { formatUsd } from "~/lib/credits";
+import { trex } from "~/lib/trex";
 
 import { Fade } from "./fade";
 import { railFit } from "./styles";
@@ -25,9 +28,19 @@ export function ProfileMenu({ collapsed = false, onNavigate }: ProfileMenuProps)
   const { theme, setTheme } = useTheme();
   const { workspaces, current, switchWorkspace, profile: PROFILE, logout } = useWorkspace();
   const subtitle = `${current.name} · ${current.plan}`;
+  const [balance, setBalance] = useState<number | null>(null);
+
+  // the balance changes with every response, so it's read fresh each time the menu opens
+  function onOpenChange(open: boolean) {
+    if (!open) return;
+    trex
+      .credits()
+      .then((credits) => setBalance(credits.balance))
+      .catch((error) => console.warn("could not load credits", error));
+  }
 
   return (
-    <Menu.Root>
+    <Menu.Root onOpenChange={onOpenChange}>
       <Menu.Trigger
         aria-label={collapsed ? `${PROFILE.name}, ${subtitle}` : undefined}
         className={`flex h-11 cursor-pointer items-center gap-2.5 overflow-hidden whitespace-nowrap rounded-md px-1.5 text-left hover:bg-subtle data-popup-open:bg-subtle ${focusRing} ${railFit}`}
@@ -49,6 +62,12 @@ export function ProfileMenu({ collapsed = false, onNavigate }: ProfileMenuProps)
             <div className="px-2.5 py-2">
               <p className="truncate text-[13px] font-medium">{PROFILE.name}</p>
               <p className="truncate text-[11px] text-muted">{subtitle}</p>
+              {balance !== null && (
+                <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted tabular-nums">
+                  <LuCoins size={12} />
+                  {formatUsd(balance)} left
+                </p>
+              )}
             </div>
             <Menu.Separator className={menuSeparator} />
             <Menu.RadioGroup
@@ -79,8 +98,11 @@ export function ProfileMenu({ collapsed = false, onNavigate }: ProfileMenuProps)
                 <span className="size-3 rounded-full bg-surface shadow-sm transition-transform group-data-checked:translate-x-3" />
               </span>
             </Menu.CheckboxItem>
+            <Menu.LinkItem render={<Link to="/account" onClick={onNavigate} />} closeOnClick className={menuItem}><LuUserCog size={14} />Account</Menu.LinkItem>
             <Menu.Item onClick={() => setSettingsOpen(true)} className={menuItem}><LuSettings size={14} />Settings</Menu.Item>
-            <Menu.LinkItem render={<Link to="/admin" onClick={onNavigate} />} closeOnClick className={menuItem}><LuShield size={14} />Admin</Menu.LinkItem>
+            {PROFILE.role === "admin" && (
+              <Menu.LinkItem render={<Link to="/admin" onClick={onNavigate} />} closeOnClick className={menuItem}><LuShield size={14} />Admin</Menu.LinkItem>
+            )}
             <Menu.Separator className={menuSeparator} />
             <Menu.Item onClick={logout} className={menuItem}><LuLogOut size={14} />Log out</Menu.Item>
           </Menu.Popup>
