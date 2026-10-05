@@ -16,7 +16,8 @@ network_policies:
     endpoints:
       - { host: pypi.org, port: 443 }
       - { host: files.pythonhosted.org, port: 443 }
-      - { host: registry.npmjs.org, port: 443 }
+      # npm requests scoped packages as @scope%2Fname, which the proxy rejects unless allowed
+      - { host: registry.npmjs.org, port: 443, protocol: rest, access: full, allow_encoded_slash: true }
       - { host: crates.io, port: 443 }
       - { host: index.crates.io, port: 443 }
       - { host: static.crates.io, port: 443 }

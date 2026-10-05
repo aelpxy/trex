@@ -52,7 +52,7 @@ pub async fn store(
         bail!("attachments can be PNG, JPEG, GIF or WebP images, PDFs, or text files");
     }
     let hash = library.put_attachment(workspace, bytes).await?;
-    let url = reference(&hash, mime);
+    let url = reference(&hash, essence(mime));
     Ok(if image {
         InputContent::InputImage(InputImageContent {
             detail: ImageDetail::Auto,
@@ -82,6 +82,11 @@ pub fn sniff(bytes: &[u8]) -> &'static str {
     } else {
         UNKNOWN_MIME
     }
+}
+
+// the type without parameters, e.g. text/plain for `text/plain; charset=utf-8`
+fn essence(mime: &str) -> &str {
+    mime.split(';').next().unwrap_or(mime).trim()
 }
 
 pub fn decode_data_url(url: &str) -> anyhow::Result<Vec<u8>> {
@@ -269,7 +274,8 @@ pub async fn resolve(
             .split_once('#')
             .with_context(|| format!("invalid attachment reference {reference}"))?;
         let bytes = library.get_attachment(workspace, hash).await?;
-        let data_url = format!("data:{mime};base64,{}", STANDARD.encode(bytes));
+        // providers reject parameters such as `; charset=utf-8`, which older references carry
+        let data_url = format!("data:{};base64,{}", essence(mime), STANDARD.encode(bytes));
         data_urls.insert(reference, data_url);
     }
     visit(&mut value, &mut |field| {
@@ -347,6 +353,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn text_attachments_inline_without_mime_parameters() {
+        let library = Library::in_memory();
+        let workspace = Uuid::now_v7();
+        let part = store(&library, workspace, Some("notes.txt"), b"hello".to_vec())
+            .await
+            .unwrap();
+        let stored = serde_json::to_value(&part).unwrap();
+        assert_eq!(
+            stored["file_data"]
+                .as_str()
+                .unwrap()
+                .split_once('#')
+                .unwrap()
+                .1,
+            "text/plain"
+        );
+
+        let legacy = json!([{"role": "user", "content": [{"type": "input_file", "filename": "notes.txt", "file_data": format!("{}#text/plain; charset=utf-8", stored["file_data"].as_str().unwrap().split_once('#').unwrap().0)}]}]);
+        let items: Vec<InputItem> = serde_json::from_value(legacy).unwrap();
+        let resolved =
+            serde_json::to_value(resolve(&library, workspace, items).await.unwrap()).unwrap();
+        assert_eq!(
+            resolved[0]["content"][0]["file_data"],
+            "data:text/plain;base64,aGVsbG8="
+        );
+    }
+
+    #[tokio::test]
     async fn inlines_attachments_into_requests() {
         let library = Library::in_memory();
         let user = Uuid::now_v7();
@@ -412,11 +446,7 @@ mod tests {
                     "application/pdf".to_owned(),
                     Some("attachment".to_owned())
                 ),
-                (
-                    "file",
-                    "text/plain; charset=utf-8".to_owned(),
-                    Some("notes.md".to_owned())
-                ),
+                ("file", "text/plain".to_owned(), Some("notes.md".to_owned())),
             ]
         );
     }
