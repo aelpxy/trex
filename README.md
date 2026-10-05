@@ -6,8 +6,6 @@
   An agentic execution engine built in Rust, powered by isolated sandboxes.
 </p>
 
-Trex runs coding agents on the web: streaming chats, tools that execute in [OpenShell](https://github.com/NVIDIA/OpenShell) sandboxes, live previews, a file library, scheduled tasks, and network access that stays under your control.
-
 ## Getting started
 
 You need Rust, Node.js with pnpm, PostgreSQL, Redis, an OpenShell gateway with client certificates, and a model provider that speaks the OpenAI Responses API.
