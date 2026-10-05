@@ -11,7 +11,6 @@ import type { Project } from "~/lib/workspace";
 import { useChatCommands } from "./chat-commands";
 import { ChatHeader } from "./chat-header";
 import { Composer } from "./composer";
-import { ContextMeter } from "./context-meter";
 import { DropZone } from "./drop-zone";
 import { MessageItem } from "./message-item";
 import { contextWindowOf } from "./models";
@@ -104,7 +103,7 @@ export function ChatView({ chatId, data, fresh, project: newIn, children }: Chat
     send(content, attachments, interrupt);
   }
 
-  const meter = chatId && contextWindow ? <ContextMeter used={contextTokens} window={contextWindow} onCompact={running ? undefined : compact} /> : null;
+  const context = chatId && contextWindow ? { used: contextTokens, window: contextWindow, onCompact: running ? undefined : compact } : undefined;
   const latest = messages.at(-1);
   const summarizing = latest?.role === "compaction" && latest.state === "running";
   const composer = (
@@ -117,7 +116,7 @@ export function ChatView({ chatId, data, fresh, project: newIn, children }: Chat
       onSend={sendAndFollow}
       onStop={stop}
       commands={commands}
-      status={meter}
+      context={context}
       placeholder={summarizing ? "Summarizing… a message now is answered right after" : undefined}
     />
   );

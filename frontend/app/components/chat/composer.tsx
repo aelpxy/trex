@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from "react";
 import { Button } from "@base-ui/react/button";
-import { LuArrowUp, LuBrain, LuClock, LuFileText, LuPaperclip, LuSquare, LuX } from "react-icons/lu";
+import { LuArrowUp, LuClock, LuFileText, LuPlus, LuSquare, LuX } from "react-icons/lu";
 
 import { isMac, isTouch } from "~/components/command/shortcuts";
 import { focusRingOutset, iconButton } from "~/components/ui/styles";
@@ -8,9 +8,9 @@ import { ATTACHMENT_TYPES, kindOf, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_ME
 
 import { AutoApproveToggle } from "./auto-approve-toggle";
 import { COMMAND_MENU_ID, CommandMenu, optionId } from "./command-menu";
-import { FastToggle } from "./fast-toggle";
-import { effortsFor, MODELS, supportsFast, type ChatSettings } from "./models";
-import { OptionSelect } from "./option-select";
+import { CompactButton, ContextRing, type ContextUsage } from "./context-meter";
+import { ModelPicker } from "./model-picker";
+import type { ChatSettings } from "./models";
 import { commandFor, suggestionsFor, type SlashCommand, type Suggestion } from "./slash-commands";
 import type { OutgoingAttachment, QueuedMessage } from "./use-chat";
 
@@ -28,8 +28,8 @@ type ComposerProps = {
   dropped?: { files: File[]; id: number };
   // what `/` at the start of the message offers
   commands?: SlashCommand[];
-  // shown before the send button, like how full the context is
-  status?: ReactNode;
+  // how full an existing chat's context is
+  context?: ContextUsage;
   // replaces the usual hint, e.g. while the context is being summarized
   placeholder?: string;
 };
@@ -59,7 +59,7 @@ function AttachmentChip({ attachment, onRemove }: { attachment: OutgoingAttachme
   );
 }
 
-export function Composer({ streaming, settings, queued = [], dropped, onSettingsChange, onSend, onStop, commands = [], status, placeholder }: ComposerProps) {
+export function Composer({ streaming, settings, queued = [], dropped, onSettingsChange, onSend, onStop, commands = [], context, placeholder }: ComposerProps) {
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<OutgoingAttachment[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -239,14 +239,12 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
             }}
           />
           <Button type="button" onClick={() => fileInput.current?.click()} aria-label="Attach files" title="Attach files" className={iconButton}>
-            <LuPaperclip size={15} />
+            <LuPlus size={16} />
           </Button>
-          <OptionSelect label="Model" options={MODELS} value={settings.model} onChange={(model) => onSettingsChange({ model })} />
-          <OptionSelect label="Thinking effort" options={effortsFor(settings.model)} value={settings.effort} onChange={(effort) => onSettingsChange({ effort })} icon={<LuBrain size={13} className="shrink-0" />} />
-          {supportsFast(settings.model) && <FastToggle pressed={settings.fast} onChange={(fast) => onSettingsChange({ fast })} />}
           <AutoApproveToggle pressed={settings.autoApprove} onChange={(autoApprove) => onSettingsChange({ autoApprove })} />
         </div>
-        {status}
+        <CompactButton context={context} />
+        <ModelPicker settings={settings} onChange={onSettingsChange} context={context} />
         {streaming && canSend && (
           <Button
             type="button"
@@ -257,19 +255,21 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
             Send now
           </Button>
         )}
-        {streaming && canSend ? (
-          <Button type="submit" aria-label="Queue message" title="Send after the current step (Enter)" className={roundButton}>
-            <LuArrowUp size={16} />
-          </Button>
-        ) : streaming ? (
-          <Button type="button" onClick={onStop} aria-label="Stop" className={roundButton}>
-            <LuSquare size={12} fill="currentColor" />
-          </Button>
-        ) : (
-          <Button type="submit" disabled={!canSend} focusableWhenDisabled aria-label="Send" className={roundButton}>
-            <LuArrowUp size={16} />
-          </Button>
-        )}
+        <ContextRing context={context}>
+          {streaming && canSend ? (
+            <Button type="submit" aria-label="Queue message" title="Send after the current step (Enter)" className={roundButton}>
+              <LuArrowUp size={16} />
+            </Button>
+          ) : streaming ? (
+            <Button type="button" onClick={onStop} aria-label="Stop" className={roundButton}>
+              <LuSquare size={12} fill="currentColor" />
+            </Button>
+          ) : (
+            <Button type="submit" disabled={!canSend} focusableWhenDisabled aria-label="Send" className={roundButton}>
+              <LuArrowUp size={16} />
+            </Button>
+          )}
+        </ContextRing>
       </div>
     </form>
   );

@@ -13,6 +13,7 @@ Backend, agent harness and web UI for a Codex/Claude Code-style app on the web. 
 | `crates/trex-eval` | End-to-end eval suite against a server it starts itself |
 | `frontend/` | React Router 8 SPA (`ssr: false`), TypeScript, Tailwind v4, Base UI, TanStack Query and Table |
 | `images/sandbox/Dockerfile`, `sandbox-policy.yaml` | Sandbox image and default network policy |
+| `Dockerfile`, `deploy/` | trex's image and the production deployment (podman-compose: trex, Postgres 18, Valkey, optional `cloudflared`; see `deploy/README.md`) |
 
 Shared dependency versions live in the root `[workspace.dependencies]`.
 
@@ -26,6 +27,7 @@ Shared dependency versions live in the root `[workspace.dependencies]`.
 - `trex` serves the built app (`web.rs`): release builds embed `frontend/build/client`, debug builds read it from disk
 - CI runs fmt, clippy `-D warnings`, unit tests, frontend typecheck and build
 - Sandbox image, on the gateway host: `podman build -t localhost/trex-sandbox:latest images/sandbox` (copy `images/sandbox` over with `scp` and build there; only new sandboxes get a new image); dev gateway tunnel: `ssh -fN -L 17670:127.0.0.1:17670 fedora-server`
+- Production runs on `fedora-server` from the git checkout `~/projects/trex` (secrets and data in its gitignored `deploy/`), behind a Cloudflare Tunnel. Update with `deploy/update.sh` after pushing: `podman-compose up --force-recreate` keeps the old image, and `cloudflared` depends on trex, so the script removes both containers before starting them. User-level services only on that host.
 
 ## Config
 
@@ -57,7 +59,7 @@ Loaded once in `trex-server/src/config.rs` from env (`.env`, real env wins) and 
 - Background processes run under a `setsid` wrapper in `/tmp/.processes/<id>/`; `stop_process` drops a `stop` file since one exec can't signal another.
 - Attachments are content-addressed at `workspaces/{uuid}/attachments/{sha256}`, referenced as `attachment://` in history and inlined right before each request; they're also copied to `/sandbox/uploads/`.
 - One sandbox per chat, created lazily; idle ones are stopped after `TREX_SANDBOX_IDLE_SECS`; ones in Error or gone are replaced (`sandbox.replaced`).
-- OpenShell gotchas: no apt (non-root, `no_new_privs`), install into `HOME=/sandbox`; TLS is intercepted (`SSL_CERT_FILE`); IPv4 loopback resets, so servers listen on `::`/`localhost`; unlisted egress becomes an access request; a `bash` command that was denied waits for the user's decision (`access.rs`, up to 10 min; unattended runs don't wait) and its output tells the model the answer, so it retries on its own. A chat with `auto_approve` (set per session, read when a run starts) approves requests itself and emits `access.decided` with `automatic: true`, falling back to asking if approving fails. Approving refetches a request OpenShell refined meanwhile (`supersedes`); policy: empty `binaries` matches nothing, L7 rules need `enforcement: enforce`, `%2F` needs `allow_encoded_slash`.
+- OpenShell gotchas: no apt (non-root, `no_new_privs`), install into `HOME=/sandbox`; TLS is intercepted (`SSL_CERT_FILE`); IPv4 loopback resets, so servers listen on `::`/`localhost`; unlisted egress becomes an access request; a `bash` or `browse` call that was denied waits for the user's decision (`access.rs`, up to 10 min; unattended runs don't wait) and its output tells the model the answer, so it retries on its own. A chat with `auto_approve` (set per session, read when a run starts) approves requests itself and emits `access.decided` with `automatic: true`, falling back to asking if approving fails. Approving refetches a request OpenShell refined meanwhile (`supersedes`); policy: empty `binaries` matches nothing, L7 rules need `enforcement: enforce`, `%2F` needs `allow_encoded_slash`.
 - Previews: `{id}.preview.localhost:8081`, one `ForwardTcp` tunnel per request (3 connections per token), websockets piped, `Host` rewritten.
 - Sandboxes turning Error ~110s after creation with `HealthCheckFailed`: podman's pause process and `podman.service` are in different user namespaces; stop containers via `podman --remote`, restart `podman.service` and `openshell-gateway`.
 
@@ -75,7 +77,8 @@ Loaded once in `trex-server/src/config.rs` from env (`.env`, real env wins) and 
 - Shared UI in `components/ui/`: `button.tsx` (sizes `lg` beside h-10 inputs, `md` forms, `sm` toolbars and panels, `xs` inside the conversation), `data-table.tsx` (TanStack Table: sorting, row selection, per-row props), `side-drawer.tsx` (glass, like dialogs), `selection-bar.tsx`, `stat.tsx`, `filter-input.tsx`, `toaster.tsx`, `meter.tsx`, `checkbox.tsx`, `switch.tsx`, `select-field.tsx`, `pagination.tsx`, `tab-nav.tsx` (`tabLink` for url segment filters), `empty-state.tsx`, dialogs; `styles.ts` has `fieldLabel`, `badge`, `dangerBadge`, menu and popup styles. Formatting (`count`, `plural`, `tokens`, `date`, `ago`) lives in `lib/format.ts`, url list state in `lib/use-url-filter.ts`. Build on Base UI parts, never native controls, and reuse these before writing new ones.
 - The chat's file tree (`components/files/`) works like the library: right-click menus for files, folders and empty space, drag onto folders or the top level to move (`use-tree-drag.ts`, never overwriting), desktop files dropped in are uploaded, F2 renames and Delete deletes.
 - Library (`components/library/`): a file manager over the flat library api; folders are path prefixes (`entries.ts`), so folder renames and moves move every file under them. Rows share one action list for the ⋯ menu and right-click, drag onto folders and breadcrumbs to move, and accept desktop files.
-- The composer takes slash commands (`chat/slash-commands.ts`, built per chat in `chat-commands.ts`): `/compact`, `/new`, `/model`, `/effort`, `/fast`, `/rename`, `/retry`, `/stop`, offered only when they can run; the context meter beside Send shows the last response's tokens against the model's window.
+- The composer takes slash commands (`chat/slash-commands.ts`, built per chat in `chat-commands.ts`): `/compact`, `/new`, `/model`, `/effort`, `/fast`, `/autoapprove`, `/rename`, `/retry`, `/stop`, offered only when they can run; the toolbar is `+` (attach) and the auto-approve shield on the left (labelled while on) and a model picker by Send (model, thinking, fast, context details with Compact now); a ring around Send shows the last response's tokens against the model's window, and from 60% a Compact button appears beside the picker.
+- Admin tabs (`routes/admin/`, handlers in `api/admin/`): overview, users, workspaces, usage, runs, sandboxes, library, logs. Billing shows the month's usage per model (`GET /v1/credits/usage`) with `Meter`.
 - Previews of agent output run in sandboxed iframes (`lib/react-preview.ts`).
 
 ## UX rules

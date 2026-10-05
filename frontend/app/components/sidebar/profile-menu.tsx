@@ -5,7 +5,7 @@ import { Menu } from "@base-ui/react/menu";
 import { LuCheck, LuChevronUp, LuCoins, LuLogOut, LuMoon, LuSettings, LuShield, LuUser, LuUserCog } from "react-icons/lu";
 
 import { useTheme } from "~/components/appearance/use-theme";
-import { focusRing, menuItem, menuSeparator, popup } from "~/components/ui/styles";
+import { focusRing, menuGroupLabel, menuItem, menuSeparator, menuSwitch, menuSwitchThumb, popup } from "~/components/ui/styles";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { formatUsd } from "~/lib/credits";
 import { queries } from "~/lib/queries";
@@ -71,7 +71,7 @@ export function ProfileMenu({ collapsed = false, onNavigate }: ProfileMenuProps)
                 onNavigate?.();
               }}
             >
-              <Menu.GroupLabel className="px-2.5 pt-1.5 pb-1 text-[11px] font-medium text-muted">Workspaces</Menu.GroupLabel>
+              <Menu.GroupLabel className={menuGroupLabel}>Workspaces</Menu.GroupLabel>
               {workspaces.map((workspace) => (
                 <Menu.RadioItem key={workspace.id} value={workspace.id} closeOnClick className={menuItem}>
                   <WorkspaceAvatar name={workspace.name} />
@@ -87,8 +87,8 @@ export function ProfileMenu({ collapsed = false, onNavigate }: ProfileMenuProps)
             <Menu.CheckboxItem checked={theme === "dark"} onCheckedChange={(dark) => setTheme(dark ? "dark" : "light")} className={`group ${menuItem}`}>
               <LuMoon size={14} />
               <span className="flex-1">Dark mode</span>
-              <span aria-hidden className="flex h-4 w-7 items-center rounded-full bg-line p-0.5 transition-colors group-data-checked:bg-ink">
-                <span className="size-3 rounded-full bg-surface shadow-sm transition-transform group-data-checked:translate-x-3" />
+              <span aria-hidden className={menuSwitch}>
+                <span className={menuSwitchThumb} />
               </span>
             </Menu.CheckboxItem>
             <Menu.LinkItem render={<Link to="/account" onClick={onNavigate} />} closeOnClick className={menuItem}><LuUserCog size={14} />Account</Menu.LinkItem>

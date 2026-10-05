@@ -53,7 +53,7 @@ export const DEFAULT_CHAT_SETTINGS: ChatSettings = { model: "", effort: "medium"
 
 function describe(model: ApiModel) {
   const window = model.context_window >= 1_000_000 ? `${(model.context_window / 1_000_000).toFixed(1).replace(/\.0$/, "")}M` : `${Math.round(model.context_window / 1000)}k`;
-  return `${window} context${model.fast ? ", fast mode" : ""}`;
+  return window;
 }
 
 export function setModels(models: ApiModel[]) {
