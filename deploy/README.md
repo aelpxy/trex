@@ -4,7 +4,7 @@ One host runs trex, Postgres 18 and Valkey with rootless Podman and `podman-comp
 
 ## Layout on the host
 
-`~/projects/trex` holds the source. `deploy/` beside this file holds what never goes in git:
+`~/projects/trex` is a git checkout (`git clone https://github.com/aelpxy/trex.git`). `deploy/` beside this file holds what never goes in git:
 
 | Path | What |
 | --- | --- |
@@ -42,17 +42,15 @@ Previews are served at `TREX_PREVIEW_URL`. On a home network, `http://{id}.previ
 
 ## Updating
 
-From the development machine, copy the source over and rebuild:
+`~/projects/trex` is a checkout of the public repository, so an update is a pull and a rebuild:
 
 ```sh
-tar -cz --exclude=./.git --exclude=./target --exclude=./frontend/node_modules --exclude=./frontend/build \
-  --exclude=./data --exclude=./certs --exclude=./.env --exclude=./trex.toml \
-  --exclude=./deploy/.env --exclude=./deploy/trex.toml --exclude=./deploy/certs --exclude=./deploy/data . \
-  | ssh <host> 'cd ~/projects/trex && tar -xz'
-ssh <host> 'cd ~/projects/trex/deploy && podman-compose build trex && podman-compose up -d trex'
+~/projects/trex/deploy/update.sh
 ```
 
-Migrations run when trex starts. A new sandbox image is built separately on the same host (`podman build -t localhost/trex-sandbox:latest images/sandbox`) and only reaches new chats.
+It pulls, rebuilds the image, replaces the trex container (and `cloudflared`, which depends on it) and waits for the health check. Replacing rather than recreating matters: `podman-compose up --force-recreate` keeps a container's old image, so it would keep running the previous build. The site is unreachable for the few seconds the swap takes.
+
+The files in `deploy/` that hold secrets and data are ignored by git, so pulls never touch them. Migrations run when trex starts. A new sandbox image is built separately on the same host (`podman build -t localhost/trex-sandbox:latest images/sandbox`) and only reaches new chats.
 
 ## Day to day
 
