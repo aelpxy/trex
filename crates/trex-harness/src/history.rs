@@ -165,6 +165,47 @@ fn transcript_entry(value: &Value) -> Option<String> {
     }
 }
 
+// where the user's messages are in saved history, in order
+pub fn user_message_positions(items: &[Value]) -> Vec<usize> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            item["role"] == "user" && item["type"].as_str().is_none_or(|kind| kind == "message")
+        })
+        .map(|(position, _)| position)
+        .collect()
+}
+
+// the same message with new text; its attachments and their sandbox note are kept
+pub fn with_text(message: &Value, text: &str) -> Value {
+    let mut edited = message.clone();
+    let parts = match &message["content"] {
+        Value::Array(parts) => parts.clone(),
+        _ => Vec::new(),
+    };
+    let kept: Vec<Value> = parts
+        .into_iter()
+        .filter(|part| {
+            part["type"] != "input_text"
+                || part["text"]
+                    .as_str()
+                    .is_some_and(crate::attachment::is_uploads_note)
+        })
+        .collect();
+    edited["content"] = if kept.is_empty() {
+        Value::String(text.to_owned())
+    } else {
+        let mut content = Vec::new();
+        if !text.trim().is_empty() {
+            content.push(serde_json::json!({"type": "input_text", "text": text}));
+        }
+        content.extend(kept);
+        Value::Array(content)
+    };
+    edited
+}
+
 // what the user wrote, without the note on where attachments are in the sandbox
 pub fn message_text(value: &Value) -> String {
     match &value["content"] {
@@ -299,6 +340,36 @@ mod tests {
             value["call_id"].as_str().unwrap().to_owned(),
             value["output"].as_str().unwrap().to_owned(),
         )
+    }
+
+    #[test]
+    fn edits_keep_attachments_and_find_user_messages() {
+        let note = "[Attached files, also saved in the sandbox: /sandbox/uploads/a.png]";
+        let message = serde_json::json!({"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "what is this"},
+            {"type": "input_image", "image_url": "attachment://abc#image/png"},
+            {"type": "input_text", "text": note},
+        ]});
+        let edited = with_text(&message, "describe it");
+        assert_eq!(message_text(&edited), "describe it");
+        assert_eq!(edited["content"][1]["type"], "input_image");
+        assert_eq!(edited["content"][2]["text"], note);
+        assert_eq!(
+            with_text(
+                &serde_json::json!({"role": "user", "content": "hi"}),
+                "hello"
+            )["content"],
+            "hello"
+        );
+
+        let items = vec![
+            serde_json::json!({"role": "user", "content": "one"}),
+            serde_json::json!({"type": "message", "role": "assistant", "content": []}),
+            serde_json::json!({"type": "function_call_output", "call_id": "c", "output": "x"}),
+            serde_json::json!({"type": "message", "role": "developer", "content": "note"}),
+            message,
+        ];
+        assert_eq!(user_message_positions(&items), [0, 4]);
     }
 
     #[test]

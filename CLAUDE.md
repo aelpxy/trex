@@ -97,6 +97,8 @@ Docs: `GET /docs` (Scalar, loaded from its CDN by `api/docs.html`) renders `GET 
 - `POST /v1/sessions/{id}/messages` `{content, interrupt?, attachments?: [{data (base64 data url) | library_path, filename?}]}` starts a run (202); while one is running the message is queued (`queued: true`) and `interrupt` stops the agent's current step to read it
 - `POST /v1/sessions/{id}/answers` `{answers: [{selected, text}]}` resumes a `needs_input` session (202); 409 otherwise
 - `POST /v1/sessions/{id}/cancel`
+- `POST /v1/sessions/{id}/branch` `{message, content?}`: a new chat with the history before the user's `message`-th message (from 0) plus either that message edited (`content`, attachments kept) or the same message, and a run started on it (201); the original is untouched and the branch gets its own sandbox (`Store::branch_session`)
+- `POST /v1/sessions/{id}/retry`: continues a failed or stopped run from saved history (202); 409 while running, waiting for answers, or when the agent already replied
 - `GET /v1/sessions/{id}/access_requests`, `POST .../access_requests/{request_id}/approve|reject`
 - `GET /v1/sessions/{id}/events`: SSE; resumes from `Last-Event-ID`, `?from=start` replays retained events, otherwise starts at the live tail
 - `GET /v1/sessions/{id}/files`, `GET|PUT|DELETE /v1/sessions/{id}/files/{path}`, `POST /v1/sessions/{id}/files/move` `{from, to}`: the session sandbox's files under `/sandbox` (`trex_harness::files`; paths are relative, dependency and cache folders like `node_modules` and `.git` are left out of listings, reads are capped at 10 MB). Listing or reading starts a stopped sandbox but never creates one; writing does. Using these keeps the sandbox from idling out.

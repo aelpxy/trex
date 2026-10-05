@@ -180,6 +180,51 @@ impl Store {
             .context("the project does not exist")
     }
 
+    // a new chat with the same settings and the first `keep` items of `from`'s history; the
+    // sandbox isn't shared, so the branch gets its own when it needs one
+    pub async fn branch_session(
+        &self,
+        workspace: Uuid,
+        from: Uuid,
+        keep: usize,
+    ) -> anyhow::Result<Option<Session>> {
+        let mut tx = self
+            .pg
+            .begin()
+            .await
+            .context("failed to start a transaction")?;
+        let id = Uuid::now_v7();
+        let sql = concat!(
+            "INSERT INTO sessions (id, workspace_id, project_id, title, model, reasoning_effort, fast, reasoning_model, reasoning_from) ",
+            "SELECT $1, workspace_id, project_id, title, model, reasoning_effort, fast, reasoning_model, LEAST(reasoning_from, $4) ",
+            "FROM sessions WHERE id = $2 AND workspace_id = $3 RETURNING ",
+            columns!()
+        );
+        let Some(session): Option<Session> = sqlx::query_as(sql)
+            .bind(id)
+            .bind(from)
+            .bind(workspace)
+            .bind(i32::try_from(keep).context("history is too long to branch")?)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("failed to create the branch")?
+        else {
+            return Ok(None);
+        };
+        sqlx::query(
+            "INSERT INTO session_items (session_id, seq, item, created_at) \
+             SELECT $1, seq, item, created_at FROM session_items WHERE session_id = $2 AND seq <= $3",
+        )
+        .bind(id)
+        .bind(from)
+        .bind(i64::try_from(keep).context("history is too long to branch")?)
+        .execute(&mut *tx)
+        .await
+        .context("failed to copy the history into the branch")?;
+        tx.commit().await.context("failed to commit the branch")?;
+        Ok(Some(session))
+    }
+
     pub async fn session(&self, workspace: Uuid, id: Uuid) -> anyhow::Result<Option<Session>> {
         let sql = concat!(
             "SELECT ",

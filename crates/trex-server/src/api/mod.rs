@@ -121,6 +121,8 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         })
         .routes(routes!(sessions::create_answers))
         .routes(routes!(sessions::cancel))
+        .routes(routes!(sessions::retry))
+        .routes(routes!(sessions::branch))
         .routes(routes!(events::stream_events))
         .routes(routes!(sessions::list_access))
         .routes(routes!(sessions::approve_access))
@@ -339,6 +341,8 @@ mod tests {
                 "/v1/sessions/{id}/messages",
                 "/v1/sessions/{id}/answers",
                 "/v1/sessions/{id}/cancel",
+                "/v1/sessions/{id}/retry",
+                "/v1/sessions/{id}/branch",
                 "/v1/sessions/{id}/events",
                 "/v1/sessions/{id}/access_requests",
                 "/v1/sessions/{id}/access_requests/{request_id}/approve",
