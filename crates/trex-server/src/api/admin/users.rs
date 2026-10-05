@@ -230,6 +230,7 @@ pub async fn delete_user(
         (status = 204),
         (status = 403, response = ErrorResponse),
         (status = 404, response = ErrorResponse),
+        (status = 409, response = ErrorResponse),
     ),
 )]
 pub async fn sign_out_user(
@@ -238,6 +239,11 @@ pub async fn sign_out_user(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let user = ids::decode(USER, &id).ok_or_else(|| ApiError::NotFound(format!("no user {id}")))?;
+    if user == admin.user {
+        return Err(ApiError::Conflict(
+            "sign out your other devices from your account".into(),
+        ));
+    }
     let ended = state.store.delete_user_sessions(user, None).await?;
     tracing::info!(admin = %admin.user, user = %user, ended, "signed a user out everywhere");
     Ok(StatusCode::NO_CONTENT)

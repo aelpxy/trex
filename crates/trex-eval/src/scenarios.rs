@@ -665,54 +665,31 @@ async fn ask_then_continue(cx: Arc<Ctx>) -> anyhow::Result<()> {
     Ok(())
 }
 
+// a blocked command waits for the user's answer, and the model retries on its own once approved
 async fn approve_blocked_network(cx: Arc<Ctx>) -> anyhow::Result<()> {
     let session = cx.session(MODEL).await?;
     let mut watch = cx.watch(&session);
     cx.api
         .send(
             &session,
-            "Use bash to run `curl -sS --max-time 10 https://example.com` and tell me what happened.",
+            "Use bash to run `curl -sS --max-time 10 https://example.com` and tell me the page title.",
             false,
         )
         .await?;
-    let end = watch.until_end().await?;
-    cx.check_completed(&end);
-
-    // denials are reported in batches, so one raised late in the run may only reach the list
-    let mut request = None;
-    for _ in 0..10 {
-        let requests = cx.api.access_requests(&session).await?;
-        request = requests
-            .into_iter()
-            .find(|request| request["endpoints"].to_string().contains("example.com"));
-        if request.is_some() {
-            break;
-        }
-        sleep(Duration::from_secs(2)).await;
-    }
-    cx.check(
-        "raised an access request",
-        request.is_some(),
-        "no request for example.com",
-    );
-    let Some(request) = request else {
-        return Ok(());
-    };
+    let request = watch
+        .until(|event| {
+            event["type"] == "access.requested"
+                && event["endpoints"].to_string().contains("example.com")
+        })
+        .await?;
     let id = request["id"].as_str().context("access request has no id")?;
     cx.api.approve(&session, id).await?;
 
-    cx.api
-        .send(
-            &session,
-            "I approved it. Run the same curl again and tell me the page title.",
-            false,
-        )
-        .await?;
     let end = watch.until_end().await?;
     cx.check_completed(&end);
     let reply = cx.reply(&session).await?;
     cx.check(
-        "reached the site after approval",
+        "reached the site after approval, without being told to retry",
         reply.contains("Example Domain"),
         excerpt(&reply),
     );

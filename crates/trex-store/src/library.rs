@@ -6,6 +6,7 @@ use object_store::{
     ObjectStore, ObjectStoreExt, aws::AmazonS3Builder, local::LocalFileSystem, memory::InMemory,
     path::Path,
 };
+use percent_encoding::percent_decode_str;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -156,19 +157,27 @@ impl Library {
         Ok(())
     }
 
+    // one file's size and time, without listing the library
+    pub async fn stat(&self, workspace: Uuid, path: &str) -> anyhow::Result<LibraryFile> {
+        let meta = self
+            .store
+            .head(&key(workspace, path)?)
+            .await
+            .context("failed to read library file")?;
+        Ok(LibraryFile {
+            path: path.to_owned(),
+            size: meta.size,
+            modified_at: meta.last_modified.timestamp(),
+        })
+    }
+
     pub async fn list(&self, workspace: Uuid) -> anyhow::Result<Vec<LibraryFile>> {
         let root = root(workspace);
-        let prefix = format!("{root}/");
         let mut files: Vec<LibraryFile> = self
             .store
             .list(Some(&root))
             .map_ok(|meta| LibraryFile {
-                path: meta
-                    .location
-                    .as_ref()
-                    .strip_prefix(&prefix)
-                    .unwrap_or(meta.location.as_ref())
-                    .to_owned(),
+                path: library_path(&meta.location, &root),
                 size: meta.size,
                 modified_at: meta.last_modified.timestamp(),
             })
@@ -178,6 +187,22 @@ impl Library {
         files.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(files)
     }
+}
+
+// object_store percent-encodes each segment it stores, so a listed location is decoded back into
+// the path the user gave, the one every other call takes
+fn library_path(location: &Path, root: &Path) -> String {
+    let Some(parts) = location.prefix_match(root) else {
+        return location.to_string();
+    };
+    parts
+        .map(|part| {
+            percent_decode_str(part.as_ref())
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[derive(Debug)]
@@ -242,6 +267,17 @@ fn key(workspace: Uuid, path: &str) -> anyhow::Result<Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lists_names_as_they_were_given() {
+        let library = Library::in_memory();
+        let workspace = Uuid::now_v7();
+        let name = "notes #1/Ünï [draft] 100%.md";
+        library.put(workspace, name, b"x".to_vec()).await.unwrap();
+        let listed = library.list(workspace).await.unwrap();
+        assert_eq!(listed[0].path, name);
+        assert_eq!(library.get(workspace, &listed[0].path).await.unwrap(), b"x");
+    }
 
     #[tokio::test]
     async fn renames_without_overwriting() {

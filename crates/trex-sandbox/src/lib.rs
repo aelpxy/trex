@@ -49,6 +49,7 @@ pub struct Sandbox {
 pub struct Policy(proto::SandboxPolicy);
 
 // a network request the sandbox was denied, proposed by openshell as a rule a user can approve
+#[derive(Clone)]
 pub struct AccessRequest {
     pub id: String,
     pub review_token: String,
@@ -58,6 +59,14 @@ pub struct AccessRequest {
     pub rationale: String,
     pub security_notes: String,
     pub hit_count: i32,
+}
+
+// where the user's review of an access request stands
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessStatus {
+    Pending,
+    Approved,
+    Rejected,
 }
 
 pub struct OpenShell {
@@ -215,6 +224,38 @@ impl OpenShell {
             workspace: workspace.to_owned(),
             name,
         })
+    }
+
+    // every request's review status by id, decided ones included
+    pub async fn access_statuses(
+        &self,
+        sandbox: &Sandbox,
+    ) -> anyhow::Result<HashMap<String, AccessStatus>> {
+        let request = proto::GetDraftPolicyRequest {
+            workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
+            sandbox: sandbox.name.clone(),
+            status_filter: String::new(),
+        };
+        let response = self
+            .client
+            .raw_grpc()
+            .get_draft_policy(request)
+            .await
+            .context("failed to get access requests")?
+            .into_inner();
+        Ok(response
+            .chunks
+            .into_iter()
+            .filter_map(|chunk| {
+                let status = match chunk.status.as_str() {
+                    "pending" => AccessStatus::Pending,
+                    "approved" => AccessStatus::Approved,
+                    "rejected" => AccessStatus::Rejected,
+                    _ => return None,
+                };
+                Some((chunk.id, status))
+            })
+            .collect())
     }
 
     // openshell has no push notification for new drafts, so callers poll this

@@ -13,3 +13,17 @@ export function trackToast<T>(work: Promise<T>, messages: { loading: string; suc
     error: (cause) => ({ title: messages.error, description: errorMessage(cause), type: "error" }),
   });
 }
+
+// for quick actions: no progress line, just the outcome; resolves to whether it worked
+export function toastOutcome<T>(work: Promise<T>, messages: { success: string | ((result: T) => string); error: string }): Promise<boolean> {
+  return work.then(
+    (result) => {
+      toasts.add({ title: typeof messages.success === "function" ? messages.success(result) : messages.success, type: "success" });
+      return true;
+    },
+    (cause) => {
+      toasts.add({ title: messages.error, description: errorMessage(cause), type: "error" });
+      return false;
+    },
+  );
+}

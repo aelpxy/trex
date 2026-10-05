@@ -124,12 +124,12 @@ pub async fn move_file(
             body.to
         )));
     }
-    let files = state.library.list(workspace).await?;
-    let moved = files
-        .iter()
-        .find(|entry| entry.path == body.to)
-        .ok_or_else(|| ApiError::NotFound(format!("no library file {}", body.to)))?;
-    Ok(Json(file(moved)))
+    let moved = state
+        .library
+        .stat(workspace, &body.to)
+        .await
+        .map_err(|error| library_error(error, &body.to))?;
+    Ok(Json(file(&moved)))
 }
 
 // the router serves these under a {*path} wildcard, which openapi can't express, so they are

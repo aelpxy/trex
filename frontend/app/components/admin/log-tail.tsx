@@ -6,7 +6,7 @@ import { Button } from "~/components/ui/button";
 import { SelectField } from "~/components/ui/select-field";
 import { queries } from "~/lib/queries";
 
-import { ActionStatus } from "./action-status";
+import { LoadError } from "./load-error";
 import { FilterInput } from "./filter-input";
 import { matches, useUrlFilter } from "./use-url-filter";
 
@@ -55,7 +55,7 @@ export function LogTail() {
         </Button>
       </div>
       <p className="mt-2 text-[11px] text-muted">This server instance's latest lines, refreshed every 2 seconds. Other instances keep their own.</p>
-      <ActionStatus error={logs.error} success={null} />
+      <LoadError error={logs.error} />
       <div
         ref={scroller}
         onScroll={(event) => {

@@ -54,13 +54,15 @@ type DataTableProps<T extends RowData> = {
   selection?: RowSelectionState;
   onSelectionChange?: (selection: RowSelectionState) => void;
   canSelect?: (row: T) => boolean;
+  // how screen readers name a row's checkbox, e.g. `Select ada@example.com`
+  rowLabel?: (row: T) => string;
   // extra attributes per row, e.g. to drag rows or drop onto them; the row's id is in `data-row-id`
   rowProps?: (row: T) => HTMLAttributes<HTMLTableRowElement>;
 };
 
 const SORT_ICON = { asc: LuArrowUp, desc: LuArrowDown };
 
-export function DataTable<T extends RowData>({ label, data, columns, rowId, onRowClick, empty = "Nothing here yet.", sorting, onSortingChange, selection, onSelectionChange, canSelect, rowProps }: DataTableProps<T>) {
+export function DataTable<T extends RowData>({ label, data, columns, rowId, onRowClick, empty = "Nothing here yet.", sorting, onSortingChange, selection, onSelectionChange, canSelect, rowLabel, rowProps }: DataTableProps<T>) {
   const controlled = sorting !== undefined;
   const selectable = selection !== undefined;
   const table = useTable({
@@ -152,7 +154,7 @@ export function DataTable<T extends RowData>({ label, data, columns, rowId, onRo
               >
                 {selectable && (
                   <td className="w-0 py-3 pr-0 pl-4" onClick={(event) => event.stopPropagation()}>
-                    <Checkbox label="Select row" checked={row.getIsSelected()} disabled={!row.getCanSelect()} onCheckedChange={(checked) => row.toggleSelected(checked)} />
+                    <Checkbox label={`Select ${rowLabel?.(row.original) ?? "row"}`} checked={row.getIsSelected()} disabled={!row.getCanSelect()} onCheckedChange={(checked) => row.toggleSelected(checked)} />
                   </td>
                 )}
                 {row.getAllCells().map((cell) => {

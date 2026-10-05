@@ -5,6 +5,7 @@ import { LuEllipsis, LuPause, LuPencil, LuPlay, LuTrash2, LuZap } from "react-ic
 
 import { DeleteConfirmDialog, type DeleteTarget } from "~/components/ui/delete-confirm-dialog";
 import { dangerMenuItem, iconButton, menuItem, menuSeparator, popup } from "~/components/ui/styles";
+import { errorMessage, toastOutcome, toasts } from "~/lib/toasts";
 import type { ApiScheduledTask } from "~/lib/trex";
 
 import { useDeleteTask, usePauseTask, useRunTask } from "./mutations";
@@ -18,11 +19,9 @@ export function TaskActions({ task, onDeleted }: { task: ApiScheduledTask; onDel
   const run = useRunTask();
   const pause = usePauseTask();
   const remove = useDeleteTask();
-  const error = run.error ?? pause.error ?? remove.error;
 
   return (
     <div className="flex items-center gap-2">
-      {error && <span role="alert" className="max-w-56 truncate text-xs text-danger" title={error.message}>{error.message}</span>}
       <Menu.Root>
         <Menu.Trigger aria-label={`Actions for ${task.title}`} className={iconButton}>
           <LuEllipsis size={15} />
@@ -30,11 +29,27 @@ export function TaskActions({ task, onDeleted }: { task: ApiScheduledTask; onDel
         <Menu.Portal>
           <Menu.Positioner align="end" sideOffset={4} className="z-50">
             <Menu.Popup className={`w-48 rounded-lg p-1 ${popup}`}>
-              <Menu.Item onClick={() => run.mutate(task.id, { onSuccess: (session) => navigate(`/chat/${session.id}`) })} className={menuItem}>
+              <Menu.Item
+                onClick={() =>
+                  run.mutate(task.id, {
+                    onSuccess: (session) => navigate(`/chat/${session.id}`),
+                    onError: (cause) => toasts.add({ title: `Couldn't run “${task.title}”`, description: errorMessage(cause), type: "error" }),
+                  })
+                }
+                className={menuItem}
+              >
                 <LuZap size={14} />
                 Run now
               </Menu.Item>
-              <Menu.Item onClick={() => pause.mutate({ id: task.id, paused: !task.paused })} className={menuItem}>
+              <Menu.Item
+                onClick={() =>
+                  void toastOutcome(pause.mutateAsync({ id: task.id, paused: !task.paused }), {
+                    success: task.paused ? `Resumed “${task.title}”` : `Paused “${task.title}”`,
+                    error: task.paused ? "Couldn't resume the task" : "Couldn't pause the task",
+                  })
+                }
+                className={menuItem}
+              >
                 {task.paused ? <LuPlay size={14} /> : <LuPause size={14} />}
                 {task.paused ? "Resume" : "Pause"}
               </Menu.Item>
@@ -56,7 +71,7 @@ export function TaskActions({ task, onDeleted }: { task: ApiScheduledTask; onDel
         target={deleting}
         onConfirm={(target) => {
           setDeleting(null);
-          remove.mutate(target.id, { onSuccess: onDeleted });
+          void toastOutcome(remove.mutateAsync(target.id), { success: `Deleted “${task.title}”`, error: "Couldn't delete the task" }).then((deleted) => deleted && onDeleted?.());
         }}
         onCancel={() => setDeleting(null)}
       />

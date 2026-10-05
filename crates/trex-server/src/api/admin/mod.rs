@@ -51,7 +51,10 @@ impl PageQuery {
         if page < 1 {
             return Err(ApiError::invalid("page starts at 1", "page"));
         }
-        Ok((limit, (page - 1) * limit))
+        let offset = (page - 1)
+            .checked_mul(limit)
+            .ok_or_else(|| ApiError::invalid("page is too large", "page"))?;
+        Ok((limit, offset))
     }
 
     fn search(&self) -> Option<&str> {

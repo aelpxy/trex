@@ -7,6 +7,7 @@ import { Button } from "~/components/ui/button";
 import { backdrop, dialogDescription, dialogPopup, dialogTitle, dialogViewport, focusRing } from "~/components/ui/styles";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { queries } from "~/lib/queries";
+import { toasts } from "~/lib/toasts";
 import { trex, type ApiScheduledTask, type TaskInput } from "~/lib/trex";
 
 import { browserTimezone, DEFAULT_PARTS, describeSchedule, FREQUENCIES, fromCron, timezones, toCron, WEEKDAYS, type Frequency, type ScheduleParts } from "./schedule";
@@ -105,6 +106,7 @@ export function TaskDialog({ open, onOpenChange, task }: TaskDialogProps) {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queries.scheduled.all });
       onOpenChange(false);
+      toasts.add({ title: task ? "Task saved" : "Task scheduled", type: "success" });
     },
   });
 

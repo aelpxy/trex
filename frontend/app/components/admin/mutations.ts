@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
+import { ApiError } from "~/lib/api";
 import { queries } from "~/lib/queries";
 import { trex } from "~/lib/trex";
 
@@ -8,7 +9,7 @@ function useAdminMutation<Variables, Result>(mutationFn: (variables: Variables) 
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queries.admin.all }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: queries.admin.all }),
   });
 }
 
@@ -46,6 +47,8 @@ export function useDeleteUsers() {
         try {
           await trex.admin.deleteUser(user);
         } catch (cause) {
+          // another admin got there first
+          if (cause instanceof ApiError && cause.status === 404) continue;
           const message = cause instanceof Error ? cause.message : String(cause);
           throw new Error(`Deleted ${done} of ${users.length} users, then: ${message}`);
         }

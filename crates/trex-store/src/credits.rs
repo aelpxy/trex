@@ -40,7 +40,7 @@ impl Store {
     pub async fn refill_credits(&self, workspace: Uuid, allowance: i64) -> anyhow::Result<i64> {
         let mut tx = self.pg.begin().await.context("failed to refill credits")?;
         let row = sqlx::query(
-            "SELECT credits, credits_refilled_for IS NOT NULL AND credits_refilled_for >= DATE_TRUNC('month', NOW())::DATE AS current \
+            "SELECT credits, credits_refilled_for IS NOT NULL AND credits_refilled_for >= DATE_TRUNC('month', NOW() AT TIME ZONE 'UTC')::DATE AS current \
              FROM workspaces WHERE id = $1 FOR UPDATE",
         )
         .bind(workspace)
@@ -55,7 +55,7 @@ impl Store {
         let grant = (allowance - balance).max(0);
         let balance = balance + grant;
         sqlx::query(
-            "UPDATE workspaces SET credits = $2, credits_refilled_for = DATE_TRUNC('month', NOW())::DATE WHERE id = $1",
+            "UPDATE workspaces SET credits = $2, credits_refilled_for = DATE_TRUNC('month', NOW() AT TIME ZONE 'UTC')::DATE WHERE id = $1",
         )
         .bind(workspace)
         .bind(balance)
@@ -186,7 +186,7 @@ impl Store {
         let rows = sqlx::query(
             "SELECT model, SUM(credits)::BIGINT AS credits, SUM(input_tokens)::BIGINT AS input_tokens, \
              SUM(output_tokens)::BIGINT AS output_tokens, COUNT(*) AS responses \
-             FROM usage_records WHERE workspace_id = $1 AND created_at >= DATE_TRUNC('month', NOW()) \
+             FROM usage_records WHERE workspace_id = $1 AND created_at >= DATE_TRUNC('month', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' \
              GROUP BY model ORDER BY SUM(credits) DESC, SUM(input_tokens + output_tokens) DESC",
         )
         .bind(workspace)
@@ -194,7 +194,7 @@ impl Store {
         .await
         .context("failed to load this month's usage")?;
         let start: i64 =
-            sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM DATE_TRUNC('month', NOW()))::BIGINT")
+            sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM DATE_TRUNC('month', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')::BIGINT")
                 .fetch_one(&self.pg)
                 .await
                 .context("failed to load this month's usage")?;

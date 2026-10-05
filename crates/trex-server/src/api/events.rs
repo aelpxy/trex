@@ -34,18 +34,20 @@ pub struct EventsQuery {
 #[derive(Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum SessionEvent {
-    /// `items` is how many conversation items (by `seq`) existed when the run started; a client that
-    /// reloads mid-run keeps those and rebuilds the rest from this run's events (`?from=run`).
+    /// `items` and `usage` are how many conversation items (by `seq`) and usage records existed when
+    /// the run started; a client that reloads mid-run keeps those and rebuilds the rest from this
+    /// run's events (`?from=run`).
     #[serde(rename = "run.started")]
-    RunStarted { items: i64 },
+    RunStarted { items: i64, usage: i64 },
     /// The chat was given a title, generated from its first message.
     #[serde(rename = "session.updated")]
     SessionUpdated { title: String },
-    /// trex restarted while the run was in progress and has picked it up again. Discard the text,
-    /// reasoning and tool calls streamed since the last `tool.result`; tool calls without a result
-    /// were stopped. Follows the run's `run.started` in place of its end.
+    /// trex restarted while the run was in progress and has picked it up again from saved history,
+    /// counted by `items` and `usage` as in `run.started`. Tool calls without a result were
+    /// interrupted; a response that was still streaming is generated again. Follows the run's
+    /// `run.started` in place of its end.
     #[serde(rename = "run.resumed")]
-    RunResumed { items: i64 },
+    RunResumed { items: i64, usage: i64 },
     #[serde(rename = "sandbox.creating")]
     SandboxCreating,
     /// The conversation's stopped sandbox is starting again, with its files intact.

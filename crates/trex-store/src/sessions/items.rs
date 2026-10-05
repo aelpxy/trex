@@ -87,6 +87,17 @@ impl Store {
         .context("failed to count session items")
     }
 
+    pub async fn count_session_usage(&self, workspace: Uuid, id: Uuid) -> anyhow::Result<i64> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM usage_records WHERE session_id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_one(&self.pg)
+        .await
+        .context("failed to count session usage")
+    }
+
     pub async fn session_usage(
         &self,
         workspace: Uuid,

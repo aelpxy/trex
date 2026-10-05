@@ -1,13 +1,15 @@
 import { useState, type FormEvent } from "react";
+import { Field } from "@base-ui/react/field";
 import { useMutation } from "@tanstack/react-query";
 
+import { PasswordInput } from "~/components/auth/password-input";
 import { Button } from "~/components/ui/button";
-import { focusRing } from "~/components/ui/styles";
+import { toasts } from "~/lib/toasts";
 import { trex } from "~/lib/trex";
 
-import { Status } from "./section";
-
 export const MIN_PASSWORD_LENGTH = 8;
+
+const label = "mb-1.5 block text-xs font-medium text-muted";
 
 export function PasswordForm() {
   const [current, setCurrent] = useState("");
@@ -22,35 +24,31 @@ export function PasswordForm() {
         onSuccess: () => {
           setCurrent("");
           setNext("");
+          toasts.add({ title: "Password changed", description: "Your other devices were signed out.", type: "success" });
         },
       },
     );
   }
 
+  // a wrong current password belongs to that field, so the error shows there rather than in a toast
   return (
     <form onSubmit={save} className="space-y-3">
-      <label className="block">
-        <span className="mb-1.5 block text-xs font-medium text-muted">Current password</span>
-        <input type="password" autoComplete="current-password" value={current} onChange={(event) => setCurrent(event.target.value)} required className={`ui-input ${focusRing}`} />
-      </label>
-      <label className="block">
-        <span className="mb-1.5 block text-xs font-medium text-muted">New password</span>
-        <input
-          type="password"
-          autoComplete="new-password"
-          minLength={MIN_PASSWORD_LENGTH}
-          value={next}
-          onChange={(event) => setNext(event.target.value)}
-          required
-          className={`ui-input ${focusRing}`}
-        />
-      </label>
-      <div className="flex items-center gap-3">
-        <Button type="submit" disabled={!current || next.length < MIN_PASSWORD_LENGTH || change.isPending}>
-          Change password
-        </Button>
-        <Status error={change.error} saved={change.isSuccess ? "Password changed. Other devices were signed out." : null} />
-      </div>
+      <Field.Root invalid={change.isError}>
+        <Field.Label className={label}>Current password</Field.Label>
+        <PasswordInput autoComplete="current-password" value={current} onValueChange={setCurrent} required />
+        {change.error && (
+          <p role="alert" className="mt-1.5 text-xs text-danger">
+            {change.error.message.charAt(0).toUpperCase() + change.error.message.slice(1)}
+          </p>
+        )}
+      </Field.Root>
+      <Field.Root>
+        <Field.Label className={label}>New password</Field.Label>
+        <PasswordInput autoComplete="new-password" minLength={MIN_PASSWORD_LENGTH} value={next} onValueChange={setNext} required />
+      </Field.Root>
+      <Button type="submit" disabled={!current || next.length < MIN_PASSWORD_LENGTH || change.isPending}>
+        Change password
+      </Button>
     </form>
   );
 }

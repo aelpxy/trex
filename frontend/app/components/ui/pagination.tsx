@@ -1,4 +1,5 @@
-import { Link, useSearchParams } from "react-router";
+import { useEffect, type ReactNode } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { LuChevronLeft, LuChevronRight } from "react-icons/lu";
 
 import { focusRing } from "./styles";
@@ -23,6 +24,22 @@ export function usePage(param = "page") {
 const link = `inline-flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-xs tabular-nums text-muted transition-colors hover:bg-subtle hover:text-ink aria-[current=page]:bg-subtle aria-[current=page]:font-medium aria-[current=page]:text-ink ${focusRing}`;
 const disabled = "pointer-events-none opacity-40";
 
+// previous or next; at either end it's inert, so neither a click nor the keyboard can follow it
+function PageStep({ to, label, enabled, children }: { to: string; label: string; enabled: boolean; children: ReactNode }) {
+  if (!enabled) {
+    return (
+      <span aria-label={label} aria-disabled className={`${link} ${disabled}`}>
+        {children}
+      </span>
+    );
+  }
+  return (
+    <Link to={to} preventScrollReset aria-label={label} className={link}>
+      {children}
+    </Link>
+  );
+}
+
 type PaginationProps = { page: number; perPage: number; total: number; noun?: string; param?: string };
 
 export function Pagination({ page, perPage, total, noun = "entries", param = "page" }: PaginationProps) {
@@ -35,6 +52,12 @@ export function Pagination({ page, perPage, total, noun = "entries", param = "pa
     const query = next.toString();
     return query ? `?${query}` : "?";
   };
+  const navigate = useNavigate();
+  // deleting the last rows of the last page leaves it empty, so it steps back to the new last page
+  const past = page > pages;
+  useEffect(() => {
+    if (past) navigate(href(pages), { replace: true, preventScrollReset: true });
+  });
   const first = total === 0 ? 0 : (page - 1) * perPage + 1;
   const last = Math.min(page * perPage, total);
 
@@ -45,9 +68,9 @@ export function Pagination({ page, perPage, total, noun = "entries", param = "pa
       </p>
       {pages > 1 && (
         <div className="flex items-center gap-1">
-          <Link to={href(page - 1)} preventScrollReset aria-label="Previous page" aria-disabled={page <= 1} className={`${link} ${page <= 1 ? disabled : ""}`}>
+          <PageStep to={href(page - 1)} label="Previous page" enabled={page > 1}>
             <LuChevronLeft size={14} />
-          </Link>
+          </PageStep>
           {pageList(page, pages).map((entry, index) =>
             entry === "gap" ? (
               <span key={`gap-${index}`} aria-hidden className="px-1 text-xs text-muted">
@@ -59,9 +82,9 @@ export function Pagination({ page, perPage, total, noun = "entries", param = "pa
               </Link>
             ),
           )}
-          <Link to={href(page + 1)} preventScrollReset aria-label="Next page" aria-disabled={page >= pages} className={`${link} ${page >= pages ? disabled : ""}`}>
+          <PageStep to={href(page + 1)} label="Next page" enabled={page < pages}>
             <LuChevronRight size={14} />
-          </Link>
+          </PageStep>
         </div>
       )}
     </nav>

@@ -1,9 +1,10 @@
-import { useRef, useState, type ChangeEvent } from "react";
+import { useRef, type ChangeEvent } from "react";
 import { Slider } from "@base-ui/react/slider";
 
 import { Section } from "~/components/account/section";
 import { Button } from "~/components/ui/button";
 import { Switch } from "~/components/ui/switch";
+import { toasts } from "~/lib/toasts";
 
 import { useAppearance } from "./appearance-provider";
 import { DEFAULT_SETTINGS } from "./storage";
@@ -33,16 +34,15 @@ function SettingSlider({ label, value, min, max, unit, onChange }: SettingSlider
 export function AppearanceSettings() {
   const { settings, setSettings, backgroundUrl, setBackground } = useAppearance();
   const { theme, setTheme } = useTheme();
-  const [error, setError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   async function updateBackground(image: File | null) {
-    setError(null);
     try {
       await setBackground(image);
+      toasts.add({ title: image ? "Background updated" : "Background removed", type: "success" });
     } catch (cause) {
       console.warn("could not update background image", cause);
-      setError(image ? "Couldn't save that image." : "Couldn't remove the image.");
+      toasts.add({ title: image ? "Couldn't save that image" : "Couldn't remove the image", type: "error" });
     }
   }
 
@@ -51,9 +51,9 @@ export function AppearanceSettings() {
     event.target.value = "";
     if (!file) return;
     if (!file.type.startsWith("image/")) {
-      setError("That file isn't an image.");
+      toasts.add({ title: "That file isn't an image", type: "error" });
     } else if (file.size > MAX_IMAGE_BYTES) {
-      setError("Images must be 20 MB or smaller.");
+      toasts.add({ title: "That image is too large", description: "Images must be 20 MB or smaller.", type: "error" });
     } else {
       void updateBackground(file);
     }
@@ -80,7 +80,6 @@ export function AppearanceSettings() {
               Remove
             </Button>
           </div>
-          {error && <p role="alert" className="mt-2 text-xs text-danger">{error}</p>}
         </div>
       </Section>
       <Section title="Glass" description="How much the panels blur and let the background through.">

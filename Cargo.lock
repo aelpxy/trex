@@ -4351,6 +4351,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "object_store",
+ "percent-encoding",
  "redis",
  "serde_json",
  "sha2 0.11.0",

@@ -9,9 +9,9 @@ import { DrawerSection } from "~/components/ui/side-drawer";
 import { focusRing } from "~/components/ui/styles";
 import { dollarsToCredits, formatUsd } from "~/lib/credits";
 import { queries } from "~/lib/queries";
+import { toastOutcome } from "~/lib/toasts";
 import type { ApiAdminWorkspace } from "~/lib/trex";
 
-import { ActionStatus } from "./action-status";
 import { useAdjustFunds, useSetModels, useSetPlan } from "./mutations";
 
 const label = "mb-1.5 block text-[11px] font-medium text-muted";
@@ -25,15 +25,14 @@ function FundsForm({ workspace }: { workspace: ApiAdminWorkspace }) {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    adjust.mutate(
-      { workspace: workspace.id, amount, description: reason.trim() || "Admin adjustment" },
-      {
-        onSuccess: () => {
-          setDollars("");
-          setReason("");
-        },
-      },
-    );
+    void toastOutcome(adjust.mutateAsync({ workspace: workspace.id, amount, description: reason.trim() || "Admin adjustment" }), {
+      success: (result) => `${amount > 0 ? "Added" : "Removed"} ${formatUsd(Math.abs(amount))}; balance is ${formatUsd(result.balance)}`,
+      error: "Couldn't change the balance",
+    }).then((saved) => {
+      if (!saved) return;
+      setDollars("");
+      setReason("");
+    });
   }
 
   return (
@@ -52,8 +51,7 @@ function FundsForm({ workspace }: { workspace: ApiAdminWorkspace }) {
             <Field.Control value={reason} onValueChange={setReason} placeholder="Admin adjustment" className={input} />
           </Field.Root>
         </div>
-        <div className="flex items-center justify-end gap-3">
-          <ActionStatus error={adjust.error} success={adjust.data ? `New balance ${formatUsd(adjust.data.balance)}.` : null} />
+        <div className="flex justify-end">
           <Button type="submit" disabled={!Number.isFinite(amount) || amount === 0 || adjust.isPending}>
             Apply
           </Button>
@@ -73,7 +71,7 @@ function ModelsForm({ workspace }: { workspace: ApiAdminWorkspace }) {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    save.mutate({ workspace: workspace.id, models: limited ? allowed : null });
+    void toastOutcome(save.mutateAsync({ workspace: workspace.id, models: limited ? allowed : null }), { success: "Models saved", error: "Couldn't save the models" });
   }
 
   return (
@@ -95,8 +93,7 @@ function ModelsForm({ workspace }: { workspace: ApiAdminWorkspace }) {
             ))}
           </div>
         )}
-        <div className="mt-3 flex items-center justify-end gap-3">
-          <ActionStatus error={save.error} success={save.isSuccess ? "Saved." : null} />
+        <div className="mt-3 flex justify-end">
           <Button type="submit" disabled={!changed || (limited && allowed.length === 0) || save.isPending}>
             Save models
           </Button>
@@ -118,7 +115,7 @@ function PlanForm({ workspace }: { workspace: ApiAdminWorkspace }) {
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          save.mutate({ workspace: workspace.id, plan });
+          void toastOutcome(save.mutateAsync({ workspace: workspace.id, plan }), { success: "Plan changed", error: "Couldn't change the plan" });
         }}
         className="flex gap-2"
       >
@@ -129,9 +126,6 @@ function PlanForm({ workspace }: { workspace: ApiAdminWorkspace }) {
           Set plan
         </Button>
       </form>
-      <div className="mt-2">
-        <ActionStatus error={save.error} success={save.isSuccess ? "Saved." : null} />
-      </div>
     </DrawerSection>
   );
 }

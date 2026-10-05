@@ -223,6 +223,13 @@ function dropUnsettled(message: AssistantMessage): AssistantMessage {
   return { ...message, parts: message.parts.slice(0, keep) };
 }
 
+// a resumed run continues from saved history, so what was shown stays; only tool calls the restart
+// cut off are closed, as the server closes them
+function stopUnsettled(message: AssistantMessage): AssistantMessage {
+  const now = Date.now();
+  return { ...message, parts: message.parts.map((part) => (part.type === "tool" && part.state === "running" ? { ...part, state: "error", summary: "Interrupted", endedAt: now } : part)) };
+}
+
 function setStatus(message: AssistantMessage, label: string, done: boolean, replacing?: (part: Part) => boolean): AssistantMessage {
   const index = replacing ? message.parts.findIndex(replacing) : -1;
   const part: Part = { type: "status", label, done };
@@ -240,7 +247,7 @@ function accessEvent(request: ApiAccessRequest): ChatEvent {
 
 // the conversation as saved; with `upto`, only the items that existed when the running run started,
 // since its events are replayed to rebuild the rest
-function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: number): Message[] {
+function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: { items: number; usage: number }): Message[] {
   const running = upto !== undefined || data.session.status === "running";
   const messages: Message[] = [];
   const turns: { started: number; ended: number }[] = [];
@@ -257,7 +264,11 @@ function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: numbe
     messages[messages.length - 1] = { ...updated, state: "completed" };
   };
 
-  for (const item of upto === undefined ? data.items : data.items.filter((saved) => saved.seq <= upto)) {
+  const items = upto === undefined ? data.items : data.items.filter((saved) => saved.seq <= upto.items);
+  // a replay re-adds this run's usage from its events, so only the records from before it count here
+  const usage = upto === undefined ? data.usage : data.usage.slice(0, upto.usage);
+
+  for (const item of items) {
     if (item.type === "message" && item.role === "user") turns.push({ started: item.created_at, ended: item.created_at });
     else if (turns.length) turns[turns.length - 1].ended = item.created_at;
     if (item.type === "message" && item.role === "user") messages.push({ id: crypto.randomUUID(), role: "user", content: item.text, attachments: savedAttachments(item) });
@@ -275,12 +286,19 @@ function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: numbe
   }
 
   const { session } = data;
-  if (running) messages.push(newAssistant(null));
+  if (running) {
+    // a resumed run already saved part of its turn, and the live part continues that message
+    const last = messages.at(-1);
+    if (last?.role === "assistant") messages[messages.length - 1] = { ...last, state: "running" };
+    else messages.push(newAssistant(null));
+  }
   else if (session.status === "needs_input" && session.pending_questions) {
     const message = questionEvents(session.pending_questions).reduce((current, event) => applyEvent(current, event, 0), assistant());
     messages[messages.length - 1] = message;
   } else if (session.status === "failed" && session.last_error) {
-    apply([failedEvent(undefined, session.last_error)]);
+    // the saved error has no code, so the out-of-credits stop is recognised by its message and offers no retry
+    const code = session.last_error.startsWith("out of credits") ? "insufficient_credits" : undefined;
+    apply([failedEvent(code, session.last_error)]);
   }
   const pending = data.access.filter((request) => request.status === "pending");
   if (pending.length) {
@@ -291,7 +309,7 @@ function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: numbe
   const untimed = messages.map((message) =>
     message.role === "assistant" ? { ...message, parts: message.parts.map((part) => (part.type === "tool" ? { ...part, endedAt: undefined } : part)) } : message,
   );
-  return timeTurns(untimed, turns, data.usage, running);
+  return timeTurns(untimed, turns, usage, running);
 }
 
 type UseChatOptions = { chatId?: string; data?: ChatData; fresh?: FreshChat; settings: ChatSettings; projectId?: string };
@@ -347,23 +365,32 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
   const onEvent = useCallback(
     (event: StreamEvent) => {
       const data = event.data;
+      // the replay begins at the run's start; when that was trimmed from the stream, there's nothing to rebuild
+      if (replaying.current && event.type !== "run.started" && event.type !== "run.resumed") replaying.current = false;
       if ((event.type === "run.started" || event.type === "run.resumed") && replaying.current && chat) {
         replaying.current = false;
-        usage.current = EMPTY_USAGE;
         calls.current.clear();
-        setMessages(messagesFrom(chat, calls.current, Number(data.items ?? 0)));
+        const rebuilt = messagesFrom(chat, calls.current, { items: Number(data.items ?? 0), usage: Number(data.usage ?? 0) });
+        const last = rebuilt.at(-1);
+        // tool calls the restart cut off never finish, as when the resume is seen live
+        if (event.type === "run.resumed" && last?.role === "assistant") rebuilt[rebuilt.length - 1] = setStatus(stopUnsettled(last), "Resumed after a restart", true);
+        // replayed usage adds to what the turn used before a resume
+        usage.current = last?.role === "assistant" && last.usage ? last.usage : EMPTY_USAGE;
+        setMessages(rebuilt);
         return;
       }
       switch (event.type) {
         case "run.started":
-          usage.current = EMPTY_USAGE;
           setMessages((current) => {
             const last = current.at(-1);
-            return last?.role === "assistant" && last.state === "running" ? current : [...current, newAssistant()];
+            // answering a question or retrying continues the same reply, so its usage keeps adding up
+            const continuing = last?.role === "assistant" && last.state === "running";
+            usage.current = continuing ? (last.usage ?? EMPTY_USAGE) : EMPTY_USAGE;
+            return continuing ? current : [...current, newAssistant()];
           });
           break;
         case "run.resumed":
-          updateLast((message) => setStatus(dropUnsettled({ ...message, state: "running" }), "Resumed after a restart", true));
+          updateLast((message) => setStatus(stopUnsettled({ ...message, state: "running" }), "Resumed after a restart", true));
           break;
         case "model.retrying":
           updateLast((message) => setStatus(dropUnsettled(message), `Retrying (${Number(data.attempt) + 1}/${Number(data.max_attempts)})`, true));
@@ -506,14 +533,19 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
     [chatId, chat, emit, updateLast, renameChat, changeQueued, flushQueued],
   );
 
-  // one stream per open chat; a fresh chat replays its first run from the start
+  // one stream per open chat, kept across re-renders and loader refreshes so no event is missed;
+  // a fresh chat replays its first run from the start
+  const onEventRef = useRef(onEvent);
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
+  const startFrom = useRef<"start" | "run" | "tail">(fresh ? "start" : replaying.current ? "run" : "tail");
   useEffect(() => {
     if (!chatId) return;
     const abort = new AbortController();
-    const from = fresh ? "start" : replaying.current ? "run" : "tail";
-    streamEvents(chatId, { from, signal: abort.signal, onEvent }).catch((error) => console.warn("event stream closed", error));
+    streamEvents(chatId, { from: startFrom.current, signal: abort.signal, onEvent: (event) => onEventRef.current(event) }).catch((error) => console.warn("event stream closed", error));
     return () => abort.abort();
-  }, [chatId, fresh, onEvent]);
+  }, [chatId]);
 
   const fail = useCallback((error: unknown) => {
     const event: ChatEvent =

@@ -28,7 +28,8 @@ export function BalanceCard() {
   );
 }
 
-const month = (seconds: number) => new Date(seconds * 1000).toLocaleDateString(undefined, { month: "long" });
+// months are counted in UTC on the server, the same as the plan top-up
+const month = (seconds: number) => new Date(seconds * 1000).toLocaleDateString(undefined, { month: "long", timeZone: "UTC" });
 
 // this month's spend, and how it splits across models
 export function MonthUsage() {

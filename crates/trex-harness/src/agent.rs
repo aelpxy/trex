@@ -22,6 +22,7 @@ use trex_store::library::Library;
 use uuid::Uuid;
 
 use crate::{
+    access::AccessGate,
     attachment,
     event::{Event, Usage},
     history,
@@ -34,6 +35,7 @@ use crate::{
 // the model would otherwise assume files and installs from earlier in the conversation still exist
 const SANDBOX_REPLACED_NOTE: &str = "[The sandbox stopped working and was replaced with a fresh one. Files, installed packages and processes from earlier in this conversation are gone; recreate what you need, or load it from the library.]";
 const ACCESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const BASH: &str = "bash";
 // attempts per model request; the client already retries failed connections and statuses beneath this
 const MAX_ATTEMPTS: u32 = 5;
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
@@ -712,6 +714,16 @@ impl Agent<'_> {
         call: &FunctionToolCall,
         events: &mpsc::Sender<Event>,
     ) -> anyhow::Result<ToolOutput> {
+        // only sandbox commands reach the network through openshell, so only they wait for access
+        let gate = (call.name == BASH).then_some(AccessGate {
+            openshell: self.openshell,
+            sandbox: self.sandbox,
+            unattended: self.unattended,
+        });
+        let before = match &gate {
+            Some(gate) => gate.pending().await,
+            None => HashSet::new(),
+        };
         let ctx = ToolContext {
             workspace: self.workspace,
             library: self.library,
@@ -733,6 +745,24 @@ impl Agent<'_> {
             output.prepend(SANDBOX_REPLACED_NOTE)
         } else {
             output
+        };
+        let output = match &gate {
+            Some(gate) => {
+                let failed = is_error || !output.text().trim_end().ends_with("[exit code 0]");
+                match gate.settle(&before, failed, events).await {
+                    Ok(Some(note)) => output.append(&note),
+                    Ok(None) => output,
+                    Err(error) => {
+                        // the command's own output still tells the model it failed
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "failed to check access requests"
+                        );
+                        output
+                    }
+                }
+            }
+            None => output,
         };
         tracing::debug!(
             call_id = call.call_id,

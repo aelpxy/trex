@@ -38,7 +38,7 @@ const MAX_TURNS: usize = 50;
 const SEND_ATTEMPTS: usize = 3;
 // a run is resumed elsewhere once its lease misses a few heartbeats
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-const RUN_STALE_AFTER: Duration = Duration::from_secs(30);
+pub(crate) const RUN_STALE_AFTER: Duration = Duration::from_secs(30);
 const RESUME_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const RESUME_BATCH: i64 = 20;
 const INSUFFICIENT_CREDITS: &str = "insufficient_credits";
@@ -228,8 +228,9 @@ pub async fn send_message(
             return Ok(Started::Queued);
         }
     }
+    // a run asked to stop takes no more messages; it ends within a heartbeat
     Err(ApiError::Conflict(
-        "the session's run is changing state, try again".into(),
+        "the chat is stopping; send your message again in a moment".into(),
     ))
 }
 
@@ -364,7 +365,7 @@ async fn run(
     cancel: CancellationToken,
     interrupts: watch::Receiver<()>,
 ) {
-    // a client that reloads mid-run keeps the items saved before this and replays the rest
+    // a client that reloads mid-run keeps the items and usage saved before this and replays the rest
     let items = state
         .store
         .count_session_items(workspace, session)
@@ -373,10 +374,18 @@ async fn run(
             tracing::warn!(session = %session, error = format!("{error:#}"), "failed to count session items");
             0
         });
+    let usage = state
+        .store
+        .count_session_usage(workspace, session)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(session = %session, error = format!("{error:#}"), "failed to count session usage");
+            0
+        });
     let started = if resumed {
-        SessionEvent::RunResumed { items }
+        SessionEvent::RunResumed { items, usage }
     } else {
-        SessionEvent::RunStarted { items }
+        SessionEvent::RunStarted { items, usage }
     };
     publish(&state, session, started).await;
     let result = tokio::select! {
@@ -444,7 +453,15 @@ async fn keep_lease(state: &AppState, session: Uuid, run: RunId, cancel: &Cancel
         match state.store.heartbeat_run(session, run).await {
             Ok(Lease::Held) => {}
             Ok(Lease::CancelRequested) => cancel.cancel(),
-            Ok(Lease::Lost) => return,
+            Ok(Lease::Lost) => match state.store.run_taken_over(session, run).await {
+                // this run finished the session itself, so `drive` reports how it ended
+                Ok(false) => std::future::pending::<()>().await,
+                Ok(true) => return,
+                Err(error) => {
+                    tracing::warn!(session = %session, error = format!("{error:#}"), "failed to check run owner");
+                    return;
+                }
+            },
             Err(error) => {
                 tracing::warn!(session = %session, error = format!("{error:#}"), "failed to renew run lease")
             }
@@ -463,7 +480,10 @@ async fn stop(
 ) {
     let result: anyhow::Result<()> = async {
         loop {
-            let queued = state.store.take_queued_messages(workspace, session).await?;
+            let queued = state
+                .store
+                .take_run_leftovers(workspace, session, run)
+                .await?;
             let items: Vec<_> = queued.into_iter().map(queued_item).collect();
             state
                 .store

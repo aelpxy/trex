@@ -18,7 +18,7 @@ type NameDialogProps = {
 export function NameDialog({ title, description, initial = "", action, onSubmit, onClose }: NameDialogProps) {
   const [name, setName] = useState(initial);
   const trimmed = name.trim();
-  const invalid = trimmed.includes("/") ? "Names can't contain a slash." : trimmed === "." || trimmed === ".." ? "Pick another name." : null;
+  const invalid = /[/\\]/.test(trimmed) ? "Names can't contain slashes." : trimmed === "." || trimmed === ".." ? "Pick another name." : null;
 
   function submit(event: FormEvent) {
     event.preventDefault();

@@ -183,17 +183,6 @@ impl Api {
         Ok(items["data"].as_array().cloned().unwrap_or_default())
     }
 
-    pub async fn access_requests(&self, session: &str) -> anyhow::Result<Vec<Value>> {
-        let requests = self
-            .call(
-                Method::GET,
-                &format!("/sessions/{session}/access_requests"),
-                None,
-            )
-            .await?;
-        Ok(requests["data"].as_array().cloned().unwrap_or_default())
-    }
-
     pub async fn approve(&self, session: &str, request: &str) -> anyhow::Result<()> {
         self.call(
             Method::POST,

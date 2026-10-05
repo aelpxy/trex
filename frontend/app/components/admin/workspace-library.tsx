@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { LuArrowLeft, LuDownload, LuExternalLink, LuFolder, LuFolderOpen } from "react-icons/lu";
@@ -12,9 +11,9 @@ import { Pagination, usePage } from "~/components/ui/pagination";
 import { focusRing, iconButton } from "~/components/ui/styles";
 import { adminLibraryFile } from "~/lib/api";
 import { ADMIN_PAGE_SIZE, queries } from "~/lib/queries";
+import { errorMessage, toasts } from "~/lib/toasts";
 import type { ApiAdminWorkspace } from "~/lib/trex";
 
-import { ActionStatus } from "./action-status";
 import { FilterInput } from "./filter-input";
 import { date } from "./format";
 import { useUrlFilter, useUrlSort } from "./use-url-filter";
@@ -69,7 +68,6 @@ function Browser({ id }: { id: string }) {
   const { data: files } = useSuspenseQuery(queries.admin.library(id));
   const [params, setParams] = useSearchParams();
   const [filter, setFilter] = useUrlFilter();
-  const [error, setError] = useState<unknown>(null);
   const navigate = useNavigate();
   const workspace = matches.data.find((candidate) => candidate.id === id);
   const folder = params.get("path") ?? "";
@@ -89,8 +87,9 @@ function Browser({ id }: { id: string }) {
     );
 
   function fetchFile(file: Entry, download: boolean) {
-    setError(null);
-    openFile(() => adminLibraryFile(id, file.path), file.path, download).catch(setError);
+    openFile(() => adminLibraryFile(id, file.path), file.path, download).catch((cause) =>
+      toasts.add({ title: `Couldn't ${download ? "download" : "open"} ${file.name}`, description: errorMessage(cause), type: "error" }),
+    );
   }
 
   const column = columnsFor<Entry>();
@@ -159,7 +158,6 @@ function Browser({ id }: { id: string }) {
             <FilterInput value={filter} onChange={setFilter} label="Search every file in this library" />
           </div>
           <div className="mt-3 flex min-h-6 items-center">{filter ? <p className="text-xs text-muted">{entries.length === 1 ? "1 match" : `${entries.length.toLocaleString()} matches`} across all folders</p> : <Breadcrumbs folder={folder} onOpen={openFolder} />}</div>
-          <ActionStatus error={error} success={null} />
           <DataTable
             label="Files"
             data={entries}

@@ -165,7 +165,7 @@ impl Store {
     ) -> anyhow::Result<bool> {
         let result = sqlx::query(
             "UPDATE sessions SET queued_messages = queued_messages || JSONB_BUILD_ARRAY($3::JSONB), updated_at = NOW() \
-             WHERE id = $1 AND workspace_id = $2 AND status = 'running'",
+             WHERE id = $1 AND workspace_id = $2 AND status = 'running' AND NOT run_cancel_requested",
         )
         .bind(id)
         .bind(workspace)
@@ -174,6 +174,64 @@ impl Store {
         .await
         .context("failed to queue message")?;
         Ok(result.rows_affected() > 0)
+    }
+
+    // a run's leftover messages, only while `run` still holds the session; another instance that took
+    // the run over reads them itself
+    pub async fn take_run_leftovers(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        run: Uuid,
+    ) -> anyhow::Result<Vec<Value>> {
+        let queued: Option<Value> = sqlx::query_scalar(
+            "UPDATE sessions s SET queued_messages = '[]'::JSONB \
+             FROM (SELECT id, queued_messages FROM sessions WHERE id = $1 AND workspace_id = $2 \
+             AND run_id = $3 AND status = 'running' FOR UPDATE) old \
+             WHERE s.id = old.id RETURNING old.queued_messages",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(run)
+        .fetch_optional(&self.pg)
+        .await
+        .context("failed to take leftover messages")?;
+        queued
+            .map(serde_json::from_value)
+            .transpose()
+            .context("invalid queued messages")
+            .map(Option::unwrap_or_default)
+    }
+
+    // whether another run holds the session now, as opposed to `run` having finished it
+    pub async fn run_taken_over(&self, id: Uuid, run: Uuid) -> anyhow::Result<bool> {
+        let taken: Option<bool> = sqlx::query_scalar(
+            "SELECT status = 'running' AND run_id IS DISTINCT FROM $2 FROM sessions WHERE id = $1",
+        )
+        .bind(id)
+        .bind(run)
+        .fetch_optional(&self.pg)
+        .await
+        .context("failed to check run owner")?;
+        // a deleted session has no run to finish either
+        Ok(taken.unwrap_or(true))
+    }
+
+    // runs in these workspaces whose instance is still alive, i.e. renewed within `stale_after`
+    pub async fn active_runs(
+        &self,
+        workspaces: &[Uuid],
+        stale_after: Duration,
+    ) -> anyhow::Result<i64> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions WHERE workspace_id = ANY($1) AND status = 'running' \
+             AND run_heartbeat_at > NOW() - MAKE_INTERVAL(secs => $2)",
+        )
+        .bind(workspaces)
+        .bind(stale_after.as_secs_f64())
+        .fetch_one(&self.pg)
+        .await
+        .context("failed to count active runs")
     }
 
     pub async fn take_queued_messages(

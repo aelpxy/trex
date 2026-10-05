@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { ContextMenu } from "@base-ui/react/context-menu";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
@@ -44,7 +44,7 @@ export function FileManager() {
   const [params, setParams] = useSearchParams();
   const [filter, setFilter] = useUrlFilter();
   const folder = params.get("path") ?? "";
-  const entries = entriesOf(files, folder, filter);
+  const entries = useMemo(() => entriesOf(files, folder, filter), [files, folder, filter]);
   const [pending, setPending] = useState<Pending | null>(null);
   const input = useRef<HTMLInputElement>(null);
 
@@ -91,8 +91,11 @@ export function FileManager() {
     onDelete: (targets) => setPending({ action: "delete", entries: targets }),
   };
 
+  // Delete, or Cmd+Backspace on a Mac; dialogs and menus are portals, so their keys don't count
   function onKeyDown(event: KeyboardEvent) {
-    if (event.key !== "Delete" || selected.length === 0 || event.target instanceof HTMLInputElement) return;
+    const deleting = event.key === "Delete" || (event.key === "Backspace" && event.metaKey);
+    if (!deleting || selected.length === 0 || pending !== null || event.target instanceof HTMLInputElement) return;
+    if (!event.currentTarget.contains(event.target as Node)) return;
     event.preventDefault();
     setPending({ action: "delete", entries: selected });
   }
@@ -162,6 +165,7 @@ export function FileManager() {
                 data={entries}
                 columns={entryColumns(actions)}
                 rowId={keyOf}
+                rowLabel={(entry) => entry.name}
                 selection={selection}
                 onSelectionChange={setSelection}
                 onRowClick={(entry) => (entry.kind === "folder" ? openFolder(entry.path) : library.show(entry, !viewable(entry.name)))}

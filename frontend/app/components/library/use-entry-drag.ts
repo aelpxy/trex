@@ -1,6 +1,7 @@
 import { useState, type DragEvent, type HTMLAttributes } from "react";
 
 import { canDrop, keyOf, type Entry } from "./entries";
+import { droppedFiles } from "./use-file-drop";
 
 // marks a drag of library rows, so drop targets tell them apart from files off the desktop
 const ENTRIES_TYPE = "application/x-library-entries";
@@ -51,7 +52,7 @@ export function useEntryDrag({ carried, onMove, onUpload }: EntryDragOptions) {
         event.preventDefault();
         setDropTarget(null);
         if (dragging) onMove(dragging, folder);
-        else onUpload(folder, [...event.dataTransfer.files]);
+        else onUpload(folder, droppedFiles(event.dataTransfer));
         setDragging(null);
       },
     };

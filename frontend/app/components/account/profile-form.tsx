@@ -1,13 +1,15 @@
 import { useState, type FormEvent } from "react";
+import { Field } from "@base-ui/react/field";
 import { useMutation } from "@tanstack/react-query";
 import { useRevalidator } from "react-router";
 
 import { Button } from "~/components/ui/button";
 import { focusRing } from "~/components/ui/styles";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
+import { toastOutcome } from "~/lib/toasts";
 import { trex } from "~/lib/trex";
 
-import { Status } from "./section";
+const label = "mb-1.5 block text-xs font-medium text-muted";
 
 export function ProfileForm() {
   const { profile } = useWorkspace();
@@ -18,25 +20,22 @@ export function ProfileForm() {
 
   function save(event: FormEvent) {
     event.preventDefault();
-    update.mutate({ name: name.trim() });
+    void toastOutcome(update.mutateAsync({ name: name.trim() }), { success: "Name saved", error: "Couldn't save your name" });
   }
 
   return (
     <form onSubmit={save} className="space-y-3">
-      <label className="block">
-        <span className="mb-1.5 block text-xs font-medium text-muted">Name</span>
-        <input value={name} onChange={(event) => setName(event.target.value)} required className={`ui-input ${focusRing}`} />
-      </label>
-      <label className="block">
-        <span className="mb-1.5 block text-xs font-medium text-muted">Email</span>
-        <input value={profile.email} disabled className="ui-input" />
-      </label>
-      <div className="flex items-center gap-3">
-        <Button type="submit" disabled={!name.trim() || name.trim() === profile.name || update.isPending}>
-          Save
-        </Button>
-        <Status error={update.error} saved={update.isSuccess ? "Saved" : null} />
-      </div>
+      <Field.Root>
+        <Field.Label className={label}>Name</Field.Label>
+        <Field.Control value={name} onValueChange={setName} required autoComplete="name" className={`ui-input ${focusRing}`} />
+      </Field.Root>
+      <Field.Root disabled>
+        <Field.Label className={label}>Email</Field.Label>
+        <Field.Control value={profile.email} readOnly className="ui-input" />
+      </Field.Root>
+      <Button type="submit" disabled={!name.trim() || name.trim() === profile.name || update.isPending}>
+        Save
+      </Button>
     </form>
   );
 }

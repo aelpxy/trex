@@ -147,18 +147,6 @@ async fn session_lifecycle() {
         store.heartbeat_run(session.id, other).await.unwrap(),
         Lease::Lost
     );
-    assert!(
-        !store
-            .request_cancel(Some(mallory), session.id)
-            .await
-            .unwrap(),
-        "only its workspace"
-    );
-    assert!(store.request_cancel(Some(alice), session.id).await.unwrap());
-    assert_eq!(
-        store.heartbeat_run(session.id, run).await.unwrap(),
-        Lease::CancelRequested
-    );
 
     let item = |n: i32| json!({ "n": n });
     store
@@ -235,6 +223,27 @@ async fn session_lifecycle() {
             .is_empty()
     );
 
+    assert!(
+        !store
+            .request_cancel(Some(mallory), session.id)
+            .await
+            .unwrap(),
+        "only its workspace"
+    );
+    assert!(store.request_cancel(Some(alice), session.id).await.unwrap());
+    assert_eq!(
+        store.heartbeat_run(session.id, run).await.unwrap(),
+        Lease::CancelRequested
+    );
+    assert!(
+        !store
+            .queue_message(alice, session.id, &json!("too late"))
+            .await
+            .unwrap(),
+        "a run asked to stop takes no more messages"
+    );
+    assert!(!store.run_taken_over(session.id, run).await.unwrap());
+
     sqlx::query("UPDATE sessions SET run_heartbeat_at = NOW() - INTERVAL '1 hour' WHERE id = $1")
         .bind(session.id)
         .execute(&store.pg)
@@ -254,6 +263,12 @@ async fn session_lifecycle() {
         store.heartbeat_run(session.id, run).await.unwrap(),
         Lease::Lost,
         "the old run lost its lease"
+    );
+    assert!(store.run_taken_over(session.id, run).await.unwrap());
+    assert_eq!(
+        store.heartbeat_run(session.id, resumed.run).await.unwrap(),
+        Lease::CancelRequested,
+        "the cancel carries over to the run that took over"
     );
     assert_eq!(
         store

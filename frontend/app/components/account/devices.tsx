@@ -2,9 +2,9 @@ import { useMutation, useQueryClient, useSuspenseQuery } from "@tanstack/react-q
 
 import { Button } from "~/components/ui/button";
 import { queries } from "~/lib/queries";
+import { toastOutcome } from "~/lib/toasts";
 import { trex, type ApiSignInSession } from "~/lib/trex";
 
-import { Status } from "./section";
 import { SessionList } from "./session-list";
 
 export function Devices() {
@@ -21,13 +21,14 @@ export function Devices() {
 
   return (
     <div className="space-y-3">
-      <SessionList sessions={sessions} onEnd={(session) => end.mutate(session)} ending={end.isPending ? end.variables.id : null} />
-      <div className="flex items-center gap-3">
-        <Button variant="quiet" onClick={() => others.mutate()} disabled={!hasOthers || others.isPending}>
-          Sign out all other devices
-        </Button>
-        <Status error={end.error ?? others.error} saved={others.isSuccess ? "Other devices were signed out." : null} />
-      </div>
+      <SessionList
+        sessions={sessions}
+        onEnd={(session) => void toastOutcome(end.mutateAsync(session), { success: "Device signed out", error: "Couldn't sign that device out" })}
+        ending={end.isPending ? end.variables.id : null}
+      />
+      <Button variant="quiet" onClick={() => void toastOutcome(others.mutateAsync(), { success: "Other devices signed out", error: "Couldn't sign the other devices out" })} disabled={!hasOthers || others.isPending}>
+        Sign out all other devices
+      </Button>
     </div>
   );
 }

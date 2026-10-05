@@ -15,10 +15,10 @@ import { Switch } from "~/components/ui/switch";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { formatUsd } from "~/lib/credits";
 import { ADMIN_PAGE_SIZE, queries } from "~/lib/queries";
-import { trackToast } from "~/lib/toasts";
+import { toastOutcome, trackToast } from "~/lib/toasts";
 import type { ApiAdminUser } from "~/lib/trex";
 
-import { ActionStatus } from "./action-status";
+import { LoadError } from "./load-error";
 import { FilterInput } from "./filter-input";
 import { ago, date } from "./format";
 import { useDeleteUser, useDeleteUsers, useEndUserSession, useSetRole, useSetSuspended, useSetUserPassword, useSignOutUser } from "./mutations";
@@ -65,7 +65,9 @@ function Devices({ user }: { user: ApiAdminUser }) {
   const sessions = useQuery(queries.admin.signInSessions(user.id));
   const end = useEndUserSession();
   const signOut = useSignOutUser();
-  const signedIn = (sessions.data?.length ?? 0) > 0;
+  const { profile } = useWorkspace();
+  // your own devices are signed out from your account, so this one keeps working
+  const signedIn = (sessions.data?.length ?? 0) > 0 && user.id !== profile.id;
 
   return (
     <DrawerSection
@@ -73,7 +75,12 @@ function Devices({ user }: { user: ApiAdminUser }) {
       description="Browsers they're signed in on."
       action={
         signedIn && (
-          <Button variant="quiet" disabled={signOut.isPending} onClick={() => signOut.mutate(user.id)} className="h-8 px-3 text-xs">
+          <Button
+            variant="quiet"
+            disabled={signOut.isPending}
+            onClick={() => void toastOutcome(signOut.mutateAsync(user.id), { success: `Signed ${user.name} out everywhere`, error: `Couldn't sign ${user.name} out` })}
+            className="h-8 px-3 text-xs"
+          >
             Sign out everywhere
           </Button>
         )
@@ -82,13 +89,14 @@ function Devices({ user }: { user: ApiAdminUser }) {
       {sessions.isPending ? (
         <p className="text-xs text-muted">Loading…</p>
       ) : sessions.error ? (
-        <ActionStatus error={sessions.error} success={null} />
+        <LoadError error={sessions.error} />
       ) : (
-        <SessionList sessions={sessions.data} onEnd={(session) => end.mutate({ user: user.id, session: session.id })} ending={end.isPending ? end.variables.session : null} />
+        <SessionList
+          sessions={sessions.data}
+          onEnd={(session) => void toastOutcome(end.mutateAsync({ user: user.id, session: session.id }), { success: "Device signed out", error: "Couldn't sign that device out" })}
+          ending={end.isPending ? end.variables.session : null}
+        />
       )}
-      <div className="mt-2">
-        <ActionStatus error={end.error ?? signOut.error} success={signOut.isSuccess && !signedIn ? "Signed out everywhere." : null} />
-      </div>
     </DrawerSection>
   );
 }
@@ -105,7 +113,12 @@ function Access({ user }: { user: ApiAdminUser }) {
         <Switch
           checked={user.role === "admin"}
           disabled={self || setRole.isPending}
-          onCheckedChange={(admin) => setRole.mutate({ user: user.id, role: admin ? "admin" : "user" })}
+          onCheckedChange={(admin) =>
+            void toastOutcome(setRole.mutateAsync({ user: user.id, role: admin ? "admin" : "user" }), {
+              success: admin ? `${user.name} is now an admin` : `${user.name} is no longer an admin`,
+              error: "Couldn't change their role",
+            })
+          }
           description={self ? "You can't change your own role." : "Admins manage every user, workspace and balance."}
         >
           Admin
@@ -113,7 +126,12 @@ function Access({ user }: { user: ApiAdminUser }) {
         <Switch
           checked={user.suspended_at !== null}
           disabled={self || setSuspended.isPending}
-          onCheckedChange={(suspended) => setSuspended.mutate({ user: user.id, suspended })}
+          onCheckedChange={(suspended) =>
+            void toastOutcome(setSuspended.mutateAsync({ user: user.id, suspended }), {
+              success: suspended ? `Suspended ${user.name}` : `Lifted ${user.name}'s suspension`,
+              error: suspended ? "Couldn't suspend them" : "Couldn't lift the suspension",
+            })
+          }
           description={
             self
               ? "You can't suspend yourself."
@@ -124,9 +142,6 @@ function Access({ user }: { user: ApiAdminUser }) {
         >
           Suspended
         </Switch>
-      </div>
-      <div className="mt-2">
-        <ActionStatus error={setRole.error ?? setSuspended.error} success={null} />
       </div>
     </DrawerSection>
   );
@@ -141,7 +156,9 @@ function Password({ user }: { user: ApiAdminUser }) {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    save.mutate({ user: user.id, password }, { onSuccess: () => setPassword("") });
+    void toastOutcome(save.mutateAsync({ user: user.id, password }), { success: `Password set; ${user.name} is signed out everywhere`, error: "Couldn't set the password" }).then(
+      (saved) => saved && setPassword(""),
+    );
   }
 
   return (
@@ -155,9 +172,6 @@ function Password({ user }: { user: ApiAdminUser }) {
           Set password
         </Button>
       </form>
-      <div className="mt-2">
-        <ActionStatus error={save.error} success={save.isSuccess ? "Password set; they're signed out." : null} />
-      </div>
     </DrawerSection>
   );
 }
@@ -166,7 +180,7 @@ function Password({ user }: { user: ApiAdminUser }) {
 function OwnedWorkspaces({ user }: { user: ApiAdminUser }) {
   const workspaces = useQuery(queries.admin.workspaces(1, user.email));
   if (workspaces.isPending) return <DrawerSection title="Workspace"><p className="text-xs text-muted">Loading…</p></DrawerSection>;
-  if (workspaces.error) return <DrawerSection title="Workspace"><ActionStatus error={workspaces.error} success={null} /></DrawerSection>;
+  if (workspaces.error) return <DrawerSection title="Workspace"><LoadError error={workspaces.error} /></DrawerSection>;
   return workspaces.data.data.filter((workspace) => workspace.owner_email === user.email).map((workspace) => <WorkspaceManager key={workspace.id} workspace={workspace} />);
 }
 
@@ -178,12 +192,9 @@ function DeleteUser({ user, onDeleted }: { user: ApiAdminUser; onDeleted: () => 
 
   return (
     <>
-      <div className="min-w-0 flex-1 text-right">
-        <ActionStatus error={remove.error} success={null} />
-      </div>
       <Button variant="subtleDanger" disabled={self || remove.isPending} title={self ? "You can't delete yourself" : undefined} onClick={() => setConfirming(true)} className="h-8 px-3 text-xs">
         <LuTrash2 size={14} />
-        {remove.isPending ? "Deleting…" : "Delete user"}
+        Delete user
       </Button>
       <DeleteConfirmDialog
         target={confirming ? { kind: "user", id: user.id, name: user.email } : null}
@@ -191,7 +202,7 @@ function DeleteUser({ user, onDeleted }: { user: ApiAdminUser; onDeleted: () => 
         onCancel={() => setConfirming(false)}
         onConfirm={() => {
           setConfirming(false);
-          remove.mutate(user.id, { onSuccess: onDeleted });
+          trackToast(remove.mutateAsync(user.id), { loading: `Deleting ${user.email}…`, success: `Deleted ${user.email}`, error: `Couldn't delete ${user.email}` }).then(onDeleted, () => {});
         }}
       />
     </>
@@ -266,6 +277,7 @@ export function UserList() {
         selection={selection}
         onSelectionChange={setSelection}
         canSelect={(row) => row.id !== profile.id}
+        rowLabel={(row) => row.email}
         onRowClick={(row) => {
           setSelected(row);
           setOpen(true);

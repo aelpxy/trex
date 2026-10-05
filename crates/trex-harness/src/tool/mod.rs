@@ -96,6 +96,19 @@ impl ToolOutput {
         }
     }
 
+    pub fn append(self, note: &str) -> Self {
+        match self {
+            Self::Text(text) => Self::Text(format!("{text}\n\n{note}")),
+            Self::Content(mut parts) => {
+                parts.push(InputContent::InputText(InputTextContent {
+                    text: note.to_owned(),
+                    prompt_cache_breakpoint: None,
+                }));
+                Self::Content(parts)
+            }
+        }
+    }
+
     // what the ui and logs show; images and files appear as placeholders
     pub fn text(&self) -> String {
         match self {

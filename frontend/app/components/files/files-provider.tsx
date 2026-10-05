@@ -2,6 +2,7 @@ import { createContext, use, useCallback, useEffect, useMemo, useRef, useState, 
 
 import { DeleteConfirmDialog } from "~/components/ui/delete-confirm-dialog";
 import { download, putSandboxFile, sandboxFile } from "~/lib/api";
+import { toasts } from "~/lib/toasts";
 import { trex } from "~/lib/trex";
 
 export type FileStatus = "new" | "edited" | null;
@@ -174,7 +175,7 @@ export function FilesProvider({ sessionId, generated, writing, running, children
         path,
         setTimeout(() => {
           saveTimers.current.delete(path);
-          putSandboxFile(sessionId, path, content).catch((cause) => setError(`Couldn't save ${path}. ${errorText(cause)}`));
+          putSandboxFile(sessionId, path, content).catch((cause) => toasts.add({ title: `Couldn't save ${path}`, description: errorText(cause), type: "error" }));
         }, delay),
       );
     },
@@ -264,7 +265,7 @@ export function FilesProvider({ sessionId, generated, writing, running, children
         .moveSandboxFile(sessionId, from, to)
         .then(() => setListed((current) => [...current.filter((path) => path !== from), to]))
         // a file the user made but that isn't saved yet only exists here
-        .catch((cause) => (from in overrides && !listed.includes(from) ? save(to, content, 0) : setError(`Couldn't move ${from}. ${errorText(cause)}`)));
+        .catch((cause) => (from in overrides && !listed.includes(from) ? save(to, content, 0) : toasts.add({ title: `Couldn't move ${from}`, description: errorText(cause), type: "error" })));
     },
     [read, sessionId, overrides, listed, save],
   );
@@ -278,7 +279,7 @@ export function FilesProvider({ sessionId, generated, writing, running, children
     trex
       .deleteSandboxFile(sessionId, path)
       .then(() => setListed((current) => current.filter((existing) => existing !== path)))
-      .catch((cause) => setError(`Couldn't delete ${path}. ${errorText(cause)}`));
+      .catch((cause) => toasts.add({ title: `Couldn't delete ${path}`, description: errorText(cause), type: "error" }));
   };
 
   const value = useMemo(
