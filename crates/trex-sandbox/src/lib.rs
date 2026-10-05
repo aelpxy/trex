@@ -25,6 +25,7 @@ const USER_LABEL: &str = "trex-user";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
 const PHASE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const POLICY_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const DEV_IMAGE: &str = "localhost/trex-sandbox:latest";
 
@@ -257,12 +258,52 @@ impl OpenShell {
             review_token: request.review_token.clone(),
             ..Default::default()
         };
-        self.client
+        let version = self
+            .client
             .raw_grpc()
             .approve_draft_chunk(approve)
             .await
-            .context("failed to approve access request")?;
-        Ok(())
+            .context("failed to approve access request")?
+            .into_inner()
+            .policy_version;
+        self.wait_policy_loaded(sandbox, version).await
+    }
+
+    // the sandbox loads an approved policy asynchronously, so a retry right after approving can
+    // still be denied unless we wait for it
+    async fn wait_policy_loaded(&self, sandbox: &Sandbox, version: u32) -> anyhow::Result<()> {
+        let deadline = Instant::now() + POLICY_LOAD_TIMEOUT;
+        loop {
+            let request = proto::GetSandboxPolicyStatusRequest {
+                workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
+                sandbox: sandbox.name.clone(),
+                version,
+                ..Default::default()
+            };
+            let status = self
+                .client
+                .raw_grpc()
+                .get_sandbox_policy_status(request)
+                .await
+                .context("failed to check the sandbox policy")?
+                .into_inner();
+            if status.active_version >= version {
+                return Ok(());
+            }
+            if let Some(revision) = status.revision
+                && revision.status == proto::PolicyStatus::Failed as i32
+            {
+                bail!(
+                    "the sandbox rejected the approved policy: {}",
+                    revision.load_error
+                );
+            }
+            // a stopped sandbox loads the policy when it starts again, so the approval still stands
+            if Instant::now() > deadline {
+                return Ok(());
+            }
+            tokio::time::sleep(PHASE_POLL_INTERVAL).await;
+        }
     }
 
     pub async fn reject_access(

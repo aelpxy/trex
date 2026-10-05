@@ -138,9 +138,15 @@ impl Tool for WebFetch {
                 ));
             }
 
+            let title = content_type
+                .contains("html")
+                .then(|| html_title(&String::from_utf8_lossy(&body)))
+                .flatten()
+                .map(|title| format!("title: {title}\n"))
+                .unwrap_or_default();
             let text = to_text(&content_type, body).await?;
             Ok(format!(
-                "url: {url}\ncontent-type: {content_type}\n\n{}",
+                "url: {url}\ncontent-type: {content_type}\n{title}\n{}",
                 page(&text, args.offset.unwrap_or(0))
             ))
         })
@@ -220,6 +226,25 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || (segments[0] == 0x0064 && segments[1] == 0xff9b))
 }
 
+// the markdown conversion drops <head>, and the title is often the best summary of a page
+fn html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let start = open + lower[open..].find('>')? + 1;
+    let end = start + lower[start..].find("</title")?;
+    let title = html[start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title = title
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    (!title.is_empty()).then_some(title)
+}
+
 async fn to_text(content_type: &str, body: Vec<u8>) -> anyhow::Result<String> {
     let is_pdf = content_type.starts_with("application/pdf") || body.starts_with(b"%PDF-");
     if is_pdf {
@@ -282,6 +307,14 @@ fn error_chain(error: &dyn std::error::Error) -> String {
 mod tests {
     use super::*;
     use crate::sandbox::LazySandbox;
+
+    #[test]
+    fn finds_the_page_title() {
+        let html = "<html><HEAD><Title lang=en>\n  Fish &amp; Chips\n</TITLE></head><body><h1>x</h1></body></html>";
+        assert_eq!(html_title(html).as_deref(), Some("Fish & Chips"));
+        assert_eq!(html_title("<p>no title</p>"), None);
+        assert_eq!(html_title("<title>  </title>"), None);
+    }
 
     #[test]
     fn classifies_addresses() {
@@ -395,6 +428,7 @@ mod tests {
 
         let html = html.unwrap();
         assert!(html.contains("content-type: text/html"), "{html}");
+        assert!(html.contains("title: Example Domain"), "{html}");
         assert!(html.contains("documentation examples"), "{html}");
         assert!(pdf.unwrap().contains("Dummy PDF file"));
         assert!(

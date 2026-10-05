@@ -4021,6 +4021,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "trex-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eventsource-stream",
+ "futures",
+ "reqwest 0.13.5",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "trex-harness"
 version = "0.1.0"
 dependencies = [

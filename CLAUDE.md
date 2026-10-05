@@ -16,6 +16,7 @@ Backend and agent harness for a web UI. trex owns sessions, the model catalog th
 - Sandbox network policy: `sandbox-policy.yaml` (committed, OpenShell's own format, parsed with the `openshell-policy` crate) is the default for session sandboxes. Unlisted egress is denied; OpenShell turns denials into pending access requests (`pending_access`, polled during runs and emitted as `Event::AccessRequest`) that the user approves or rejects (`approve_access` / `reject_access`). Gotchas: an empty `binaries` list matches nothing at enforcement time (use `path: "/**"`), and L7 endpoints default to audit-only unless `enforcement: enforce`.
 - `crates/trex-store`: Postgres (sqlx, migrations in `crates/trex-store/migrations`, applied on startup), Redis (connection manager), and the per-user file library (`object_store`, any S3-compatible provider, keyed `users/{uuid}/library/...`). Users, sessions and the credit ledger will live here.
 - `crates/trex-server`: the `trex` binary. Config loading, logging, axum API. Stays thin; logic belongs in the harness.
+- `crates/trex-eval`: end-to-end eval suite. Builds and starts its own trex (random port, `target/eval/trex.toml` = `trex.toml` plus `eval-small-context`, a tiny-window copy of the model for compaction, and a 15s sandbox idle timeout), runs scripted scenarios against the HTTP API as one fixed eval user, and checks outcomes, verifying files the agent saved locally with python3 where it can. Scenarios live in `scenarios.rs` (`scenarios![...]`; `: exclusive` ones restart the server and run alone at the end).
 
 Shared dependency versions live in the root `[workspace.dependencies]`; crates opt into features.
 
@@ -36,6 +37,7 @@ The HTTP API takes the best of OpenAI, Anthropic and Stripe:
 - `cargo build` / `cargo run` (binary `trex`, run from the workspace root)
 - `cargo clippy --workspace --all-targets` must be warning-free
 - `cargo fmt` before committing
+- `cargo run -p trex-eval -- [--repeat N] [--concurrency N] [--effort LEVEL] [SCENARIO...]` runs the eval suite (needs everything the live tests need); it prints a table and writes `target/eval/last-run.json`. Run it before and after agent or prompt changes
 - `cargo test --workspace` for unit tests; `cargo test --workspace -- --ignored` for tests needing the OpenShell gateway, the Responses API from `trex.toml`, and Postgres/Redis (from `.env`)
 
 ## Config

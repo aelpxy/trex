@@ -18,6 +18,7 @@ axum = "0.8.9"
 chrono = { version = "0.4.45", default-features = false }
 chrono-tz = "0.10.4"
 dotenvy = "0.15.7"
+eventsource-stream = "0.2.3"
 futures = "0.3"
 htmd = "0.5.5"
 object_store = { version = "0.14.2", default-features = false }
@@ -29,6 +30,7 @@ redis = { version = "1.7.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+tempfile = "3.27.0"
 sqlx = { version = "0.9.0", default-features = false }
 tar = "0.4.46"
 tokio = "1.53.2"

@@ -1,0 +1,16 @@
+[package]
+name = "trex-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+eventsource-stream.workspace = true
+futures.workspace = true
+reqwest = { workspace = true, features = ["json", "stream"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "time", "sync", "fs"] }
+toml.workspace = true
+uuid.workspace = true
