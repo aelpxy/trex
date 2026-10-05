@@ -41,6 +41,7 @@ pub struct Server {
     root: PathBuf,
     dir: PathBuf,
     port: u16,
+    preview_port: u16,
     pub admin_token: String,
     child: Mutex<Option<Child>>,
 }
@@ -61,11 +62,13 @@ impl Server {
         fs::create_dir_all(&dir).context("failed to create target/eval")?;
         write_config(root, &dir)?;
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let preview_port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
 
         let server = Self {
             root: root.to_owned(),
             dir,
             port,
+            preview_port,
             admin_token: format!("eval-admin-{}", Uuid::now_v7().simple()),
             child: Mutex::new(None),
         };
@@ -75,6 +78,11 @@ impl Server {
 
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    // previews are served here, picked by the host header's first label
+    pub fn preview_addr(&self) -> String {
+        format!("127.0.0.1:{}", self.preview_port)
     }
 
     pub fn log_path(&self) -> PathBuf {
@@ -102,6 +110,11 @@ impl Server {
         let spawned = Command::new(self.root.join("target/debug/trex"))
             .current_dir(&self.root)
             .env("TREX_ADDR", format!("127.0.0.1:{}", self.port))
+            .env("TREX_PREVIEW_ADDR", self.preview_addr())
+            .env(
+                "TREX_PREVIEW_URL",
+                format!("http://{{id}}.preview.localhost:{}", self.preview_port),
+            )
             .env("TREX_CONFIG", self.dir.join("trex.toml"))
             .env("TREX_SANDBOX_IDLE_SECS", SANDBOX_IDLE_SECS)
             .env("TREX_LOG_FORMAT", "text")

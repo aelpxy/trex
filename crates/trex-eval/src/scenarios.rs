@@ -166,6 +166,7 @@ scenarios![
     read_a_web_page,
     describe_an_attached_image,
     read_an_attached_pdf,
+    use_an_attached_file,
     check_a_picture_it_drew,
     fix_a_failing_test,
     rename_across_files,
@@ -174,8 +175,10 @@ scenarios![
     ask_then_continue,
     approve_blocked_network,
     serve_in_the_background,
+    preview_a_site,
     run_a_long_job,
     steer_mid_run,
+    edit_in_a_branch,
     interrupt_a_long_command,
     compact_a_long_task,
     sandbox_survives_idle_stop,
@@ -320,6 +323,53 @@ async fn read_an_attached_pdf(cx: Arc<Ctx>) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn use_an_attached_file(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let session = cx.session(MODEL).await?;
+    let mut watch = cx.watch(&session);
+    let csv = "region,amount\nnorth,1250\nsouth,830\neast,2417\nwest,96\n";
+    let data = format!("data:text/csv;base64,{}", encode_base64(csv.as_bytes()));
+    let attachments = json!([{"data": data, "filename": "sales.csv", "library_path": null}]);
+    let question = "Use Python in the sandbox to add up the amount column of the attached sales.csv. Reply with just the total.";
+    cx.api
+        .send_with(&session, question, false, attachments)
+        .await?;
+    let end = watch.until_end().await?;
+    cx.check_completed(&end);
+
+    let used_upload = tool_calls(&watch.seen)
+        .iter()
+        .any(|(_, args)| args.to_string().contains("/sandbox/uploads/sales.csv"));
+    cx.check("read the upload in the sandbox", used_upload, names(&watch));
+    let reply = cx.reply(&session).await?;
+    cx.check(
+        "summed the column",
+        reply.replace(',', "").contains("4593"),
+        excerpt(&reply),
+    );
+
+    let files = cx.api.get(&format!("/sessions/{session}/files")).await?;
+    let listed = files["data"]
+        .as_array()
+        .is_some_and(|files| files.iter().any(|file| file["path"] == "uploads/sales.csv"));
+    cx.check(
+        "the files api lists the upload",
+        listed,
+        files.to_string().chars().take(200).collect::<String>(),
+    );
+    let items = cx.api.items(&session).await?;
+    let shown = items
+        .iter()
+        .find(|item| item["type"] == "message" && item["role"] == "user")
+        .and_then(|item| item["text"].as_str())
+        .unwrap_or_default();
+    cx.check(
+        "the sandbox note stays hidden",
+        shown == question,
+        excerpt(shown),
+    );
+    Ok(())
+}
+
 async fn check_a_picture_it_drew(cx: Arc<Ctx>) -> anyhow::Result<()> {
     let prompt = "Pick one color from red, green or purple, then use Python to draw a large filled circle in \
         that color on a white background and save it as /sandbox/circle.png. Then look at the image with \
@@ -344,6 +394,24 @@ async fn check_a_picture_it_drew(cx: Arc<Ctx>) -> anyhow::Result<()> {
 }
 
 // the eval doesn't otherwise need a base64 crate, and these fixtures are tiny
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let value = chunk.iter().enumerate().fold(0u32, |value, (index, byte)| {
+            value | (u32::from(*byte) << (16 - 8 * index))
+        });
+        for index in 0..4 {
+            if index <= chunk.len() {
+                out.push(ALPHABET[(value >> (18 - 6 * index) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 fn decode_base64(text: &str) -> Vec<u8> {
     let mut out = Vec::new();
     let (mut buffer, mut bits) = (0u32, 0);
@@ -680,6 +748,49 @@ async fn serve_in_the_background(cx: Arc<Ctx>) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn preview_a_site(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let prompt = "Create /sandbox/site/index.html containing the text preview-check-7731, serve /sandbox/site with \
+        Python's http.server on port 8000, and show it to me in the preview.";
+    let (session, watch) = cx.one_shot(MODEL, prompt).await?;
+    cx.check(
+        "opened the preview",
+        called(&watch, "show_preview"),
+        names(&watch),
+    );
+    let opened = watch
+        .seen
+        .iter()
+        .any(|event| event["type"] == "preview.opened" && event["port"] == 8000);
+    cx.check("announced port 8000", opened, names(&watch));
+
+    let preview = cx
+        .api
+        .post(
+            &format!("/sessions/{session}/previews"),
+            json!({"port": 8000}),
+        )
+        .await?;
+    let url = preview["url"].as_str().unwrap_or_default();
+    let host = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .unwrap_or_default();
+    let page = reqwest::Client::new()
+        .get(format!("http://{}/", cx.server.preview_addr()))
+        .header("host", host)
+        .send()
+        .await?
+        .text()
+        .await
+        .unwrap_or_default();
+    cx.check(
+        "the preview serves the page",
+        page.contains("preview-check-7731"),
+        excerpt(&page),
+    );
+    Ok(())
+}
+
 async fn run_a_long_job(cx: Arc<Ctx>) -> anyhow::Result<()> {
     let prompt = "Run `sleep 130 && echo slow-job-done` (it takes a little over two minutes) and tell me what it printed.";
     let (session, watch) = cx.one_shot(MODEL, prompt).await?;
@@ -693,6 +804,65 @@ async fn run_a_long_job(cx: Arc<Ctx>) -> anyhow::Result<()> {
         "waited for the result",
         reply.contains("slow-job-done"),
         excerpt(&reply),
+    );
+    Ok(())
+}
+
+async fn edit_in_a_branch(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let session = cx.session(MODEL).await?;
+    let mut watch = cx.watch(&session);
+    cx.api
+        .send(
+            &session,
+            "My favorite color is green. Reply with just OK.",
+            false,
+        )
+        .await?;
+    watch.until_end().await?;
+    cx.api
+        .send(
+            &session,
+            "What is my favorite color? Reply with one word.",
+            false,
+        )
+        .await?;
+    watch.until_end().await?;
+
+    let branch = cx
+        .api
+        .post(
+            &format!("/sessions/{session}/branch"),
+            json!({"message": 0, "content": "My favorite color is purple. Reply with just OK."}),
+        )
+        .await?;
+    let branch = branch["id"].as_str().unwrap_or_default().to_owned();
+    cx.sessions
+        .lock()
+        .expect("sessions lock poisoned")
+        .push(branch.clone());
+    let mut branch_watch = cx.watch(&branch);
+    let end = branch_watch.until_end().await?;
+    cx.check_completed(&end);
+    cx.api
+        .send(
+            &branch,
+            "What is my favorite color? Reply with one word.",
+            false,
+        )
+        .await?;
+    branch_watch.until_end().await?;
+
+    let edited = cx.reply(&branch).await?.to_lowercase();
+    cx.check(
+        "the branch follows the edit",
+        edited.contains("purple"),
+        excerpt(&edited),
+    );
+    let original = cx.reply(&session).await?.to_lowercase();
+    cx.check(
+        "the original is untouched",
+        original.contains("green"),
+        excerpt(&original),
     );
     Ok(())
 }
