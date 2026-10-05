@@ -14,12 +14,12 @@ Trex is under active development.
 
 ## Components
 
-| Crate | Purpose |
-| --- | --- |
-| `trex-harness` | Streaming agent loop, tool execution, model configuration, and user questions. |
+| Crate          | Purpose                                                                                                                   |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `trex-harness` | Streaming agent loop, tool execution, model configuration, and user questions.                                            |
 | `trex-sandbox` | OpenShell connectivity over mutual TLS, sandbox lifecycle, command streaming, port forwarding, and network access review. |
-| `trex-store` | PostgreSQL persistence, Redis events and coordination, and local or S3-compatible file storage. |
-| `trex-server` | The `trex` HTTP API, authentication, agent runs, credits, preview proxy, and sandbox idle management. |
+| `trex-store`   | PostgreSQL persistence, Redis events and coordination, and local or S3-compatible file storage.                           |
+| `trex-server`  | The `trex` HTTP API, authentication, agent runs, credits, preview proxy, and sandbox idle management.                     |
 
 | `trex-eval` | Live end-to-end scenarios against a managed server instance. |
 | `frontend` | React, React Router, TypeScript, and Tailwind web interface. |
@@ -58,23 +58,22 @@ TREX_REDIS_URL=redis://127.0.0.1:6379
 
 Place the gateway's `ca.crt`, `tls.crt`, and `tls.key` files in `certs/openshell/`, or set `TREX_OPENSHELL_TLS_DIR` to their directory.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `TREX_DATABASE_URL` | Required | PostgreSQL connection URL. |
-| `TREX_REDIS_URL` | Required | Redis connection URL. |
-| `TREX_ADDR` | `127.0.0.1:8080` | HTTP listen address. |
-| `TREX_OPENSHELL_ENDPOINT` | `https://127.0.0.1:17670` | OpenShell gateway endpoint. |
-| `TREX_OPENSHELL_TLS_DIR` | `certs/openshell` | Gateway client certificate directory. |
-| `TREX_CONFIG` | `trex.toml` | Model catalog and billing plan configuration path. |
-| `TREX_SANDBOX_IMAGE` | `localhost/trex-sandbox:latest` | Session sandbox image on the gateway host. |
-| `TREX_SANDBOX_POLICY` | `sandbox-policy.yaml` | Default sandbox network and filesystem policy. |
-| `TREX_SANDBOX_IDLE_SECS` | `300` | Idle time before stopping a sandbox; files remain for restart. |
-| `TREX_LIBRARY_DIR` | `data/library` | Local file library directory when S3 is not configured. |
-| `TREX_PREVIEW_ADDR` | `127.0.0.1:8081` | Separate preview proxy listen address. |
-| `TREX_PREVIEW_URL` | `http://{id}.preview.localhost:8081` | Preview URL template; the host must start with `{id}.`. |
-| `TREX_ADMIN_TOKEN` | Unset | Bearer secret enabling admin credit and plan endpoints. |
-| `TREX_LOG_FORMAT` | `text` | Log output: `text` or `json`. |
-| `RUST_LOG` | `info`, with debug logging for Trex | Tracing filter. |
+| Variable                  | Default                              | Purpose                                                        |
+| ------------------------- | ------------------------------------ | -------------------------------------------------------------- |
+| `TREX_DATABASE_URL`       | Required                             | PostgreSQL connection URL.                                     |
+| `TREX_REDIS_URL`          | Required                             | Redis connection URL.                                          |
+| `TREX_ADDR`               | `127.0.0.1:8080`                     | HTTP listen address.                                           |
+| `TREX_OPENSHELL_ENDPOINT` | `https://127.0.0.1:17670`            | OpenShell gateway endpoint.                                    |
+| `TREX_OPENSHELL_TLS_DIR`  | `certs/openshell`                    | Gateway client certificate directory.                          |
+| `TREX_CONFIG`             | `trex.toml`                          | Model catalog and billing plan configuration path.             |
+| `TREX_SANDBOX_IMAGE`      | `localhost/trex-sandbox:latest`      | Session sandbox image on the gateway host.                     |
+| `TREX_SANDBOX_POLICY`     | `sandbox-policy.yaml`                | Default sandbox network and filesystem policy.                 |
+| `TREX_SANDBOX_IDLE_SECS`  | `300`                                | Idle time before stopping a sandbox; files remain for restart. |
+| `TREX_LIBRARY_DIR`        | `data/library`                       | Local file library directory when S3 is not configured.        |
+| `TREX_PREVIEW_ADDR`       | `127.0.0.1:8081`                     | Separate preview proxy listen address.                         |
+| `TREX_PREVIEW_URL`        | `http://{id}.preview.localhost:8081` | Preview URL template; the host must start with `{id}.`.        |
+| `TREX_LOG_FORMAT`         | `text`                               | Log output: `text` or `json`.                                  |
+| `RUST_LOG`                | `info`, with debug logging for Trex  | Tracing filter.                                                |
 
 Environment variables take precedence over `.env`. The server runs PostgreSQL migrations on startup and connects to the OpenShell gateway before accepting API requests.
 
