@@ -28,13 +28,6 @@ async fn main() -> anyhow::Result<()> {
 
     let store = Store::connect(&config.database_url, &config.redis_url).await?;
     tracing::info!("connected to postgres and redis");
-    let interrupted = store.fail_interrupted_runs().await?;
-    if interrupted > 0 {
-        tracing::warn!(
-            sessions = interrupted,
-            "marked runs interrupted by a restart as failed"
-        );
-    }
 
     let models = config.models;
     tracing::info!(models = ?models.ids().collect::<Vec<_>>(), "loaded models");
@@ -49,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
         sandbox_policy: config.sandbox_policy,
         runs: Runs::default(),
     });
+    tokio::spawn(runs::resume_stale_runs(state.clone()));
     tokio::spawn(idle::stop_idle_sandboxes(
         state.clone(),
         config.sandbox_idle_timeout,

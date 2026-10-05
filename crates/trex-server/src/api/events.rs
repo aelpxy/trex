@@ -35,6 +35,11 @@ pub struct EventsQuery {
 pub enum SessionEvent {
     #[serde(rename = "run.started")]
     RunStarted,
+    /// trex restarted while the run was in progress and has picked it up again. Discard the text,
+    /// reasoning and tool calls streamed since the last `tool.result`; tool calls without a result
+    /// were stopped. Follows the run's `run.started` in place of its end.
+    #[serde(rename = "run.resumed")]
+    RunResumed,
     #[serde(rename = "sandbox.creating")]
     SandboxCreating,
     /// The conversation's stopped sandbox is starting again, with its files intact.

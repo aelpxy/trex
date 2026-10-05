@@ -59,6 +59,21 @@ impl IdleSandbox {
     }
 }
 
+pub struct StaleRun {
+    pub session: Uuid,
+    pub user: Uuid,
+    pub run: Uuid,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Finish {
+    Finished,
+    // messages arrived as the run ended; it has to read them before it can finish
+    MessagesQueued,
+    // another instance took the run over
+    NotOwner,
+}
+
 pub struct UsageRecord<'a> {
     pub user_id: Uuid,
     pub session_id: Uuid,
@@ -236,43 +251,107 @@ impl Store {
         Ok(())
     }
 
-    // the conditional update is what guarantees one run per session, even across trex instances
-    pub async fn start_run(&self, user: Uuid, id: Uuid) -> anyhow::Result<Option<Session>> {
-        let sql = concat!(
-            "UPDATE sessions SET status = 'running', pending_question = NULL, last_error = NULL, updated_at = NOW() ",
-            "WHERE id = $1 AND user_id = $2 AND status <> 'running' RETURNING ",
-            columns!()
-        );
-        sqlx::query_as(sql)
-            .bind(id)
-            .bind(user)
-            .fetch_optional(&self.pg)
-            .await
-            .context("failed to start run")
+    // the conditional update is what guarantees one run per session, even across trex instances;
+    // `run` owns the session until it finishes or its heartbeat goes stale
+    pub async fn start_run(&self, user: Uuid, id: Uuid, run: Uuid) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE sessions SET status = 'running', pending_question = NULL, last_error = NULL, \
+             run_id = $3, run_heartbeat_at = NOW(), updated_at = NOW() \
+             WHERE id = $1 AND user_id = $2 AND status <> 'running'",
+        )
+        .bind(id)
+        .bind(user)
+        .bind(run)
+        .execute(&self.pg)
+        .await
+        .context("failed to start run")?;
+        Ok(result.rows_affected() > 0)
     }
 
-    // refuses while messages are queued, so a message sent as the run ends is never left unread
+    // false once another instance has taken the run over
+    pub async fn heartbeat_run(&self, id: Uuid, run: Uuid) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE sessions SET run_heartbeat_at = NOW() WHERE id = $1 AND run_id = $2 AND status = 'running'",
+        )
+        .bind(id)
+        .bind(run)
+        .execute(&self.pg)
+        .await
+        .context("failed to renew run lease")?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // takes over runs whose instance stopped renewing them, e.g. after a restart or a crash
+    pub async fn claim_stale_runs(
+        &self,
+        stale_after: Duration,
+        limit: i64,
+    ) -> anyhow::Result<Vec<StaleRun>> {
+        let rows = sqlx::query(
+            "UPDATE sessions SET run_id = GEN_RANDOM_UUID(), run_heartbeat_at = NOW() \
+             WHERE id IN (SELECT id FROM sessions WHERE status = 'running' \
+             AND (run_heartbeat_at IS NULL OR run_heartbeat_at < NOW() - MAKE_INTERVAL(secs => $1)) \
+             ORDER BY run_heartbeat_at NULLS FIRST LIMIT $2 FOR UPDATE SKIP LOCKED) \
+             RETURNING id, user_id, run_id",
+        )
+        .bind(stale_after.as_secs_f64())
+        .bind(limit)
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to claim stale runs")?;
+        rows.iter()
+            .map(|row| {
+                Ok(StaleRun {
+                    session: row.try_get("id")?,
+                    user: row.try_get("user_id")?,
+                    run: row.try_get("run_id")?,
+                })
+            })
+            .collect()
+    }
+
     pub async fn finish_run(
         &self,
         user: Uuid,
         id: Uuid,
+        run: Uuid,
         status: SessionStatus,
         pending_question: Option<&Value>,
         last_error: Option<&str>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Finish> {
         let result = sqlx::query(
-            "UPDATE sessions SET status = $3, pending_question = $4, last_error = $5, updated_at = NOW() \
-             WHERE id = $1 AND user_id = $2 AND queued_messages = '[]'::JSONB",
+            "UPDATE sessions SET status = $4, pending_question = $5, last_error = $6, run_id = NULL, \
+             run_heartbeat_at = NULL, updated_at = NOW() \
+             WHERE id = $1 AND user_id = $2 AND run_id = $3 AND status = 'running' \
+             AND queued_messages = '[]'::JSONB",
         )
         .bind(id)
         .bind(user)
+        .bind(run)
         .bind(status.as_str())
         .bind(pending_question)
         .bind(last_error)
         .execute(&self.pg)
         .await
         .context("failed to finish run")?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() > 0 {
+            return Ok(Finish::Finished);
+        }
+        let owned: Option<bool> = sqlx::query_scalar(
+            "SELECT run_id = $3 AND status = 'running' FROM sessions WHERE id = $1 AND user_id = $2",
+        )
+        .bind(id)
+        .bind(user)
+        .bind(run)
+        .fetch_optional(&self.pg)
+        .await
+        .context("failed to finish run")?
+        .flatten();
+        Ok(if owned == Some(true) {
+            Finish::MessagesQueued
+        } else {
+            Finish::NotOwner
+        })
     }
 
     // only a running session takes messages into its queue; otherwise the caller starts a run
@@ -308,18 +387,6 @@ impl Store {
             .map(Option::unwrap_or_default)
     }
 
-    // a run that was in flight when trex stopped can never finish, so it is marked failed on startup
-    pub async fn fail_interrupted_runs(&self) -> anyhow::Result<u64> {
-        let result = sqlx::query(
-            "UPDATE sessions SET status = 'failed', last_error = 'interrupted by a server restart', updated_at = NOW() \
-             WHERE status = 'running'",
-        )
-        .execute(&self.pg)
-        .await
-        .context("failed to reset interrupted runs")?;
-        Ok(result.rows_affected())
-    }
-
     pub async fn session_items(&self, user: Uuid, id: Uuid) -> anyhow::Result<Vec<Value>> {
         let rows = sqlx::query(
             "SELECT i.item FROM session_items i JOIN sessions s ON s.id = i.session_id \
@@ -352,6 +419,34 @@ impl Store {
         )
         .bind(id)
         .bind(user)
+        .bind(items)
+        .execute(&self.pg)
+        .await
+        .context("failed to save session items")?;
+        Ok(())
+    }
+
+    // items are keyed by their position in history, so saving the same items again is a no-op
+    pub async fn put_session_items(
+        &self,
+        user: Uuid,
+        id: Uuid,
+        first: usize,
+        items: &[Value],
+    ) -> anyhow::Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO session_items (session_id, seq, item) \
+             SELECT s.id, $3 + t.ord, t.item \
+             FROM sessions s, UNNEST($4::JSONB[]) WITH ORDINALITY AS t (item, ord) \
+             WHERE s.id = $1 AND s.user_id = $2 \
+             ON CONFLICT (session_id, seq) DO NOTHING",
+        )
+        .bind(id)
+        .bind(user)
+        .bind(first as i64)
         .bind(items)
         .execute(&self.pg)
         .await
@@ -423,33 +518,39 @@ mod tests {
                 .is_empty()
         );
 
-        assert!(store.start_run(alice, session.id).await.unwrap().is_some());
+        let (run, other) = (Uuid::now_v7(), Uuid::now_v7());
+        assert!(store.start_run(alice, session.id, run).await.unwrap());
         assert!(
-            store.start_run(alice, session.id).await.unwrap().is_none(),
+            !store.start_run(alice, session.id, other).await.unwrap(),
             "one run at a time"
         );
-        assert!(
-            store
-                .start_run(mallory, session.id)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(!store.start_run(mallory, session.id, other).await.unwrap());
+        assert!(store.heartbeat_run(session.id, run).await.unwrap());
+        assert!(!store.heartbeat_run(session.id, other).await.unwrap());
 
+        let item = |n: i32| json!({ "n": n });
         store
-            .append_session_items(alice, session.id, &[json!({"n": 1}), json!({"n": 2})])
+            .put_session_items(alice, session.id, 0, &[item(1), item(2)])
             .await
             .unwrap();
         store
-            .append_session_items(alice, session.id, &[json!({"n": 3})])
+            .put_session_items(alice, session.id, 1, &[item(2), item(3)])
             .await
             .unwrap();
         store
-            .append_session_items(mallory, session.id, &[json!({"n": 666})])
+            .put_session_items(mallory, session.id, 3, &[item(666)])
+            .await
+            .unwrap();
+        store
+            .append_session_items(alice, session.id, &[item(4)])
             .await
             .unwrap();
         let items = store.session_items(alice, session.id).await.unwrap();
-        assert_eq!(items, [json!({"n": 1}), json!({"n": 2}), json!({"n": 3})]);
+        assert_eq!(
+            items,
+            [item(1), item(2), item(3), item(4)],
+            "saving again is a no-op"
+        );
         assert!(
             store
                 .session_items(mallory, session.id)
@@ -476,12 +577,12 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(
-            !store
-                .finish_run(alice, session.id, SessionStatus::Idle, None, None)
+        assert_eq!(
+            store
+                .finish_run(alice, session.id, run, SessionStatus::Idle, None, None)
                 .await
                 .unwrap(),
-            "queued messages keep the run going"
+            Finish::MessagesQueued
         );
         assert!(
             store
@@ -502,18 +603,58 @@ mod tests {
                 .is_empty()
         );
 
-        let question = json!({"call_id": "call_1"});
+        sqlx::query(
+            "UPDATE sessions SET run_heartbeat_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
+        )
+        .bind(session.id)
+        .execute(&store.pg)
+        .await
+        .unwrap();
+        let stale = store
+            .claim_stale_runs(Duration::from_secs(30), 1000)
+            .await
+            .unwrap();
+        let resumed = stale
+            .iter()
+            .find(|stale| stale.session == session.id)
+            .expect("the stale run is claimed");
+        assert_eq!(resumed.user, alice);
+        assert_ne!(resumed.run, run);
         assert!(
+            !store.heartbeat_run(session.id, run).await.unwrap(),
+            "the old run lost its lease"
+        );
+        assert_eq!(
+            store
+                .finish_run(alice, session.id, run, SessionStatus::Idle, None, None)
+                .await
+                .unwrap(),
+            Finish::NotOwner
+        );
+        assert!(
+            store
+                .claim_stale_runs(Duration::from_secs(30), 1000)
+                .await
+                .unwrap()
+                .iter()
+                .all(|stale| stale.session != session.id),
+            "a fresh lease isn't stale"
+        );
+
+        let question = json!({"call_id": "call_1"});
+        assert_eq!(
             store
                 .finish_run(
                     alice,
                     session.id,
+                    resumed.run,
                     SessionStatus::NeedsInput,
                     Some(&question),
                     None,
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            Finish::Finished
         );
         assert!(
             !store

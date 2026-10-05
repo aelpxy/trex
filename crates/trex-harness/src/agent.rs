@@ -12,6 +12,7 @@ use async_openai::{
     },
 };
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use serde_json::Value;
 use tokio::{
     sync::{mpsc, watch},
     time::{sleep, timeout},
@@ -56,6 +57,12 @@ pub trait Inbox: Send + Sync {
     fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<String>>>;
 }
 
+// persists history as it grows; `first` is the position of `items[0]` in history, so saving the
+// same items again changes nothing
+pub trait Journal: Send + Sync {
+    fn save(&self, first: usize, items: Vec<Value>) -> BoxFuture<'_, anyhow::Result<()>>;
+}
+
 pub struct Steering<'a> {
     pub inbox: &'a dyn Inbox,
     // each change aborts the current turn; the run then continues with the inbox
@@ -82,6 +89,7 @@ pub struct Agent<'a> {
     // requests sharing a key are routed to the same prompt cache
     pub cache_key: Option<String>,
     pub steering: Option<Steering<'a>>,
+    pub journal: Option<&'a dyn Journal>,
 }
 
 #[derive(Clone, Copy)]
@@ -132,28 +140,41 @@ const SUMMARIZE: Mode = Mode {
 };
 
 impl Agent<'_> {
-    // appends every item the run produces to history so the next run continues from it
+    // appends every item the run produces to history so the next run continues from it; with a
+    // journal, `history` must already be saved when the run starts
     pub async fn run(
         &self,
         history: &mut Vec<InputItem>,
         events: &mpsc::Sender<Event>,
     ) -> anyhow::Result<RunOutcome> {
-        tokio::select! {
-            result = self.run_turns(history, events) => result,
+        let mut saved = history.len();
+        let result = tokio::select! {
+            result = self.run_turns(history, events, &mut saved) => result,
             error = self.watch_access(events) => Err(error),
-        }
+        };
+        let flushed = self.save(history, &mut saved).await;
+        let outcome = result?;
+        flushed?;
+        Ok(outcome)
     }
 
     async fn run_turns(
         &self,
         history: &mut Vec<InputItem>,
         events: &mpsc::Sender<Event>,
+        saved: &mut usize,
     ) -> anyhow::Result<RunOutcome> {
         history::close_dangling_calls(history);
+        self.save(history, saved).await?;
 
         for turn in 0..self.max_turns {
             tracing::debug!(turn, model = self.model.id(), "starting turn");
-            self.receive_messages(history, events).await?;
+            self.receive_messages(history, events, saved).await?;
+            // a resumed run may have stopped right after the model's final reply
+            if turn == 0 && history::ends_with_reply(history) {
+                send(events, Event::Done).await?;
+                return Ok(RunOutcome::Completed);
+            }
 
             // an interrupt sent before the messages were taken is already answered by them
             let mut interrupts = self.steering.as_ref().map(|s| s.interrupts.clone());
@@ -161,13 +182,13 @@ impl Agent<'_> {
                 interrupts.mark_unchanged();
             }
             let step = tokio::select! {
-                step = self.step(history, events) => Some(step?),
+                step = self.step(history, events, saved) => Some(step?),
                 _ = interrupted(interrupts) => None,
             };
             match step {
                 Some(Step::Continue) => {}
                 Some(Step::Completed) => {
-                    if self.receive_messages(history, events).await? {
+                    if self.receive_messages(history, events, saved).await? {
                         continue;
                     }
                     send(events, Event::Done).await?;
@@ -177,6 +198,7 @@ impl Agent<'_> {
                 None => {
                     tracing::info!(turn, "turn interrupted by the user");
                     history::close_dangling_calls(history);
+                    self.save(history, saved).await?;
                     send(events, Event::Interrupted).await?;
                 }
             }
@@ -188,11 +210,25 @@ impl Agent<'_> {
         )
     }
 
+    // writing an item twice is harmless, so a save cut short by an interrupt is simply repeated
+    async fn save(&self, history: &[InputItem], saved: &mut usize) -> anyhow::Result<()> {
+        if let Some(journal) = self.journal
+            && *saved < history.len()
+        {
+            journal
+                .save(*saved, history::to_json(&history[*saved..])?)
+                .await?;
+        }
+        *saved = history.len();
+        Ok(())
+    }
+
     // appends messages the user sent while the agent was working; true if there were any
     async fn receive_messages(
         &self,
         history: &mut Vec<InputItem>,
         events: &mpsc::Sender<Event>,
+        saved: &mut usize,
     ) -> anyhow::Result<bool> {
         let Some(steering) = &self.steering else {
             return Ok(false);
@@ -203,18 +239,21 @@ impl Agent<'_> {
             history.push(history::user_message(&content));
             send(events, Event::MessageReceived { content }).await?;
         }
+        self.save(history, saved).await?;
         Ok(received)
     }
 
     // one model response and the tools it called; dropping it midway leaves history valid once
-    // dangling calls are closed, because each tool output is saved as soon as it finishes
+    // dangling calls are closed, because each item is saved as soon as it exists
     async fn step(
         &self,
         history: &mut Vec<InputItem>,
         events: &mpsc::Sender<Event>,
+        saved: &mut usize,
     ) -> anyhow::Result<Step> {
         let sampled = self.sample(history, events).await?;
         history.extend(sampled.items);
+        self.save(history, saved).await?;
         if sampled.calls.is_empty() {
             return Ok(Step::Completed);
         }
@@ -233,6 +272,7 @@ impl Agent<'_> {
             let output = output?;
             output_chars += output.len();
             history.push(output_item(call.call_id.clone(), output));
+            self.save(history, saved).await?;
         }
 
         let mut asked = false;
@@ -254,6 +294,7 @@ impl Agent<'_> {
                 }
             }
         }
+        self.save(history, saved).await?;
         if asked {
             return Ok(Step::NeedsInput);
         }
@@ -266,6 +307,7 @@ impl Agent<'_> {
                 "compacting context"
             );
             self.compact(history, events).await?;
+            self.save(history, saved).await?;
         }
         Ok(Step::Continue)
     }
@@ -874,6 +916,7 @@ mod tests {
             max_turns: 5,
             cache_key: None,
             steering: None,
+            journal: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -932,6 +975,7 @@ mod tests {
             max_turns: 10,
             cache_key: None,
             steering: None,
+            journal: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1003,6 +1047,7 @@ mod tests {
                 inbox: &inbox,
                 interrupts,
             }),
+            journal: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message("Reply with only the word one.")];
@@ -1057,6 +1102,7 @@ mod tests {
                 inbox: &inbox,
                 interrupts,
             }),
+            journal: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message(
@@ -1141,6 +1187,7 @@ mod tests {
             max_turns: 10,
             cache_key: None,
             steering: None,
+            journal: None,
         };
 
         let mut history = vec![
@@ -1212,6 +1259,7 @@ mod tests {
             max_turns: 10,
             cache_key: None,
             steering: None,
+            journal: None,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1268,6 +1316,7 @@ mod tests {
             max_turns: 1,
             cache_key: None,
             steering: None,
+            journal: None,
         };
 
         let script = "timeout 15 bash -c 'exec 3<>/dev/tcp/example.com/443'";
@@ -1337,6 +1386,7 @@ mod tests {
             max_turns: 10,
             cache_key: None,
             steering: None,
+            journal: None,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1398,6 +1448,7 @@ mod tests {
             max_turns: 5,
             cache_key: None,
             steering: None,
+            journal: None,
         };
         let mut history = vec![
             EasyInputMessage::from(

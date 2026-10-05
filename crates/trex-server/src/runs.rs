@@ -1,16 +1,20 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anyhow::Context;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    sync::{mpsc, watch},
+    time::interval,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use trex_harness::{
-    agent::{Agent, Inbox, RunOutcome, Steering},
+    agent::{Agent, Inbox, Journal, RunOutcome, Steering},
     event::Event,
     history,
     model::parse_effort,
@@ -19,7 +23,7 @@ use trex_harness::{
 use trex_sandbox::{Sandbox, workspace_name};
 use trex_store::{
     Store,
-    sessions::{Session, SessionStatus, UsageRecord},
+    sessions::{Finish, Session, SessionStatus, UsageRecord},
 };
 use uuid::Uuid;
 
@@ -31,6 +35,11 @@ use crate::api::{
 
 const MAX_TURNS: usize = 50;
 const SEND_ATTEMPTS: usize = 3;
+// a run is resumed elsewhere once its lease misses a few heartbeats
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const RUN_STALE_AFTER: Duration = Duration::from_secs(30);
+const RESUME_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+const RESUME_BATCH: i64 = 20;
 const INSTRUCTIONS: &str = "You are trex, an autonomous agent working for the user inside a Linux sandbox. \
 Your working directory is /sandbox, which persists for this conversation. Use your tools to do the work rather than \
 describing it: run commands, read and edit files, search the web when needed, and verify your results. \
@@ -56,6 +65,22 @@ struct SessionInbox<'a> {
     session: Uuid,
 }
 
+struct SessionJournal<'a> {
+    store: &'a Store,
+    user: Uuid,
+    session: Uuid,
+}
+
+impl Journal for SessionJournal<'_> {
+    fn save(&self, first: usize, items: Vec<Value>) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async move {
+            self.store
+                .put_session_items(self.user, self.session, first, &items)
+                .await
+        })
+    }
+}
+
 impl Inbox for SessionInbox<'_> {
     fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<String>>> {
         Box::pin(self.store.take_queued_messages(self.user, self.session))
@@ -73,6 +98,7 @@ enum Finished {
     Completed,
     NeedsInput,
     Cancelled,
+    LostLease,
 }
 
 type RunId = Uuid;
@@ -97,8 +123,7 @@ impl Runs {
         }
     }
 
-    fn insert(&self, session: Uuid) -> (RunId, CancellationToken, watch::Receiver<()>) {
-        let id = Uuid::now_v7();
+    fn insert(&self, session: Uuid, id: RunId) -> (CancellationToken, watch::Receiver<()>) {
         let cancel = CancellationToken::new();
         let (interrupt, interrupts) = watch::channel(());
         self.active.lock().expect("runs lock poisoned").insert(
@@ -109,7 +134,7 @@ impl Runs {
                 interrupt,
             },
         );
-        (id, cancel, interrupts)
+        (cancel, interrupts)
     }
 
     // the next run can start as soon as this one is finished in the store, so only its own handle goes
@@ -168,47 +193,126 @@ async fn claim(
     session: &Session,
     input: &[Value],
 ) -> Result<bool, ApiError> {
-    if state.store.start_run(user, session.id).await?.is_none() {
+    let run_id = Uuid::now_v7();
+    if !state.store.start_run(user, session.id, run_id).await? {
         return Ok(false);
     }
     state
         .store
         .append_session_items(user, session.id, input)
         .await?;
-
-    let (run_id, cancel, interrupts) = state.runs.insert(session.id);
-    let span = tracing::info_span!("run", session = %session.id, user = %user);
-    tokio::spawn(run(state.clone(), user, session.id, run_id, cancel, interrupts).instrument(span));
+    spawn(state, user, session.id, run_id, false);
     Ok(true)
 }
 
+// continues runs whose instance went away: after a restart, or when another instance crashed
+pub async fn resume_stale_runs(state: Arc<AppState>) {
+    let mut ticks = interval(RESUME_CHECK_INTERVAL);
+    loop {
+        ticks.tick().await;
+        match state
+            .store
+            .claim_stale_runs(RUN_STALE_AFTER, RESUME_BATCH)
+            .await
+        {
+            Ok(stale) => {
+                for run in stale {
+                    tracing::info!(session = %run.session, "resuming interrupted run");
+                    spawn(&state, run.user, run.session, run.run, true);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "failed to look for interrupted runs"
+                )
+            }
+        }
+    }
+}
+
+fn spawn(state: &Arc<AppState>, user: Uuid, session: Uuid, run_id: RunId, resumed: bool) {
+    let (cancel, interrupts) = state.runs.insert(session, run_id);
+    let span = tracing::info_span!("run", session = %session, user = %user);
+    let task = run(
+        state.clone(),
+        user,
+        session,
+        run_id,
+        resumed,
+        cancel,
+        interrupts,
+    );
+    tokio::spawn(task.instrument(span));
+}
+
+#[allow(clippy::too_many_arguments)] // reason: the run's identity and its control channels, all distinct
 async fn run(
     state: Arc<AppState>,
     user: Uuid,
     session: Uuid,
     run: RunId,
+    resumed: bool,
     cancel: CancellationToken,
     interrupts: watch::Receiver<()>,
 ) {
-    publish(&state, session, SessionEvent::RunStarted).await;
-    let result = drive(&state, user, session, &cancel, interrupts).await;
+    let started = if resumed {
+        SessionEvent::RunResumed
+    } else {
+        SessionEvent::RunStarted
+    };
+    publish(&state, session, started).await;
+    let result = tokio::select! {
+        result = drive(&state, user, session, run, &cancel, interrupts) => result,
+        _ = keep_lease(&state, session, run) => Ok(Finished::LostLease),
+    };
 
     let event = match result {
-        Ok(Finished::Completed) => SessionEvent::RunCompleted,
-        Ok(Finished::NeedsInput) => SessionEvent::RunNeedsInput,
+        Ok(Finished::Completed) => Some(SessionEvent::RunCompleted),
+        Ok(Finished::NeedsInput) => Some(SessionEvent::RunNeedsInput),
         Ok(Finished::Cancelled) => {
-            stop(&state, user, session, SessionStatus::Idle, None).await;
-            SessionEvent::RunCancelled
+            stop(&state, user, session, run, SessionStatus::Idle, None).await;
+            Some(SessionEvent::RunCancelled)
+        }
+        Ok(Finished::LostLease) => {
+            tracing::warn!(session = %session, "another instance took over the run");
+            None
         }
         Err(error) => {
             let message = format!("{error:#}");
             tracing::warn!(session = %session, error = message, "run failed");
-            stop(&state, user, session, SessionStatus::Failed, Some(&message)).await;
-            SessionEvent::RunFailed { error: message }
+            stop(
+                &state,
+                user,
+                session,
+                run,
+                SessionStatus::Failed,
+                Some(&message),
+            )
+            .await;
+            Some(SessionEvent::RunFailed { error: message })
         }
     };
     state.runs.remove(session, run);
-    publish(&state, session, event).await;
+    if let Some(event) = event {
+        publish(&state, session, event).await;
+    }
+}
+
+// returns once another instance owns the run; a failed renewal is retried, since the lease only
+// goes stale after several missed heartbeats
+async fn keep_lease(state: &AppState, session: Uuid, run: RunId) {
+    let mut ticks = interval(HEARTBEAT_INTERVAL);
+    loop {
+        ticks.tick().await;
+        match state.store.heartbeat_run(session, run).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(session = %session, error = format!("{error:#}"), "failed to renew run lease")
+            }
+        }
+    }
 }
 
 // messages queued for a run that won't read them are saved to history, so the next run sees them
@@ -216,6 +320,7 @@ async fn stop(
     state: &AppState,
     user: Uuid,
     session: Uuid,
+    run: RunId,
     status: SessionStatus,
     error: Option<&str>,
 ) {
@@ -227,12 +332,13 @@ async fn stop(
                 .store
                 .append_session_items(user, session, &history::to_json(&items)?)
                 .await?;
-            if state
+            match state
                 .store
-                .finish_run(user, session, status, None, error)
+                .finish_run(user, session, run, status, None, error)
                 .await?
             {
-                return Ok(());
+                Finish::Finished | Finish::NotOwner => return Ok(()),
+                Finish::MessagesQueued => {}
             }
         }
     }
@@ -248,6 +354,7 @@ async fn drive(
     state: &Arc<AppState>,
     user: Uuid,
     id: Uuid,
+    run: RunId,
     cancel: &CancellationToken,
     interrupts: watch::Receiver<()>,
 ) -> anyhow::Result<Finished> {
@@ -279,6 +386,11 @@ async fn drive(
         user,
         session: id,
     };
+    let journal = SessionJournal {
+        store: &state.store,
+        user,
+        session: id,
+    };
     let agent = Agent {
         user,
         library: &state.library,
@@ -294,10 +406,11 @@ async fn drive(
             inbox: &inbox,
             interrupts,
         }),
+        journal: Some(&journal),
     };
 
+    // the agent saves every item as it goes, so whatever happens the session can be continued
     loop {
-        let saved = history.len();
         let (tx, rx) = mpsc::channel(256);
         let forwarder = tokio::spawn(forward(state.clone(), user, id, rx));
         let result = tokio::select! {
@@ -306,13 +419,6 @@ async fn drive(
         };
         drop(tx);
         let question = forwarder.await.context("event forwarder panicked")?;
-
-        // history is saved whatever happened, so a failed or cancelled run can be continued
-        let produced = history::to_json(&history[saved..])?;
-        state
-            .store
-            .append_session_items(user, id, &produced)
-            .await?;
 
         let (status, question, finished) = match result {
             None => return Ok(Finished::Cancelled),
@@ -324,14 +430,17 @@ async fn drive(
             ),
             Some(Err(error)) => return Err(error),
         };
-        if state
+        match state
             .store
-            .finish_run(user, id, status, question.as_ref(), None)
+            .finish_run(user, id, run, status, question.as_ref(), None)
             .await?
         {
-            return Ok(finished);
+            Finish::Finished => return Ok(finished),
+            Finish::NotOwner => return Ok(Finished::LostLease),
+            Finish::MessagesQueued => {
+                tracing::info!(session = %id, "messages arrived as the run ended, continuing")
+            }
         }
-        tracing::info!(session = %id, "messages arrived as the run ended, continuing");
     }
 }
 

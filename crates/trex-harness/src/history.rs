@@ -188,33 +188,42 @@ pub fn to_json(items: &[InputItem]) -> anyhow::Result<Vec<Value>> {
 }
 
 // the responses api rejects a function call without an output, which happens when a user ignores a
-// question or a run is cancelled mid-tool, so every dangling call is closed before the next request
+// question or a run is interrupted mid-tool. outputs are appended rather than inserted after their
+// call so history stays append-only; calls before the context start are never sent, so they're left
 pub fn close_dangling_calls(history: &mut Vec<InputItem>) {
-    let answered: HashSet<String> = history
+    let context = &history[context_start(history)..];
+    let answered: HashSet<&str> = context
         .iter()
         .filter_map(|item| match item {
-            InputItem::Item(Item::FunctionCallOutput(output)) => output.call_id.clone(),
+            InputItem::Item(Item::FunctionCallOutput(output)) => output.call_id.as_deref(),
             _ => None,
         })
         .collect();
-    let dangling: Vec<(String, bool)> = history
+    let closing: Vec<InputItem> = context
         .iter()
         .filter_map(|item| match item {
-            InputItem::Item(Item::FunctionCall(call)) if !answered.contains(&call.call_id) => {
-                Some((call.call_id.clone(), call.name == ASK_USER))
+            InputItem::Item(Item::FunctionCall(call))
+                if !answered.contains(call.call_id.as_str()) =>
+            {
+                let output = if call.name == ASK_USER {
+                    UNANSWERED
+                } else {
+                    INTERRUPTED
+                };
+                Some(output_item(call.call_id.clone(), output.into()))
             }
             _ => None,
         })
         .collect();
+    history.extend(closing);
+}
 
-    for (call_id, is_question) in dangling {
-        let position = history
-            .iter()
-            .position(|item| matches!(item, InputItem::Item(Item::FunctionCall(c)) if c.call_id == call_id))
-            .expect("call was just found in history");
-        let output = if is_question { UNANSWERED } else { INTERRUPTED };
-        history.insert(position + 1, output_item(call_id, output.into()));
-    }
+// a run that ended with the model's reply has nothing left to do, which matters when one is resumed
+pub fn ends_with_reply(history: &[InputItem]) -> bool {
+    history.last().is_some_and(|item| {
+        let value = serde_json::to_value(item).unwrap_or_default();
+        value["type"] == "message" && value["role"] == "assistant"
+    })
 }
 
 #[cfg(test)]
@@ -241,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn closes_dangling_calls_after_each_call() {
+    fn closes_dangling_calls_at_the_end() {
         let mut history = vec![
             call("q1", ASK_USER),
             output_item("q1".into(), "answered".into()),
@@ -252,8 +261,30 @@ mod tests {
         close_dangling_calls(&mut history);
 
         assert_eq!(history.len(), 7);
-        assert_eq!(output_of(&history[3]), ("q2".into(), UNANSWERED.into()));
-        assert_eq!(output_of(&history[5]), ("b1".into(), INTERRUPTED.into()));
+        assert_eq!(output_of(&history[5]), ("q2".into(), UNANSWERED.into()));
+        assert_eq!(output_of(&history[6]), ("b1".into(), INTERRUPTED.into()));
+        close_dangling_calls(&mut history);
+        assert_eq!(history.len(), 7, "closing is idempotent");
+    }
+
+    #[test]
+    fn leaves_calls_before_the_context_alone() {
+        let mut history = vec![
+            call("old", "bash"),
+            checkpoint(&[], "summary"),
+            call("new", "bash"),
+        ];
+        close_dangling_calls(&mut history);
+
+        assert_eq!(history.len(), 4);
+        assert_eq!(output_of(&history[3]), ("new".into(), INTERRUPTED.into()));
+    }
+
+    #[test]
+    fn detects_a_finished_reply() {
+        assert!(ends_with_reply(&[user_message("hi"), assistant("hello")]));
+        assert!(!ends_with_reply(&[assistant("hello"), user_message("hi")]));
+        assert!(!ends_with_reply(&[]));
     }
 
     fn assistant(text: &str) -> InputItem {
