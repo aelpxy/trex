@@ -43,7 +43,7 @@ export function ToolCall({ part }: { part: ToolPart }) {
   const { open } = useFiles();
 
   return (
-    <Collapsible.Root defaultOpen className="overflow-hidden rounded-xl border border-line bg-surface/60">
+    <Collapsible.Root className="overflow-hidden rounded-xl border border-line bg-surface/60">
       <div className="flex items-center">
         <Collapsible.Trigger className={`group flex h-10 min-w-0 flex-1 cursor-pointer items-center gap-2.5 px-3 text-left text-xs transition-colors hover:bg-subtle/60 ${focusRing}`}>
           <Icon size={15} className="shrink-0 text-muted" />

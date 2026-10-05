@@ -1,3 +1,5 @@
+import type { MessageAttachment } from "~/lib/attachments";
+
 export type ToolName = "shell" | "write_file" | "edit_file";
 
 export type ReasoningPart = { type: "reasoning"; text: string; startedAt: number; endedAt?: number };
@@ -32,7 +34,7 @@ export type Usage = {
 
 export const EMPTY_USAGE: Usage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, credits: 0, responses: 0, modelMs: 0 };
 
-export type UserMessage = { id: string; role: "user"; content: string };
+export type UserMessage = { id: string; role: "user"; content: string; attachments?: MessageAttachment[] };
 export type AssistantMessage = {
   id: string;
   role: "assistant";
@@ -41,6 +43,8 @@ export type AssistantMessage = {
   startedAt: number;
   endedAt?: number;
   usage?: Usage;
+  // what the model is writing before its tool call arrives, such as a long file
+  writing?: string;
 };
 export type Message = UserMessage | AssistantMessage;
 
@@ -50,6 +54,10 @@ export type ChatEvent =
   | { type: "sandbox.ready" }
   | { type: "reasoning.delta"; delta: string }
   | { type: "text.delta"; delta: string }
+  | { type: "tool.writing"; label: string }
+  // a tool call still being written, shown as it arrives and replaced by its tool.call
+  | { type: "tool.draft"; id: string; name: ToolName; input: ToolPart["input"]; output: string }
+  | { type: "tool.discard"; id: string }
   | { type: "tool.call"; id: string; name: ToolName; input: ToolPart["input"] }
   | { type: "tool.output"; id: string; delta: string }
   | { type: "tool.result"; id: string; ok: boolean; summary?: string }

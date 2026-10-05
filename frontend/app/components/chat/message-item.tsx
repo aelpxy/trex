@@ -1,6 +1,11 @@
 import { Markdown } from "~/components/markdown/markdown";
 
+import { libraryPath } from "~/lib/library-links";
+import { previewOf } from "~/lib/preview";
+
 import { AccessRequest } from "./parts/access-request";
+import { ArtifactCard } from "./parts/artifact-card";
+import { MessageAttachments } from "./parts/message-attachments";
 import { QuestionCard } from "./parts/question-card";
 import { ReasoningBlock } from "./parts/reasoning-block";
 import { RunFooter } from "./parts/run-footer";
@@ -37,15 +42,31 @@ function PartView({ part, onRespond }: { part: Part; onRespond: Respond }) {
   }
 }
 
+const MARKDOWN_LINK = /(?<!!)\[([^\]]+)\]\(([^)\s]+)\)/g;
+
+// previewable library files the reply links to, each shown once as a card
+function artifactsOf(message: AssistantMessage) {
+  const artifacts = new Map<string, string>();
+  for (const part of message.parts) {
+    if (part.type !== "text") continue;
+    for (const [, title, href] of part.text.matchAll(MARKDOWN_LINK)) {
+      const path = libraryPath(href);
+      if (path && previewOf(path) && !artifacts.has(path)) artifacts.set(path, title);
+    }
+  }
+  return [...artifacts].map(([path, title]) => ({ path, title }));
+}
+
 function AssistantMessageView({ message, onRespond }: { message: AssistantMessage; onRespond: Respond }) {
-  const showThinking = message.state === "running" && !isBusy(message.parts.at(-1));
+  const showThinking = message.state === "running" && (message.writing !== undefined || !isBusy(message.parts.at(-1)));
 
   return (
     <div className="space-y-3">
       {message.parts.map((part, index) => (
         <PartView key={"id" in part ? part.id : `${part.type}-${index}`} part={part} onRespond={onRespond} />
       ))}
-      {showThinking && <Thinking />}
+      {showThinking && <Thinking label={message.writing} />}
+      {message.state !== "running" && artifactsOf(message).map((artifact) => <ArtifactCard key={artifact.path} {...artifact} />)}
       <RunFooter message={message} />
     </div>
   );
@@ -54,8 +75,9 @@ function AssistantMessageView({ message, onRespond }: { message: AssistantMessag
 export function MessageItem({ message, onRespond }: { message: Message; onRespond: Respond }) {
   if (message.role === "user") {
     return (
-      <div className="flex justify-end">
-        <p className="max-w-[85%] rounded-2xl bg-subtle px-4 py-2.5 text-sm leading-6 break-words whitespace-pre-wrap">{message.content}</p>
+      <div className="flex flex-col items-end gap-2">
+        {message.attachments && message.attachments.length > 0 && <MessageAttachments attachments={message.attachments} />}
+        {message.content && <p className="max-w-[85%] rounded-2xl bg-subtle px-4 py-2.5 text-sm leading-6 break-words whitespace-pre-wrap">{message.content}</p>}
       </div>
     );
   }

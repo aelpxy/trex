@@ -54,6 +54,8 @@ export type ApiUsage = {
   duration_ms: number;
 };
 
+export type ApiAttachmentInput = { data: string; filename: string };
+
 export type ApiAccessRequest = { id: string; status: string; endpoints: string[]; binary: string; rationale: string };
 
 export type ApiFile = { path: string; size: number; modified_at: number };
@@ -89,11 +91,12 @@ export const trex = {
   sessions: () => all<ApiSession>("/sessions"),
   session: (id: string) => api<ApiSession>("GET", `/sessions/${id}`),
   createSession: (body: { model: string; reasoning_effort: string | null; fast: boolean; project_id?: string | null }) => api<ApiSession>("POST", "/sessions", body),
-  updateSession: (id: string, body: { title?: string; project_id?: string | null }) => api<ApiSession>("PATCH", `/sessions/${id}`, body),
+  updateSession: (id: string, body: { title?: string; project_id?: string | null; model?: string; reasoning_effort?: string | null; fast?: boolean }) => api<ApiSession>("PATCH", `/sessions/${id}`, body),
   deleteSession: (id: string) => api<unknown>("DELETE", `/sessions/${id}`),
   items: (id: string) => api<List<ApiItem>>("GET", `/sessions/${id}/items`).then((list) => list.data),
   usage: (id: string) => api<List<ApiUsage>>("GET", `/sessions/${id}/usage`).then((list) => list.data),
-  sendMessage: (id: string, content: string) => api<{ queued: boolean }>("POST", `/sessions/${id}/messages`, { content }),
+  sendMessage: (id: string, content: string, options: { interrupt?: boolean; attachments?: ApiAttachmentInput[] } = {}) =>
+    api<{ queued: boolean }>("POST", `/sessions/${id}/messages`, { content, ...options }),
   answer: (id: string, answers: { selected: string[]; text: string | null }[]) => api<unknown>("POST", `/sessions/${id}/answers`, { answers }),
   cancel: (id: string) => api<unknown>("POST", `/sessions/${id}/cancel`),
   accessRequests: (id: string) => api<List<ApiAccessRequest>>("GET", `/sessions/${id}/access_requests`).then((list) => list.data),

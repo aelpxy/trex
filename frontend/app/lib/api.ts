@@ -98,6 +98,12 @@ export async function download(path: string): Promise<Blob> {
   return response.blob();
 }
 
+export async function attachment(id: string): Promise<Blob> {
+  const response = await fetch(`${BASE}/v1/attachments/${id}`, { headers: headers() });
+  if (!response.ok) await failure(response);
+  return response.blob();
+}
+
 export const encodePath = (path: string) => path.split("/").map(encodeURIComponent).join("/");
 
 export type StreamEvent = { id: string; type: string; data: Record<string, unknown> };

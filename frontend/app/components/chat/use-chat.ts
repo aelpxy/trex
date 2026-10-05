@@ -3,6 +3,8 @@ import { useNavigate } from "react-router";
 
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { ApiError, streamEvents, type StreamEvent } from "~/lib/api";
+import { kindOf, type MessageAttachment } from "~/lib/attachments";
+import { partialString } from "~/lib/partial-json";
 import { trex, type ApiAccessRequest, type ApiItem, type ApiQuestion, type ApiSession, type ApiUsage } from "~/lib/trex";
 
 import { applyEvent } from "./events";
@@ -57,6 +59,15 @@ function timeTurns(messages: Message[], turns: { started: number; ended: number 
 
 // what a chat created on the home page carries to its own route, so the first run streams from its start
 export type FreshChat = { content: string };
+
+// a file picked in the composer, read into a data url
+export type OutgoingAttachment = MessageAttachment & { url: string };
+
+// a message sent during a run, waiting for the agent to read it
+export type QueuedMessage = { id: string; content: string; attachments: OutgoingAttachment[] };
+
+const savedAttachments = (item: Extract<ApiItem, { type: "message" }>): MessageAttachment[] =>
+  item.attachments.map((saved) => ({ id: saved.id, name: saved.filename ?? saved.mime_type, kind: kindOf(saved.mime_type) }));
 
 type ToolCall = { name: string; args: Record<string, unknown> };
 
@@ -129,6 +140,25 @@ function resultEvents(id: string, call: ToolCall | undefined, output: string, is
 }
 
 // a retried, interrupted or resumed turn is replayed from the last finished tool
+// what a tool call looks like while its arguments are still arriving; tools without a preview show the writing indicator
+function draftEvent(id: string, name: string, args: string): ChatEvent | null {
+  if (name === "bash") return { type: "tool.draft", id, name: "shell", input: { command: partialString(args, "command") ?? "" }, output: "" };
+  if (name === "write_file") return { type: "tool.draft", id, name: "write_file", input: { path: shortPath(partialString(args, "path", true) ?? "") }, output: partialString(args, "content") ?? "" };
+  if (name === "edit_file") {
+    const input = { path: shortPath(partialString(args, "path", true) ?? ""), before: partialString(args, "old_string") ?? "", after: partialString(args, "new_string") ?? "" };
+    return { type: "tool.draft", id, name: "edit_file", input, output: "" };
+  }
+  if (name === APPLY_PATCH) return { type: "tool.draft", id, name: "shell", input: { command: APPLY_PATCH }, output: partialString(args, "patch") ?? "" };
+  return null;
+}
+
+// previews reparse the whole arguments, so long files redraw a few times a second rather than per token
+const DRAFT_REFRESH_MS = 100;
+
+const WRITES_FILES = new Set([APPLY_PATCH, "write_file", "edit_file"]);
+
+const writingLabel = (name: string) => (WRITES_FILES.has(name) ? "Writing code" : name === "bash" ? "Writing a command" : "Working");
+
 function dropUnsettled(message: AssistantMessage): AssistantMessage {
   let keep = 0;
   message.parts.forEach((part, index) => {
@@ -174,7 +204,7 @@ function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: numbe
   for (const item of upto === undefined ? data.items : data.items.filter((saved) => saved.seq <= upto)) {
     if (item.type === "message" && item.role === "user") turns.push({ started: item.created_at, ended: item.created_at });
     else if (turns.length) turns[turns.length - 1].ended = item.created_at;
-    if (item.type === "message" && item.role === "user") messages.push({ id: crypto.randomUUID(), role: "user", content: item.text });
+    if (item.type === "message" && item.role === "user") messages.push({ id: crypto.randomUUID(), role: "user", content: item.text, attachments: savedAttachments(item) });
     else if (item.type === "message") apply([{ type: "text.delta", delta: item.text }]);
     else if (item.type === "reasoning") {
       const message = assistant();
@@ -213,8 +243,14 @@ type UseChatOptions = { chatId?: string; data?: ChatData; fresh?: FreshChat; set
 export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
   const chat = data;
   const calls = useRef(new Map<string, ToolCall>());
+  const drafts = useRef(new Map<string, { name: string; args: string; shownAt: number }>());
   const [messages, setMessages] = useState<Message[]>(() => {
-    if (fresh) return [{ id: crypto.randomUUID(), role: "user", content: fresh.content }, newAssistant()];
+    if (fresh) {
+      // the first message is saved before a fresh chat opens, so its attachments come from there
+      const first = data?.items.find((item) => item.type === "message" && item.role === "user");
+      const attachments = first?.type === "message" ? savedAttachments(first) : [];
+      return [{ id: crypto.randomUUID(), role: "user", content: fresh.content, attachments }, newAssistant()];
+    }
     return data ? messagesFrom(data, calls.current) : [];
   });
   const [title, setTitle] = useState<string | undefined>(data?.session.title ?? (fresh ? titleFrom(fresh.content) : undefined));
@@ -222,6 +258,19 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
   // a chat reloaded mid-run replays that run from its start, rebuilt on top of the items saved before it
   const replaying = useRef(Boolean(data && !fresh && data.session.status === "running"));
   const answers = useRef(new Map<string, string>());
+  const [queued, setQueued] = useState<QueuedMessage[]>([]);
+  const queuedRef = useRef<QueuedMessage[]>([]);
+  const changeQueued = useCallback((change: (current: QueuedMessage[]) => QueuedMessage[]) => {
+    queuedRef.current = change(queuedRef.current);
+    setQueued(queuedRef.current);
+  }, []);
+  // a run that stops early saves the messages it never read to history, after its own output
+  const flushQueued = useCallback(() => {
+    const leftover = queuedRef.current;
+    if (!leftover.length) return;
+    changeQueued(() => []);
+    setMessages((current) => [...current, ...leftover.map((message): Message => ({ id: message.id, role: "user", content: message.content, attachments: message.attachments }))]);
+  }, [changeQueued]);
   const questions = useRef<ApiQuestion[]>(data?.session.pending_questions ?? []);
   const navigate = useNavigate();
   const { addChat, renameChat } = useWorkspace();
@@ -277,7 +326,26 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
         case "reasoning.delta":
           emit({ type: event.type, delta: String(data.delta ?? "") });
           break;
+        case "tool.call.started": {
+          const draft = { name: String(data.name), args: "", shownAt: Date.now() };
+          drafts.current.set(String(data.call_id), draft);
+          emit(draftEvent(String(data.call_id), draft.name, "") ?? { type: "tool.writing", label: writingLabel(draft.name) });
+          break;
+        }
+        case "tool.call.delta": {
+          const draft = drafts.current.get(String(data.call_id));
+          if (!draft) break;
+          draft.args += String(data.delta ?? "");
+          if (Date.now() - draft.shownAt < DRAFT_REFRESH_MS) break;
+          draft.shownAt = Date.now();
+          const preview = draftEvent(String(data.call_id), draft.name, draft.args);
+          if (preview) emit(preview);
+          break;
+        }
         case "tool.call": {
+          drafts.current.delete(String(data.call_id));
+          // apply_patch's files appear one by one from file.changed, so its draft goes
+          if (data.name === APPLY_PATCH) emit({ type: "tool.discard", id: String(data.call_id) });
           const call = { name: String(data.name), args: parseArgs(String(data.arguments ?? "")) };
           calls.current.set(String(data.call_id), call);
           emit(...callEvents(String(data.call_id), call));
@@ -342,14 +410,19 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
           answers.current.clear();
           emit(...questionEvents(questions.current));
           break;
-        case "message.received":
+        case "message.received": {
           usage.current = EMPTY_USAGE;
+          const content = String(data.content ?? "");
+          // the agent reads queued messages in order, so this is the oldest one with this text
+          const sent = queuedRef.current.find((message) => message.content === content);
+          if (sent) changeQueued((current) => current.filter((message) => message !== sent));
           setMessages((current) => {
             const last = current.at(-1);
             const settled: Message[] = last?.role === "assistant" ? [...current.slice(0, -1), { ...last, state: "completed", endedAt: Date.now() }] : current;
-            return [...settled, { id: crypto.randomUUID(), role: "user", content: String(data.content ?? "") }, newAssistant()];
+            return [...settled, { id: crypto.randomUUID(), role: "user", content, attachments: sent?.attachments }, newAssistant()];
           });
           break;
+        }
         case "session.updated":
           if (typeof data.title === "string") {
             setTitle(data.title);
@@ -361,15 +434,17 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
           break;
         case "run.cancelled":
           emit({ type: "run.cancelled" });
+          flushQueued();
           break;
         case "run.failed": {
           const text = data.code === "insufficient_credits" ? "**You're out of credits.** The run stopped after its last step." : `**The run failed.** ${String(data.error ?? "")}`;
           emit({ type: "text.delta", delta: `\n\n${text}` }, { type: "run.completed" });
+          flushQueued();
           break;
         }
       }
     },
-    [chatId, chat, emit, updateLast, renameChat],
+    [chatId, chat, emit, updateLast, renameChat, changeQueued, flushQueued],
   );
 
   // one stream per open chat; a fresh chat replays its first run from the start
@@ -390,24 +465,48 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
   }, [updateLast]);
 
   const send = useCallback(
-    (content: string) => {
-      setMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", content }, newAssistant()]);
+    (content: string, attachments: OutgoingAttachment[] = [], interrupt = false) => {
+      const body = { attachments: attachments.map((file) => ({ data: file.url, filename: file.name })), interrupt };
+      const user: Message = { id: crypto.randomUUID(), role: "user", content, attachments };
+      if (chatId && running) {
+        // the agent takes it before its next step, or right away with interrupt; message.received shows it then
+        const message: QueuedMessage = { id: user.id, content, attachments };
+        changeQueued((current) => [...current, message]);
+        trex
+          .sendMessage(chatId, content, body)
+          .then(({ queued: waiting }) => {
+            if (waiting || !queuedRef.current.includes(message)) return;
+            // the run ended first, so the message started a new one instead
+            changeQueued((current) => current.filter((existing) => existing !== message));
+            setMessages((current) => {
+              const last = current.at(-1);
+              const fresh = last?.role === "assistant" && last.state === "running" && last.parts.length === 0;
+              return fresh ? [...current.slice(0, -1), user, last] : [...current, user, newAssistant()];
+            });
+          })
+          .catch((error) => {
+            changeQueued((current) => current.filter((existing) => existing !== message));
+            fail(error);
+          });
+        return;
+      }
+      setMessages((current) => [...current, user, newAssistant()]);
       if (!chatId) {
         // a new chat gets its session first, then continues on its own route
         trex
           .createSession(sessionSettings(settings))
           .then(async (session) => {
             addChat(session);
-            await trex.sendMessage(session.id, content);
+            await trex.sendMessage(session.id, content, body);
             navigate(`/chat/${session.id}`, { state: { fresh: { content } satisfies FreshChat } });
           })
           .catch(fail);
         return;
       }
       if (!title) setTitle(titleFrom(content));
-      trex.sendMessage(chatId, content).catch(fail);
+      trex.sendMessage(chatId, content, body).catch(fail);
     },
-    [chatId, settings, title, addChat, navigate, fail],
+    [chatId, running, settings, title, addChat, navigate, fail, changeQueued],
   );
 
   const stop = useCallback(() => {
@@ -447,5 +546,5 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
     [chatId, renameChat],
   );
 
-  return { messages, running, send, stop, respond, title, rename };
+  return { messages, running, queued, send, stop, respond, title, rename };
 }

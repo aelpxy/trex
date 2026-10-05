@@ -9,6 +9,8 @@ import { Button as UiButton } from "~/components/ui/button";
 import { EmptyState } from "~/components/ui/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
 import { focusRing, iconButton } from "~/components/ui/styles";
+import { previewOf } from "~/lib/preview";
+import { reactPreview } from "~/lib/react-preview";
 
 import { FileTree } from "./file-tree";
 import { useFiles } from "./files-provider";
@@ -18,13 +20,6 @@ const CodeEditor = lazy(() => import("./code-editor"));
 const COPIED_RESET_MS = 1500;
 const tab = `flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-muted transition-colors hover:text-ink data-active:text-ink ${focusRing}`;
 
-type Preview = "markdown" | "html" | null;
-
-function previewOf(path: string): Preview {
-  if (/\.(md|markdown)$/i.test(path)) return "markdown";
-  if (/\.html?$/i.test(path)) return "html";
-  return null;
-}
 
 function download(path: string, content: string) {
   const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
@@ -44,9 +39,16 @@ function EditorFallback() {
 }
 
 function FileBody({ path }: { path: string }) {
-  const { read, write, revert } = useFiles();
+  const { read, write, revert, writing } = useFiles();
   const { content, status, original } = read(path);
   const preview = previewOf(path);
+  const busy = writing.includes(path);
+  // a file the agent is still writing shows its code, then its preview once it's done
+  const [view, setView] = useState(busy || !preview ? "code" : "preview");
+  useEffect(() => {
+    if (busy) setView("code");
+    else if (preview) setView("preview");
+  }, [busy, preview]);
   const changed = status === "edited" && original !== undefined;
   const editor = (
     <Suspense fallback={<EditorFallback />}>
@@ -57,7 +59,7 @@ function FileBody({ path }: { path: string }) {
   if (!preview && !changed) return <div className="min-h-0 flex-1">{editor}</div>;
 
   return (
-    <Tabs.Root defaultValue="code" className="flex min-h-0 flex-1 flex-col">
+    <Tabs.Root value={view} onValueChange={(value) => setView(String(value))} className="flex min-h-0 flex-1 flex-col">
       <Tabs.List aria-label="View" className="relative flex items-center gap-1 border-b border-line px-3 py-1.5">
         <Tabs.Tab value="code" className={tab}>
           <LuCode size={13} />
@@ -87,7 +89,7 @@ function FileBody({ path }: { path: string }) {
               <Markdown>{content}</Markdown>
             </div>
           ) : (
-            <iframe title={`Preview of ${path}`} sandbox="" srcDoc={content} className="h-full w-full bg-white" />
+            <iframe title={`Preview of ${path}`} sandbox="allow-scripts allow-forms allow-modals" srcDoc={preview === "react" ? reactPreview(content) : content} className="h-full w-full bg-white" />
           )}
         </Tabs.Panel>
       )}

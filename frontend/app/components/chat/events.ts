@@ -13,7 +13,12 @@ const isTool = (id: string) => (part: Part): part is Extract<Part, { type: "tool
 const isAccess = (id: string) => (part: Part): part is Extract<Part, { type: "access" }> => part.type === "access" && part.id === id;
 const isQuestion = (id: string) => (part: Part): part is Extract<Part, { type: "question" }> => part.type === "question" && part.id === id;
 
+// any event after the model started a tool call means it finished writing it
 export function applyEvent(message: AssistantMessage, event: ChatEvent, now = Date.now()): AssistantMessage {
+  return { ...reduce(message, event, now), writing: event.type === "tool.writing" ? event.label : undefined };
+}
+
+function reduce(message: AssistantMessage, event: ChatEvent, now: number): AssistantMessage {
   const parts = event.type === "reasoning.delta" ? message.parts : closeReasoning(message.parts, now);
   const last = parts.at(-1);
 
@@ -30,8 +35,18 @@ export function applyEvent(message: AssistantMessage, event: ChatEvent, now = Da
       return last?.type === "text"
         ? { ...message, parts: [...parts.slice(0, -1), { ...last, text: last.text + event.delta }] }
         : { ...message, parts: [...parts, { type: "text", text: event.delta }] };
+    case "tool.writing":
+      return { ...message, parts };
+    case "tool.draft":
+      return parts.some(isTool(event.id))
+        ? { ...message, parts: updatePart(parts, isTool(event.id), (tool) => ({ ...tool, name: event.name, input: event.input, output: event.output })) }
+        : { ...message, parts: [...parts, { type: "tool", id: event.id, name: event.name, input: event.input, output: event.output, state: "running", startedAt: now }] };
+    case "tool.discard":
+      return { ...message, parts: parts.filter((part) => !isTool(event.id)(part)) };
     case "tool.call":
-      return { ...message, parts: [...parts, { type: "tool", id: event.id, name: event.name, input: event.input, output: "", state: "running", startedAt: now }] };
+      return parts.some(isTool(event.id))
+        ? { ...message, parts: updatePart(parts, isTool(event.id), (tool) => ({ ...tool, name: event.name, input: event.input, output: "" })) }
+        : { ...message, parts: [...parts, { type: "tool", id: event.id, name: event.name, input: event.input, output: "", state: "running", startedAt: now }] };
     case "tool.output":
       return { ...message, parts: updatePart(parts, isTool(event.id), (tool) => ({ ...tool, output: tool.output + event.delta })) };
     case "tool.result":

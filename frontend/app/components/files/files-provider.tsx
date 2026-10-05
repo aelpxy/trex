@@ -1,6 +1,7 @@
-import { createContext, use, useCallback, useMemo, useState, type ReactNode } from "react";
+import { createContext, use, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { DeleteConfirmDialog } from "~/components/ui/delete-confirm-dialog";
+import { download } from "~/lib/api";
 
 export type FileStatus = "new" | "edited" | null;
 
@@ -10,6 +11,9 @@ type Files = {
   paths: string[];
   showPanel: () => void;
   open: (path: string) => void;
+  openLibrary: (path: string) => Promise<void>;
+  // files the agent is writing right now
+  writing: string[];
   close: () => void;
   read: (path: string) => { content: string; status: FileStatus; original?: string };
   revert: (path: string) => void;
@@ -20,6 +24,11 @@ type Files = {
 };
 
 const FilesContext = createContext<Files | null>(null);
+
+// for components that also render outside a chat, such as markdown
+export function useOptionalFiles() {
+  return use(FilesContext);
+}
 
 export function useFiles() {
   const value = use(FilesContext);
@@ -32,30 +41,46 @@ export function normalizePath(path: string) {
 }
 
 // user changes sit on top of the agent's files in memory until the trex api can write to the sandbox; null marks a deleted file
-export function FilesProvider({ generated, children }: { generated: Record<string, string>; children: ReactNode }) {
+export function FilesProvider({ generated, writing, children }: { generated: Record<string, string>; writing: string[]; children: ReactNode }) {
   const [panelOpen, setPanelOpen] = useState(false);
   const [openPath, setOpenPath] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, string | null>>({});
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
+  const [saved, setSaved] = useState<Record<string, string>>({});
+  // a library file the reply links to is the saved deliverable, so it wins over the agent's earlier writes
+  const previous = useRef(generated);
+  // once the agent writes a file again, its version is newer than the library copy
+  useEffect(() => {
+    const changed = Object.keys(generated).filter((path) => generated[path] !== previous.current[path]);
+    previous.current = generated;
+    if (changed.length) setSaved((current) => Object.fromEntries(Object.entries(current).filter(([path]) => !changed.includes(path))));
+  }, [generated]);
+  const agentFiles = useMemo(() => ({ ...generated, ...saved }), [generated, saved]);
 
   const paths = useMemo(
-    () => [...new Set([...Object.keys(generated), ...Object.keys(overrides)])].filter((path) => overrides[path] !== null).sort(),
-    [generated, overrides],
+    () => [...new Set([...Object.keys(agentFiles), ...Object.keys(overrides)])].filter((path) => overrides[path] !== null).sort(),
+    [agentFiles, overrides],
   );
 
   const read = useCallback(
     (path: string) => {
       const override = overrides[path];
-      const original = generated[path];
+      const original = agentFiles[path];
       if (typeof override !== "string") return { content: original ?? "", status: null, original };
       return { content: override, status: original === undefined ? "new" : override === original ? null : "edited", original } as const;
     },
-    [generated, overrides],
+    [agentFiles, overrides],
   );
 
   const showPanel = useCallback(() => setPanelOpen(true), []);
   const close = useCallback(() => setPanelOpen(false), []);
   const open = useCallback((path: string) => {
+    setOpenPath(path);
+    setPanelOpen(true);
+  }, []);
+  const openLibrary = useCallback(async (path: string) => {
+    const content = await (await download(path)).text();
+    setSaved((current) => ({ ...current, [path]: content }));
     setOpenPath(path);
     setPanelOpen(true);
   }, []);
@@ -90,8 +115,8 @@ export function FilesProvider({ generated, children }: { generated: Record<strin
   };
 
   const value = useMemo(
-    () => ({ panelOpen, openPath, paths, showPanel, open, close, read, write, revert, create, rename, requestRemove: setPendingRemoval }),
-    [panelOpen, openPath, paths, showPanel, open, close, read, write, revert, create, rename],
+    () => ({ panelOpen, openPath, paths, showPanel, open, openLibrary, writing, close, read, write, revert, create, rename, requestRemove: setPendingRemoval }),
+    [panelOpen, openPath, paths, showPanel, open, openLibrary, writing, close, read, write, revert, create, rename],
   );
 
   return (
