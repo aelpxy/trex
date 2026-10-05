@@ -1,0 +1,167 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("@fontsource-variable/geist/files/geist-latin-wght-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2") format("woff2");
+}
+
+@theme {
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+  --color-canvas: #fafafa;
+  --color-surface: #ffffff;
+  --color-subtle: #f0f0f0;
+  --color-line: #e5e5e5;
+  --color-ink: #303030;
+  --color-muted: #707070;
+  --color-accent: #525252;
+  --color-accent-soft: #ededed;
+  --color-on-solid: #ffffff;
+  --color-danger: #ac4545;
+  --color-diff-add: #e6ffec;
+  --color-diff-add-fg: #1a7f37;
+  --color-diff-remove: #ffebe9;
+  --color-diff-remove-fg: #cf222e;
+  --radius-panel: 1.25rem;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --glass-blur: 16px;
+    --glass-opacity: 72%;
+    --syntax-keyword: #cf222e;
+    --syntax-string: #0a3069;
+    --syntax-comment: #6e7781;
+    --syntax-number: #0550ae;
+    --syntax-function: #8250df;
+    --syntax-type: #953800;
+    --syntax-property: #0550ae;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --color-canvas: #181818;
+    --color-surface: #222222;
+    --color-subtle: #2b2b2b;
+    --color-line: #3b3b3b;
+    --color-ink: #ededed;
+    --color-muted: #a3a3a3;
+    --color-accent: #c2c2c2;
+    --color-accent-soft: #303030;
+    --color-on-solid: #181818;
+    --color-danger: #f28b8b;
+    --color-diff-add: rgb(46 160 67 / 0.15);
+    --color-diff-add-fg: #3fb950;
+    --color-diff-remove: rgb(248 81 73 / 0.15);
+    --color-diff-remove-fg: #f85149;
+    --syntax-keyword: #ff7b72;
+    --syntax-string: #a5d6ff;
+    --syntax-comment: #8b949e;
+    --syntax-number: #79c0ff;
+    --syntax-function: #d2a8ff;
+    --syntax-type: #ffa657;
+    --syntax-property: #79c0ff;
+  }
+  html { scroll-behavior: smooth; scroll-padding-top: 3rem; }
+  body { @apply relative bg-canvas font-sans text-ink antialiased; }
+  ::selection { @apply bg-accent-soft text-accent; }
+  :focus-visible { @apply outline-2 outline-offset-4 outline-accent; }
+}
+
+@layer components {
+  .ui-button { @apply inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full px-5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40; }
+  .ui-input { @apply h-11 w-full rounded-xl border border-line bg-surface px-3.5 text-sm text-ink placeholder:text-muted transition-colors hover:border-muted/40 disabled:bg-subtle disabled:opacity-60; }
+  .ui-card { @apply rounded-panel border border-line bg-surface; }
+  /* the blur sits on a pseudo-element so the element itself isn't a backdrop root and nested glass still sees the page behind */
+  .glass { position: relative; isolation: isolate; background-color: transparent; }
+  .glass::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+    background-color: color-mix(in srgb, var(--color-surface) var(--glass-opacity), transparent);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
+  }
+  .glass .glass::before { background-color: color-mix(in srgb, var(--color-surface) calc(var(--glass-opacity) / 2), transparent); }
+  .markdown > * + * { @apply mt-3; }
+  .markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { @apply mt-5 font-medium tracking-tight; }
+  .markdown h1 { @apply text-lg; }
+  .markdown h2 { @apply text-base; }
+  .markdown h4, .markdown h5, .markdown h6 { @apply text-sm; }
+  .markdown ul { @apply list-disc pl-5; }
+  .markdown ol { @apply list-decimal pl-5; }
+  .markdown li + li { @apply mt-1; }
+  .markdown li > ul, .markdown li > ol { @apply mt-1; }
+  .markdown .contains-task-list { @apply list-none pl-0; }
+  .markdown .task-list-item input { @apply mr-2 align-middle accent-ink; }
+  .markdown a { @apply underline underline-offset-2 hover:text-muted; }
+  .markdown blockquote { @apply border-l-2 border-line pl-4 text-muted; }
+  .markdown hr { @apply my-6 border-line; }
+  .markdown img { @apply max-w-full rounded-lg; }
+  .markdown :not(pre) > code { @apply rounded-md bg-subtle px-1.5 py-0.5 font-mono text-[0.85em]; }
+  .markdown table { @apply w-full border-collapse text-xs; }
+  .markdown th { @apply bg-subtle font-medium; }
+  .markdown th, .markdown td { @apply border-b border-line px-3 py-2 text-left; }
+  .markdown tr:last-child td { @apply border-b-0; }
+  .code-block .shiki span { color: var(--shiki-light); }
+  [data-theme="dark"] .code-block .shiki span { color: var(--shiki-dark); }
+  .code-block.line-numbers code { counter-reset: line; }
+  .code-block.line-numbers .line::before {
+    counter-increment: line;
+    content: counter(line);
+    display: inline-block;
+    width: var(--gutter);
+    margin-right: 1.25rem;
+    text-align: right;
+    color: var(--color-muted);
+    opacity: 0.6;
+    user-select: none;
+  }
+  .eyebrow { @apply font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-muted; }
+  .thinking-label {
+    background: linear-gradient(110deg, var(--color-muted) 25%, var(--color-ink) 45%, var(--color-muted) 65%);
+    background-size: 250% 100%;
+    background-clip: text;
+    color: transparent;
+    animation: thinking-shimmer 2s linear infinite;
+  }
+}
+
+@keyframes think-pulse {
+  0%, 100% { opacity: 0.5; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+
+@keyframes think-dot {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+@keyframes thinking-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .glass::before { background-color: var(--color-surface); backdrop-filter: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
