@@ -554,6 +554,7 @@ async fn drive(
         fast: session.fast,
         budget: Some(&budget),
         reasoning_from,
+        unattended: session.scheduled_task_id.is_some(),
     };
 
     // the agent saves every item as it goes, so whatever happens the session can be continued

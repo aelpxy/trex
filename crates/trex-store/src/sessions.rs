@@ -10,16 +10,18 @@ use crate::Store;
 // sqlx only accepts static sql, so the shared column list is spliced in at compile time
 macro_rules! columns {
     () => {
-        "id, workspace_id, project_id, title, model, reasoning_effort, fast, sandbox, sandbox_stopped, status, pending_question, last_error, \
+        "id, workspace_id, project_id, scheduled_task_id, title, model, reasoning_effort, fast, sandbox, sandbox_stopped, status, pending_question, last_error, queued_messages, \
          EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at, EXTRACT(EPOCH FROM updated_at)::BIGINT AS updated_at"
     };
 }
 
+// the chats people start; a scheduled task's runs are only listed under that task
 #[derive(Clone, Copy)]
 pub enum SessionFilter {
     All,
     NoProject,
     Project(Uuid),
+    ScheduledTask(Uuid),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,6 +36,8 @@ pub struct Session {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub project_id: Option<Uuid>,
+    // set on the chats a scheduled task's runs create
+    pub scheduled_task_id: Option<Uuid>,
     pub title: Option<String>,
     pub model: String,
     pub reasoning_effort: Option<String>,
@@ -43,6 +47,8 @@ pub struct Session {
     pub status: SessionStatus,
     pub pending_question: Option<Value>,
     pub last_error: Option<String>,
+    // messages sent during the current run that the agent hasn't read yet
+    pub queued_messages: Vec<Value>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -68,6 +74,7 @@ impl IdleSandbox {
             .context("failed to mark sandbox stopped")
     }
 }
+pub(crate) use columns as session_columns;
 
 pub struct StaleRun {
     pub session: Uuid,
@@ -139,6 +146,7 @@ impl FromRow<'_, PgRow> for Session {
             id: row.try_get("id")?,
             workspace_id: row.try_get("workspace_id")?,
             project_id: row.try_get("project_id")?,
+            scheduled_task_id: row.try_get("scheduled_task_id")?,
             title: row.try_get("title")?,
             model: row.try_get("model")?,
             reasoning_effort: row.try_get("reasoning_effort")?,
@@ -149,6 +157,9 @@ impl FromRow<'_, PgRow> for Session {
                 .map_err(|error| sqlx::Error::Decode(error.into()))?,
             pending_question: row.try_get("pending_question")?,
             last_error: row.try_get("last_error")?,
+            queued_messages: row
+                .try_get::<sqlx::types::Json<Vec<Value>>, _>("queued_messages")?
+                .0,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
         })
@@ -254,19 +265,21 @@ impl Store {
             "SELECT ",
             columns!(),
             " FROM sessions WHERE workspace_id = $1 AND ($2::UUID IS NULL OR id < $2) ",
-            "AND ($4 = 'all' OR ($4 = 'none' AND project_id IS NULL) OR project_id = $5) ORDER BY id DESC LIMIT $3"
+            "AND (($4 = 'task' AND scheduled_task_id = $5) OR ($4 <> 'task' AND scheduled_task_id IS NULL AND ",
+            "($4 = 'all' OR ($4 = 'none' AND project_id IS NULL) OR project_id = $5))) ORDER BY id DESC LIMIT $3"
         );
-        let (kind, project) = match filter {
+        let (kind, id) = match filter {
             SessionFilter::All => ("all", None),
             SessionFilter::NoProject => ("none", None),
             SessionFilter::Project(project) => ("project", Some(project)),
+            SessionFilter::ScheduledTask(task) => ("task", Some(task)),
         };
         sqlx::query_as(sql)
             .bind(workspace)
             .bind(before)
             .bind(limit)
             .bind(kind)
-            .bind(project)
+            .bind(id)
             .fetch_all(&self.pg)
             .await
             .context("failed to list sessions")

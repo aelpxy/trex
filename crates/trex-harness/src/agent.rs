@@ -104,6 +104,8 @@ pub struct Agent<'a> {
     pub budget: Option<&'a dyn Budget>,
     // reasoning items before this position came from another model, which can't read them
     pub reasoning_from: usize,
+    // nobody is there to answer, as in a scheduled run, so the agent can't ask questions
+    pub unattended: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -517,11 +519,15 @@ impl Agent<'_> {
         let turn = Turn {
             instructions: self.instructions.clone(),
             input,
-            tools: [
-                self.tools.definitions(),
-                vec![Tool::Function(question::definition())],
-            ]
-            .concat(),
+            tools: if self.unattended {
+                self.tools.definitions()
+            } else {
+                [
+                    self.tools.definitions(),
+                    vec![Tool::Function(question::definition())],
+                ]
+                .concat()
+            },
             reasoning_effort: self.reasoning_effort.clone(),
             allow_tools: mode.tools,
             cache_key: self.cache_key.clone(),
@@ -1006,6 +1012,7 @@ mod tests {
             fast: false,
             budget: None,
             reasoning_from: 0,
+            unattended: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1068,6 +1075,7 @@ mod tests {
             fast: false,
             budget: None,
             reasoning_from: 0,
+            unattended: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1147,6 +1155,7 @@ mod tests {
             fast: false,
             budget: None,
             reasoning_from: 0,
+            unattended: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message("Reply with only the word one.")];
@@ -1205,6 +1214,7 @@ mod tests {
             fast: false,
             budget: None,
             reasoning_from: 0,
+            unattended: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message(
@@ -1293,6 +1303,7 @@ mod tests {
             fast: false,
             budget: None,
             reasoning_from: 0,
+            unattended: false,
         };
 
         let mut history = vec![
@@ -1368,6 +1379,7 @@ mod tests {
             fast: false,
             budget: None,
             reasoning_from: 0,
+            unattended: false,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1428,6 +1440,7 @@ mod tests {
             fast: false,
             budget: None,
             reasoning_from: 0,
+            unattended: false,
         };
 
         let script = "timeout 15 bash -c 'exec 3<>/dev/tcp/example.com/443'";
@@ -1501,6 +1514,7 @@ mod tests {
             fast: false,
             budget: None,
             reasoning_from: 0,
+            unattended: false,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1566,6 +1580,7 @@ mod tests {
             fast: false,
             budget: None,
             reasoning_from: 0,
+            unattended: false,
         };
         let mut history = vec![
             EasyInputMessage::from(

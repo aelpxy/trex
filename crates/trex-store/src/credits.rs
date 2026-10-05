@@ -159,22 +159,33 @@ impl Store {
         Ok(Some(balance))
     }
 
+    // newest first, after the `before` cursor and then `offset` entries in
     pub async fn ledger(
         &self,
         workspace: Uuid,
         limit: i64,
         before: Option<Uuid>,
+        offset: i64,
     ) -> anyhow::Result<Vec<LedgerEntry>> {
         sqlx::query_as(
             "SELECT id, amount, balance, kind, description, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at \
-             FROM credit_ledger WHERE workspace_id = $1 AND ($2::UUID IS NULL OR id < $2) ORDER BY id DESC LIMIT $3",
+             FROM credit_ledger WHERE workspace_id = $1 AND ($2::UUID IS NULL OR id < $2) ORDER BY id DESC LIMIT $3 OFFSET $4",
         )
         .bind(workspace)
         .bind(before)
         .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pg)
         .await
         .context("failed to list credit ledger")
+    }
+
+    pub async fn ledger_count(&self, workspace: Uuid) -> anyhow::Result<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM credit_ledger WHERE workspace_id = $1")
+            .bind(workspace)
+            .fetch_one(&self.pg)
+            .await
+            .context("failed to count credit ledger")
     }
 }
 
@@ -280,7 +291,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.refill_credits(workspace, 1000).await.unwrap(), 1000);
 
-        let entries = store.ledger(workspace, 10, None).await.unwrap();
+        let entries = store.ledger(workspace, 10, None, 0).await.unwrap();
         let summary: Vec<_> = entries
             .iter()
             .map(|entry| (entry.kind.as_str(), entry.amount, entry.balance))

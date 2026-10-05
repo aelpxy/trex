@@ -3,6 +3,7 @@ use uuid::Uuid;
 pub const SESSION: &str = "sess";
 pub const USER: &str = "user";
 pub const SIGN_IN: &str = "signin";
+pub const TASK: &str = "task";
 pub const WORKSPACE: &str = "ws";
 pub const PROJECT: &str = "proj";
 pub const CREDIT_ENTRY: &str = "cred";

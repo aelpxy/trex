@@ -54,6 +54,19 @@ pub enum ErrorType {
 }
 
 impl ApiError {
+    // what the client would be told, for errors recorded instead of returned
+    pub fn message(&self) -> String {
+        match self {
+            Self::InvalidRequest { message, .. }
+            | Self::Authentication(message)
+            | Self::Permission(message)
+            | Self::InsufficientCredits(message)
+            | Self::NotFound(message)
+            | Self::Conflict(message) => message.clone(),
+            Self::Internal(_) => "internal server error".to_owned(),
+        }
+    }
+
     pub fn invalid(message: impl Into<String>, param: &'static str) -> Self {
         Self::InvalidRequest {
             message: message.into(),

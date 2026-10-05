@@ -63,6 +63,21 @@ pub struct LedgerQuery {
     limit: Option<i64>,
     /// An entry id; returns older entries.
     starting_after: Option<String>,
+    /// A page number, from 1, of `limit` entries each; for paged views. Can't be combined with
+    /// `starting_after`.
+    #[param(minimum = 1)]
+    page: Option<i64>,
+}
+
+/// A page of the ledger, newest first.
+#[derive(Serialize, ToSchema)]
+pub struct LedgerPage {
+    #[schema(example = "list")]
+    object: &'static str,
+    data: Vec<LedgerEntry>,
+    has_more: bool,
+    /// Entries in the whole ledger.
+    total_count: i64,
 }
 
 /// List plans
@@ -137,13 +152,13 @@ pub async fn get(
     path = "/credits/ledger",
     tag = "credits",
     params(LedgerQuery),
-    responses((status = 200, body = List<LedgerEntry>), (status = 400, response = ErrorResponse)),
+    responses((status = 200, body = LedgerPage), (status = 400, response = ErrorResponse)),
 )]
 pub async fn ledger(
     State(state): State<Arc<AppState>>,
     Auth { workspace, .. }: Auth,
     Query(query): Query<LedgerQuery>,
-) -> Result<Json<List<LedgerEntry>>, ApiError> {
+) -> Result<Json<LedgerPage>, ApiError> {
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
     if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(ApiError::invalid(
@@ -159,7 +174,22 @@ pub async fn ledger(
                 .ok_or_else(|| ApiError::invalid("invalid entry id", "starting_after"))
         })
         .transpose()?;
-    let mut entries = state.store.ledger(workspace, limit + 1, before).await?;
+    let offset = match (query.page, before) {
+        (Some(page), _) if page < 1 => return Err(ApiError::invalid("page starts at 1", "page")),
+        (Some(_), Some(_)) => {
+            return Err(ApiError::invalid(
+                "use page or starting_after, not both",
+                "page",
+            ));
+        }
+        (Some(page), None) => (page - 1) * limit,
+        (None, _) => 0,
+    };
+    let total_count = state.store.ledger_count(workspace).await?;
+    let mut entries = state
+        .store
+        .ledger(workspace, limit + 1, before, offset)
+        .await?;
     let has_more = entries.len() as i64 > limit;
     entries.truncate(limit as usize);
     let data = entries
@@ -174,5 +204,10 @@ pub async fn ledger(
             created_at: entry.created_at,
         })
         .collect();
-    Ok(Json(List::new(data, has_more)))
+    Ok(Json(LedgerPage {
+        object: "list",
+        data,
+        has_more,
+        total_count,
+    }))
 }

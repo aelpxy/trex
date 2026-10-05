@@ -20,7 +20,7 @@ use super::{
     AppState, List,
     auth::Auth,
     error::{ApiError, ErrorResponse},
-    ids::{self, PROJECT, SESSION},
+    ids::{self, PROJECT, SESSION, TASK},
 };
 use crate::runs;
 
@@ -58,6 +58,8 @@ pub struct ListQuery {
     /// A project id for that project's chats, or `none` for chats outside any project.
     #[param(example = "none")]
     project_id: Option<String>,
+    /// A scheduled task's runs; without it, runs of scheduled tasks aren't listed.
+    scheduled_task_id: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -158,6 +160,8 @@ pub struct Session {
     title: Option<String>,
     /// The project the chat belongs to; null for chats outside any project.
     project_id: Option<String>,
+    /// The scheduled task this chat is a run of; null for chats people started.
+    scheduled_task_id: Option<String>,
     model: String,
     reasoning_effort: Option<String>,
     /// Faster responses at a higher cost.
@@ -167,6 +171,8 @@ pub struct Session {
     pending_questions: Option<Vec<Question>>,
     /// Why the last run failed, when `status` is `failed`.
     last_error: Option<String>,
+    /// Messages sent during the current run that the agent will read next, oldest first.
+    queued_messages: Vec<QueuedMessage>,
     /// Unix seconds.
     created_at: i64,
     /// Unix seconds.
@@ -340,7 +346,7 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(session_object(&session))))
 }
 
-fn check_settings(
+pub(super) fn check_settings(
     state: &AppState,
     model: &str,
     effort: Option<&str>,
@@ -396,10 +402,19 @@ pub async fn list(
         ),
         None => None,
     };
-    let filter = match query.project_id.as_deref() {
-        None => SessionFilter::All,
-        Some("none") => SessionFilter::NoProject,
-        Some(id) => SessionFilter::Project(
+    let task = query
+        .scheduled_task_id
+        .as_deref()
+        .map(|id| {
+            ids::decode(TASK, id)
+                .ok_or_else(|| ApiError::invalid("invalid scheduled task id", "scheduled_task_id"))
+        })
+        .transpose()?;
+    let filter = match (task, query.project_id.as_deref()) {
+        (Some(task), _) => SessionFilter::ScheduledTask(task),
+        (None, None) => SessionFilter::All,
+        (None, Some("none")) => SessionFilter::NoProject,
+        (None, Some(id)) => SessionFilter::Project(
             ids::decode(PROJECT, id)
                 .ok_or_else(|| ApiError::invalid("invalid project id", "project_id"))?,
         ),
@@ -958,7 +973,11 @@ pub async fn reject_access(
     Ok(Json(access_request(request, AccessStatus::Rejected)))
 }
 
-async fn find_project_id(state: &AppState, workspace: Uuid, id: &str) -> Result<Uuid, ApiError> {
+pub(super) async fn find_project_id(
+    state: &AppState,
+    workspace: Uuid,
+    id: &str,
+) -> Result<Uuid, ApiError> {
     let invalid = || ApiError::invalid(format!("no project {id}"), "project_id");
     let uuid = ids::decode(PROJECT, id).ok_or_else(invalid)?;
     let project = state
@@ -1045,7 +1064,25 @@ fn validate_answers(
         .collect()
 }
 
-fn session_object(session: &store::Session) -> Session {
+#[derive(Serialize, ToSchema)]
+pub struct QueuedMessage {
+    content: String,
+    attachments: Vec<Attachment>,
+}
+
+fn attachments_of(item: &Value) -> Vec<Attachment> {
+    attachment::references(item)
+        .into_iter()
+        .map(|(kind, hash, mime_type, filename)| Attachment {
+            id: format!("{ATTACHMENT_PREFIX}{hash}"),
+            kind,
+            mime_type,
+            filename,
+        })
+        .collect()
+}
+
+pub(super) fn session_object(session: &store::Session) -> Session {
     let pending_questions = session.pending_question.as_ref().map(|pending| {
         serde_json::from_value::<PendingQuestion>(pending.clone())
             .map(|pending| pending.questions.into_iter().map(Question::from).collect())
@@ -1056,6 +1093,7 @@ fn session_object(session: &store::Session) -> Session {
         object: "session",
         title: session.title.clone(),
         project_id: session.project_id.map(|id| ids::encode(PROJECT, id)),
+        scheduled_task_id: session.scheduled_task_id.map(|id| ids::encode(TASK, id)),
         model: session.model.clone(),
         reasoning_effort: session.reasoning_effort.clone(),
         fast: session.fast,
@@ -1067,6 +1105,14 @@ fn session_object(session: &store::Session) -> Session {
         },
         pending_questions,
         last_error: session.last_error.clone(),
+        queued_messages: session
+            .queued_messages
+            .iter()
+            .map(|message| QueuedMessage {
+                content: history::message_text(message),
+                attachments: attachments_of(message),
+            })
+            .collect(),
         created_at: session.created_at,
         updated_at: session.updated_at,
     }
@@ -1124,15 +1170,7 @@ fn item(item: &Value) -> Option<Item> {
                 return None;
             }
             let text = history::message_text(item);
-            let attachments = attachment::references(item)
-                .into_iter()
-                .map(|(kind, hash, mime_type, filename)| Attachment {
-                    id: format!("{ATTACHMENT_PREFIX}{hash}"),
-                    kind,
-                    mime_type,
-                    filename,
-                })
-                .collect();
+            let attachments = attachments_of(item);
             Some(Item::Message {
                 role: text_of(&item["role"]),
                 text,

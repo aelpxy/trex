@@ -10,6 +10,7 @@ mod ids;
 mod library;
 mod previews;
 mod projects;
+mod scheduled;
 mod sessions;
 
 use std::sync::Arc;
@@ -138,6 +139,13 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(admin::adjust_credits))
         .routes(routes!(admin::set_plan))
         .routes(routes!(models))
+        .routes(routes!(scheduled::create, scheduled::list))
+        .routes(routes!(
+            scheduled::get,
+            scheduled::update,
+            scheduled::delete
+        ))
+        .routes(routes!(scheduled::run))
         .routes(routes!(projects::create, projects::list))
         .routes(routes!(projects::get, projects::update, projects::delete))
         .routes(routes!(sessions::create, sessions::list))
@@ -400,6 +408,9 @@ mod tests {
                 "/v1/admin/workspaces/{id}/credits",
                 "/v1/admin/workspaces/{id}/plan",
                 "/v1/models",
+                "/v1/scheduled_tasks",
+                "/v1/scheduled_tasks/{id}",
+                "/v1/scheduled_tasks/{id}/run",
                 "/v1/projects",
                 "/v1/projects/{id}",
                 "/v1/sessions",

@@ -5,6 +5,7 @@ pub mod events;
 pub mod library;
 pub mod previews;
 pub mod projects;
+pub mod scheduled;
 pub mod sessions;
 pub mod user_sessions;
 
