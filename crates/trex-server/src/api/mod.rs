@@ -8,6 +8,7 @@ pub mod events;
 mod files;
 mod ids;
 mod library;
+mod previews;
 mod projects;
 mod sessions;
 
@@ -36,7 +37,7 @@ use utoipa::{
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::{credits::Plans, runs::Runs};
+use crate::{config::PreviewUrl, credits::Plans, runs::Runs};
 
 const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
 const MAX_SANDBOX_FILE_BYTES: usize = trex_harness::files::MAX_FILE_BYTES as usize;
@@ -54,6 +55,7 @@ pub struct AppState {
     pub sandbox_image: String,
     pub sandbox_policy: Policy,
     pub runs: Runs,
+    pub preview_url: PreviewUrl,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -127,6 +129,7 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(sessions::list_access))
         .routes(routes!(sessions::approve_access))
         .routes(routes!(sessions::reject_access))
+        .routes(routes!(previews::create))
         .routes(routes!(files::list))
         .routes(routes!(files::move_file))
         .route(
@@ -347,6 +350,7 @@ mod tests {
                 "/v1/sessions/{id}/access_requests",
                 "/v1/sessions/{id}/access_requests/{request_id}/approve",
                 "/v1/sessions/{id}/access_requests/{request_id}/reject",
+                "/v1/sessions/{id}/previews",
                 "/v1/sessions/{id}/files",
                 "/v1/sessions/{id}/files/move",
                 "/v1/library",

@@ -78,6 +78,7 @@ Env vars:
 - `TREX_DATABASE_URL`, `TREX_REDIS_URL` (required; contain credentials, so never log them or put them in `trex.toml`)
 - `TREX_OPENSHELL_ENDPOINT` (default `https://127.0.0.1:17670`)
 - `TREX_OPENSHELL_TLS_DIR` (default `certs/openshell`, relative to the working dir, containing `ca.crt`, `tls.crt`, `tls.key`; `certs/` is gitignored)
+- `TREX_PREVIEW_ADDR` (default `127.0.0.1:8081`), `TREX_PREVIEW_URL` (default `http://{id}.preview.localhost:8081`; `{id}` must start the host)
 - `TREX_ADMIN_TOKEN` (optional secret; enables `/v1/admin`, never log it)
 
 Dev setup: the gateway on `fedora-server` only listens on loopback; tunnel with `ssh -fN -L 17670:127.0.0.1:17670 fedora-server`.
@@ -101,11 +102,12 @@ Docs: `GET /docs` (Scalar, loaded from its CDN by `api/docs.html`) renders `GET 
 - `POST /v1/sessions/{id}/retry`: continues a failed or stopped run from saved history (202); 409 while running, waiting for answers, or when the agent already replied
 - `GET /v1/sessions/{id}/access_requests`, `POST .../access_requests/{request_id}/approve|reject`
 - `GET /v1/sessions/{id}/events`: SSE; resumes from `Last-Event-ID`, `?from=start` replays retained events, otherwise starts at the live tail
+- `POST /v1/sessions/{id}/previews` `{port}`: a link to whatever listens on `port` in the sandbox (`preview.rs`). Previews are served on their own listener (`TREX_PREVIEW_ADDR`, default `127.0.0.1:8081`) at `TREX_PREVIEW_URL` (default `http://{id}.preview.localhost:8081`), the id being the host's first label so each preview is its own origin; ids live in Redis for a day. Each request gets its own `ForwardTcp` tunnel (`OpenShell::forward`, a fresh session token each, since the gateway allows 3 connections per token) because the gateway only ends a tunnel once both sides close; hyper reads one response and drops it. Websockets are upgraded and piped. Tunnels target `::1`: IPv4 loopback inside a sandbox is intercepted by OpenShell's proxy and resets. The `show_preview` tool checks the port and emits `preview.opened`.
 - `GET /v1/sessions/{id}/files`, `GET|PUT|DELETE /v1/sessions/{id}/files/{path}`, `POST /v1/sessions/{id}/files/move` `{from, to}`: the session sandbox's files under `/sandbox` (`trex_harness::files`; paths are relative, dependency and cache folders like `node_modules` and `.git` are left out of listings, reads are capped at 10 MB). Listing or reading starts a stopped sandbox but never creates one; writing does. Using these keeps the sandbox from idling out.
 - `GET /v1/library?prefix`, `GET|PUT|DELETE /v1/library/files/{path}` (downloads carry the sniffed content type), `POST /v1/library/move` `{from, to}` (never overwrites)
 - `GET /v1/attachments/{id}`: a message attachment (ids come from `message` items' `attachments`)
 
-Events (`event:` equals the payload `type`): `run.started`, `run.resumed`, `sandbox.creating`, `sandbox.starting`, `sandbox.ready`, `sandbox.replaced`, `text.delta`, `reasoning.delta`, `tool.call.started`, `tool.call.delta`, `tool.call`, `tool.output`, `tool.result`, `usage`, `access.requested`, `question`, `model.retrying`, `context.compacting`, `context.compacted`, `message.received`, `run.interrupted`, `plan.updated`, `file.changed`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
+Events (`event:` equals the payload `type`): `run.started`, `run.resumed`, `sandbox.creating`, `sandbox.starting`, `sandbox.ready`, `sandbox.replaced`, `text.delta`, `reasoning.delta`, `tool.call.started`, `tool.call.delta`, `tool.call`, `tool.output`, `tool.result`, `usage`, `access.requested`, `question`, `model.retrying`, `context.compacting`, `context.compacted`, `message.received`, `run.interrupted`, `plan.updated`, `file.changed`, `preview.opened`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
 
 Agent loop robustness (`crates/trex-harness/src/agent.rs`):
 

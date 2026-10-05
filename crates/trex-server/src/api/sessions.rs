@@ -266,10 +266,14 @@ pub struct UsageEntry {
     model: String,
     input_tokens: i64,
     cached_input_tokens: i64,
+    cache_write_tokens: i64,
     output_tokens: i64,
     reasoning_tokens: i64,
     credits: i64,
+    /// From sending the request to the end of the response.
     duration_ms: i64,
+    /// Until the first streamed output; null for older records or when nothing streamed.
+    first_token_ms: Option<i64>,
 }
 
 /// Outbound network access the sandbox was denied; approving it lets the agent retry.
@@ -592,6 +596,8 @@ pub async fn usage(
             reasoning_tokens: entry.reasoning_tokens,
             credits: entry.credits,
             duration_ms: entry.duration_ms,
+            first_token_ms: entry.first_token_ms,
+            cache_write_tokens: entry.cache_write_tokens,
         })
         .collect();
     Ok(Json(List::new(data, false)))

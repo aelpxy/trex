@@ -800,6 +800,9 @@ async fn forward(
                     output_tokens: usage.output_tokens,
                     reasoning_tokens: usage.reasoning_tokens,
                     duration_ms: usage.duration.as_millis() as u64,
+                    first_token_ms: usage
+                        .time_to_first_token
+                        .map(|elapsed| elapsed.as_millis() as u64),
                 };
                 match credits::charge(&state, &record, fast).await {
                     Ok(credits) => charged = credits,

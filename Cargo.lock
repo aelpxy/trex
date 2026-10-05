@@ -4128,6 +4128,7 @@ dependencies = [
  "sha2 0.11.0",
  "tokio",
  "tonic",
+ "tracing",
  "uuid",
 ]
 
@@ -4142,6 +4143,8 @@ dependencies = [
  "dotenvy",
  "futures",
  "getrandom 0.4.3",
+ "hyper",
+ "hyper-util",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -140,6 +140,10 @@ pub enum SessionEvent {
         after: Option<String>,
     },
     /// The agent's plan for the task, replacing any earlier one. Render it as a checklist.
+    /// The agent wants the user to see a server running in the sandbox; create a preview for
+    /// `port` (`POST /v1/sessions/{id}/previews`) and open it at `path`.
+    #[serde(rename = "preview.opened")]
+    PreviewOpened { port: u16, path: String },
     #[serde(rename = "plan.updated")]
     PlanUpdated {
         explanation: Option<String>,
@@ -303,6 +307,7 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
                 after,
             }
         }
+        Event::PreviewOpened { port, path } => SessionEvent::PreviewOpened { port, path },
         Event::PlanUpdated { explanation, steps } => SessionEvent::PlanUpdated {
             explanation,
             steps: steps

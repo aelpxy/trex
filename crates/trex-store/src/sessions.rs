@@ -94,6 +94,7 @@ pub struct UsageRecord<'a> {
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
     pub duration_ms: u64,
+    pub first_token_ms: Option<u64>,
 }
 
 // one model response's usage, for showing what each turn of a chat cost
@@ -102,10 +103,12 @@ pub struct UsageEntry {
     pub model: String,
     pub input_tokens: i64,
     pub cached_input_tokens: i64,
+    pub cache_write_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_tokens: i64,
     pub credits: i64,
     pub duration_ms: i64,
+    pub first_token_ms: Option<i64>,
 }
 
 impl SessionStatus {
@@ -654,7 +657,7 @@ impl Store {
     ) -> anyhow::Result<Vec<UsageEntry>> {
         let rows = sqlx::query(
             "SELECT (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS created_at_ms, model, input_tokens, \
-             cached_input_tokens, output_tokens, reasoning_tokens, credits, duration_ms \
+             cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, credits, duration_ms, first_token_ms \
              FROM usage_records WHERE session_id = $1 AND workspace_id = $2 ORDER BY created_at",
         )
         .bind(id)
@@ -669,10 +672,12 @@ impl Store {
                     model: row.try_get("model")?,
                     input_tokens: row.try_get("input_tokens")?,
                     cached_input_tokens: row.try_get("cached_input_tokens")?,
+                    cache_write_tokens: row.try_get("cache_write_tokens")?,
                     output_tokens: row.try_get("output_tokens")?,
                     reasoning_tokens: row.try_get("reasoning_tokens")?,
                     credits: row.try_get("credits")?,
                     duration_ms: row.try_get("duration_ms")?,
+                    first_token_ms: row.try_get("first_token_ms")?,
                 })
             })
             .collect()
@@ -1028,6 +1033,7 @@ mod tests {
                     output_tokens: 5,
                     reasoning_tokens: 1,
                     duration_ms: 1500,
+                    first_token_ms: Some(300),
                 },
                 7,
             )

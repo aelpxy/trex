@@ -10,8 +10,9 @@ futures.workspace = true
 openshell-policy.workspace = true
 openshell-sdk.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["io-util", "sync", "time"] }
 tonic = { workspace = true, features = ["tls-aws-lc"] }
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

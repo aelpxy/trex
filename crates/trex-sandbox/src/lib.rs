@@ -10,9 +10,15 @@ use anyhow::{Context, bail};
 use futures::stream;
 use openshell_sdk::{
     DeleteOptions, EdgeAuthInterceptor, ListOptions, OpenShellClient, SandboxPhase, SdkError,
-    raw::proto::{self, exec_sandbox_event::Payload, exec_sandbox_input},
+    raw::proto::{
+        self, exec_sandbox_event::Payload, exec_sandbox_input, tcp_forward_frame, tcp_forward_init,
+    },
 };
 use sha2::{Digest, Sha256};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::mpsc,
+};
 use tonic::{
     Streaming,
     transport::{Certificate, ClientTlsConfig, Endpoint, Identity},
@@ -29,6 +35,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
 const PHASE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const POLICY_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+const FORWARD_BUFFER_FRAMES: usize = 16;
 #[cfg(test)]
 const DEV_IMAGE: &str = "localhost/trex-sandbox:latest";
 
@@ -386,6 +393,122 @@ impl OpenShell {
             .await?
             .into_inner();
         Ok(ExecStream(stream))
+    }
+
+    // splices a client connection into a loopback port in the sandbox; `initial` is what was
+    // already read from the client. returns once the sandbox side closes
+    pub async fn forward<S>(
+        &self,
+        sandbox: &Sandbox,
+        port: u16,
+        initial: Vec<u8>,
+        client: S,
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        // the gateway allows only a few connections per token, so each one gets its own
+        let token = self
+            .client
+            .raw_grpc()
+            .create_ssh_session(proto::CreateSshSessionRequest {
+                sandbox: sandbox.name.clone(),
+                workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
+            })
+            .await
+            .context("failed to authorize a tunnel into the sandbox")?
+            .into_inner()
+            .token;
+        let result = self
+            .forward_with(sandbox, port, &token, initial, client)
+            .await;
+        let revoked = self
+            .client
+            .raw_grpc()
+            .revoke_ssh_session(proto::RevokeSshSessionRequest {
+                token,
+                allow_missing: true,
+            })
+            .await;
+        if let Err(error) = revoked {
+            tracing::warn!(sandbox = sandbox.name, %error, "failed to revoke a tunnel token");
+        }
+        result
+    }
+
+    async fn forward_with<S>(
+        &self,
+        sandbox: &Sandbox,
+        port: u16,
+        token: &str,
+        initial: Vec<u8>,
+        client: S,
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel::<proto::TcpForwardFrame>(FORWARD_BUFFER_FRAMES);
+        let init = proto::TcpForwardInit {
+            sandbox: sandbox.name.clone(),
+            workspace: sandbox.workspace.clone(),
+            authorization_token: token.to_owned(),
+            // ipv4 loopback inside a sandbox goes through openshell's network proxy, which resets
+            // these connections, so servers are reached over ipv6
+            target: Some(tcp_forward_init::Target::Tcp(proto::TcpRelayTarget {
+                host: "::1".into(),
+                port: u32::from(port),
+            })),
+            ..Default::default()
+        };
+        let data = |bytes: Vec<u8>| proto::TcpForwardFrame {
+            payload: Some(tcp_forward_frame::Payload::Data(bytes)),
+        };
+        tx.send(proto::TcpForwardFrame {
+            payload: Some(tcp_forward_frame::Payload::Init(init)),
+        })
+        .await
+        .context("forward stream closed")?;
+        if !initial.is_empty() {
+            tx.send(data(initial))
+                .await
+                .context("forward stream closed")?;
+        }
+        let frames = stream::unfold(rx, |mut rx| async {
+            rx.recv().await.map(|frame| (frame, rx))
+        });
+        let mut response = self
+            .client
+            .raw_grpc()
+            .forward_tcp(frames)
+            .await
+            .context("failed to open a tunnel into the sandbox")?
+            .into_inner();
+
+        let (mut read, mut write) = tokio::io::split(client);
+        let upload = tokio::spawn(async move {
+            let mut buffer = vec![0; STDIN_CHUNK_BYTES];
+            loop {
+                match read.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if tx.send(data(buffer[..read].to_vec())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let result = async {
+            while let Some(frame) = response.message().await.context("tunnel failed")? {
+                if let Some(tcp_forward_frame::Payload::Data(bytes)) = frame.payload {
+                    write.write_all(&bytes).await.context("client went away")?;
+                }
+            }
+            write.shutdown().await.context("client went away")
+        }
+        .await;
+        upload.abort();
+        result
     }
 
     pub async fn output(
@@ -749,8 +872,53 @@ mod tests {
         assert!(still_pending.iter().all(|r| r.id != request.id));
     }
 
-    // needs the gateway tunnel, certs, internet on the gateway host, and the image from images/sandbox built on it
     // needs the openshell gateway tunnel, <workspace>/certs/openshell, and the dev image
+    #[tokio::test]
+    #[ignore]
+    async fn forwards_connections_to_sandbox_ports() {
+        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
+        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
+            .await
+            .unwrap();
+        let user = Uuid::now_v7();
+        let workspace = openshell.ensure_workspace(user).await.unwrap();
+        let sandbox = openshell
+            .create(&workspace, Some(DEV_IMAGE.into()), None)
+            .await
+            .unwrap();
+        let script = "echo hello-from-the-sandbox > /sandbox/index.html && cd /sandbox && \\
+                      (setsid python3 -m http.server 8000 --bind :: >/tmp/server.log 2>&1 < /dev/null &) ; \\
+                      for i in $(seq 50); do curl -s localhost:8000 >/dev/null && break; sleep 0.2; done";
+        let started = openshell
+            .output(
+                &sandbox,
+                ["bash", "-c", script].map(String::from).to_vec(),
+                Vec::new(),
+            )
+            .await;
+
+        let (client, mut ours) = tokio::io::duplex(64 * 1024);
+        let request = b"GET /index.html HTTP/1.0\r\nHost: localhost\r\n\r\n".to_vec();
+        let mut response = Vec::new();
+        let (forwarded, read) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(
+                openshell.forward(&sandbox, 8000, request, client),
+                ours.read_to_end(&mut response)
+            )
+        })
+        .await
+        .expect("the forward finishes once the server closes");
+        openshell.delete_workspace(user).await.unwrap();
+
+        started.unwrap();
+        forwarded.unwrap();
+        read.unwrap();
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.0 200"), "{response}");
+        assert!(response.contains("hello-from-the-sandbox"), "{response}");
+    }
+
+    // needs the gateway tunnel, certs, internet on the gateway host, and the image from images/sandbox built on it
     #[tokio::test]
     #[ignore]
     async fn stopped_sandboxes_keep_their_files() {

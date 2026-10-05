@@ -84,8 +84,8 @@ impl Store {
         let record = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO usage_records (id, workspace_id, session_id, model, input_tokens, cached_input_tokens, \
-             cache_write_tokens, output_tokens, reasoning_tokens, credits, duration_ms) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             cache_write_tokens, output_tokens, reasoning_tokens, credits, duration_ms, first_token_ms) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(record)
         .bind(usage.workspace_id)
@@ -98,6 +98,7 @@ impl Store {
         .bind(usage.reasoning_tokens as i64)
         .bind(credits)
         .bind(usage.duration_ms as i64)
+        .bind(usage.first_token_ms.map(|ms| ms as i64))
         .execute(&mut *tx)
         .await
         .context("failed to record usage")?;
@@ -248,6 +249,7 @@ mod tests {
             output_tokens: 100,
             reasoning_tokens: 0,
             duration_ms: 0,
+            first_token_ms: None,
         };
         assert_eq!(store.charge_usage(&usage, 250).await.unwrap(), 750);
         assert_eq!(

@@ -73,6 +73,11 @@ pub enum Event {
         explanation: Option<String>,
         steps: Vec<PlanStep>,
     },
+    // the agent opened a server in the sandbox in the user's preview panel
+    PreviewOpened {
+        port: u16,
+        path: String,
+    },
     // a message the user sent mid-run, now appended to history
     MessageReceived {
         content: String,

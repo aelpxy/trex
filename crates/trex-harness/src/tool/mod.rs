@@ -4,6 +4,7 @@ mod image;
 mod library;
 mod patch;
 mod plan;
+mod preview;
 mod process;
 mod search;
 mod time;
@@ -27,6 +28,7 @@ pub use self::{
     library::{LibraryList, LibraryLoad, LibrarySave},
     patch::ApplyPatch,
     plan::UpdatePlan,
+    preview::ShowPreview,
     process::{ProcessOutput, StopProcess},
     search::{Glob, Grep},
     time::CurrentTime,
@@ -146,6 +148,7 @@ impl Tools {
             Box::new(ProcessOutput),
             Box::new(StopProcess),
             Box::new(ViewImage),
+            Box::new(ShowPreview),
         ]))
     }
 

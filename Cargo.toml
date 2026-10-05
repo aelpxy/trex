@@ -25,6 +25,8 @@ dotenvy = "0.15.7"
 eventsource-stream = "0.2.3"
 futures = "0.3"
 getrandom = "0.4.3"
+hyper = "1.11.1"
+hyper-util = "0.1.21"
 htmd = "0.5.5"
 object_store = { version = "0.14.2", default-features = false }
 pdf-extract = "0.12.1"

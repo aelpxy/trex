@@ -3,6 +3,7 @@ mod config;
 mod credits;
 mod idle;
 mod logging;
+mod preview;
 mod runs;
 
 use std::sync::Arc;
@@ -49,6 +50,15 @@ async fn main() -> anyhow::Result<()> {
         sandbox_image: config.sandbox_image,
         sandbox_policy: config.sandbox_policy,
         runs: Runs::default(),
+        preview_url: config.preview_url,
+    });
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            if let Err(error) = preview::serve(state, config.preview_addr).await {
+                tracing::error!(error = format!("{error:#}"), "preview server stopped");
+            }
+        }
     });
     tokio::spawn(runs::resume_stale_runs(state.clone()));
     tokio::spawn(idle::stop_idle_sandboxes(

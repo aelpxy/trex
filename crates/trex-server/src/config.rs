@@ -12,6 +12,9 @@ const DEFAULT_SANDBOX_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct Config {
     pub addr: SocketAddr,
+    // serves running apps from sandboxes, each on its own origin
+    pub preview_addr: SocketAddr,
+    pub preview_url: PreviewUrl,
     pub log_format: LogFormat,
     pub openshell_endpoint: String,
     pub openshell_tls_dir: PathBuf,
@@ -25,6 +28,30 @@ pub struct Config {
     pub sandbox_policy: Policy,
     pub sandbox_idle_timeout: Duration,
     pub library: Library,
+}
+
+// where a preview is reached, with `{id}` as the first label of the host so every preview is its own
+// origin and can't read the app's or another preview's data
+#[derive(Clone)]
+pub struct PreviewUrl(String);
+
+impl PreviewUrl {
+    fn parse(template: &str) -> anyhow::Result<Self> {
+        let host = template
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .context("TREX_PREVIEW_URL needs a scheme, e.g. http://{id}.preview.localhost:8081")?;
+        if !host.starts_with("{id}.") {
+            bail!(
+                "TREX_PREVIEW_URL must start its host with {{id}}., e.g. http://{{id}}.preview.localhost:8081"
+            );
+        }
+        Ok(Self(template.trim_end_matches('/').to_owned()))
+    }
+
+    pub fn of(&self, id: &str) -> String {
+        format!("{}/", self.0.replace("{id}", id))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -46,6 +73,15 @@ impl Config {
             .unwrap_or_else(|_| "127.0.0.1:8080".into())
             .parse()
             .context("invalid TREX_ADDR")?;
+
+        let preview_addr = env::var("TREX_PREVIEW_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:8081".into())
+            .parse()
+            .context("invalid TREX_PREVIEW_ADDR")?;
+        let preview_url = PreviewUrl::parse(
+            &env::var("TREX_PREVIEW_URL")
+                .unwrap_or_else(|_| "http://{id}.preview.localhost:8081".into()),
+        )?;
 
         let log_format = match env::var("TREX_LOG_FORMAT").as_deref() {
             Err(_) | Ok("text") => LogFormat::Text,
@@ -92,6 +128,8 @@ impl Config {
 
         Ok(Self {
             addr,
+            preview_addr,
+            preview_url,
             log_format,
             openshell_endpoint,
             openshell_tls_dir,
