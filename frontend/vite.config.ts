@@ -12,7 +12,8 @@ export default defineConfig({
   server: {
     // the browser talks to trex through the dev server, so trex needs no cors
     proxy: {
-      "/api": { target: TREX_URL, changeOrigin: true, rewrite: (path) => path.replace(/^\/api/, "") },
+      // xfwd passes the browser's address on, for sign-in session records (with TREX_TRUST_PROXY_HEADERS)
+      "/v1": { target: TREX_URL, changeOrigin: true, xfwd: true },
     },
   },
 });

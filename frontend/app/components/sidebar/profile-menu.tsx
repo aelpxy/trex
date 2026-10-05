@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { Menu } from "@base-ui/react/menu";
 import { LuCheck, LuChevronUp, LuCoins, LuLogOut, LuMoon, LuSettings, LuShield, LuUser, LuUserCog } from "react-icons/lu";
@@ -8,7 +9,7 @@ import { useTheme } from "~/components/appearance/use-theme";
 import { focusRing, menuItem, menuSeparator, popup } from "~/components/ui/styles";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { formatUsd } from "~/lib/credits";
-import { trex } from "~/lib/trex";
+import { queries } from "~/lib/queries";
 
 import { Fade } from "./fade";
 import { railFit } from "./styles";
@@ -28,19 +29,13 @@ export function ProfileMenu({ collapsed = false, onNavigate }: ProfileMenuProps)
   const { theme, setTheme } = useTheme();
   const { workspaces, current, switchWorkspace, profile: PROFILE, logout } = useWorkspace();
   const subtitle = `${current.name} · ${current.plan}`;
-  const [balance, setBalance] = useState<number | null>(null);
-
+  const [open, setOpen] = useState(false);
   // the balance changes with every response, so it's read fresh each time the menu opens
-  function onOpenChange(open: boolean) {
-    if (!open) return;
-    trex
-      .credits()
-      .then((credits) => setBalance(credits.balance))
-      .catch((error) => console.warn("could not load credits", error));
-  }
+  const credits = useQuery({ ...queries.credits(), enabled: open, staleTime: 0 });
+  const balance = credits.data?.balance ?? null;
 
   return (
-    <Menu.Root onOpenChange={onOpenChange}>
+    <Menu.Root onOpenChange={setOpen}>
       <Menu.Trigger
         aria-label={collapsed ? `${PROFILE.name}, ${subtitle}` : undefined}
         className={`flex h-11 cursor-pointer items-center gap-2.5 overflow-hidden whitespace-nowrap rounded-md px-1.5 text-left hover:bg-subtle data-popup-open:bg-subtle ${focusRing} ${railFit}`}

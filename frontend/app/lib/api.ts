@@ -1,6 +1,6 @@
-// the trex http api; in development vite proxies /api to the trex server, so requests stay same-origin
-const BASE = import.meta.env.VITE_TREX_API ?? "/api";
-const TOKEN_KEY = "trex-token";
+// the trex http api, on the same origin: trex serves the built app itself, and in development vite
+// proxies /v1 to it
+const BASE = import.meta.env.VITE_TREX_API ?? "";
 const WORKSPACE_KEY = "trex-ui";
 const RECONNECT_MS = 1000;
 
@@ -12,23 +12,6 @@ export class ApiError extends Error {
     public param: string | null = null,
   ) {
     super(message);
-  }
-}
-
-export function getToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
-export function setToken(token: string | null) {
-  try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch (error) {
-    console.warn("could not save the session token", error);
   }
 }
 
@@ -49,20 +32,18 @@ export function setWorkspaceId(id: string | null) {
   currentWorkspace = id;
 }
 
+// the session is an httponly cookie the browser sends itself; the extra header is what lets the
+// server tell trex's own requests from forged cross-site ones
 function headers(extra: Record<string, string> = {}) {
-  const result: Record<string, string> = { ...extra };
-  const token = getToken();
-  if (token) result.authorization = `Bearer ${token}`;
+  const result: Record<string, string> = { "x-requested-with": "fetch", ...extra };
   const workspace = workspaceId();
   if (workspace?.startsWith("ws_")) result["trex-workspace"] = workspace;
   return result;
 }
 
-// an expired token sends the user back to sign in instead of failing every request
+// an expired session sends the user back to sign in instead of failing every request
 function signOutIfUnauthorized(status: number) {
-  if (status !== 401 || !getToken()) return;
-  setToken(null);
-  if (!window.location.pathname.startsWith("/auth")) window.location.assign("/auth");
+  if (status === 401 && !window.location.pathname.startsWith("/auth")) window.location.assign("/auth");
 }
 
 async function failure(response: Response): Promise<never> {
@@ -112,6 +93,12 @@ export async function putSandboxFile(sessionId: string, path: string, content: B
     body: content,
   });
   if (!response.ok) await failure(response);
+}
+
+export async function adminLibraryFile(workspace: string, path: string): Promise<Blob> {
+  const response = await fetch(`${BASE}/v1/admin/workspaces/${workspace}/library/files/${encodePath(path)}`, { headers: headers() });
+  if (!response.ok) await failure(response);
+  return response.blob();
 }
 
 export async function attachment(id: string): Promise<Blob> {

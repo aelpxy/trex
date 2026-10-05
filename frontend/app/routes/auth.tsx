@@ -4,13 +4,13 @@ import { AppearanceProvider } from "~/components/appearance/appearance-provider"
 import { Background } from "~/components/appearance/background";
 import { AuthForm, type AuthMode } from "~/components/auth/auth-form";
 import { Brand } from "~/components/ui/brand";
-import { getToken } from "~/lib/api";
 import { pageTitle } from "~/lib/meta";
+import { signedIn } from "~/lib/trex";
 
 import type { Route } from "./+types/auth";
 
-export function clientLoader() {
-  if (getToken()) throw redirect("/");
+export async function clientLoader() {
+  if (await signedIn()) throw redirect("/");
   return null;
 }
 

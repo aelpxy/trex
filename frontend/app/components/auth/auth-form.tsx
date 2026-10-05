@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router";
 import { Field } from "@base-ui/react/field";
 import { Form } from "@base-ui/react/form";
 
-import { ApiError, setToken } from "~/lib/api";
+import { ApiError } from "~/lib/api";
 import { trex } from "~/lib/trex";
 
 import { Button } from "~/components/ui/button";
@@ -36,10 +36,8 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
     setBusy(true);
     setErrors({});
     try {
-      const { token } = signup
-        ? await trex.signup({ name: text("name"), email: text("email"), password: text("password") })
-        : await trex.login({ email: text("email"), password: text("password") });
-      setToken(token);
+      if (signup) await trex.signup({ name: text("name"), email: text("email"), password: text("password") });
+      else await trex.login({ email: text("email"), password: text("password") });
       navigate("/", { replace: true });
     } catch (cause) {
       // the api names the field it rejected; anything else is shown under the password

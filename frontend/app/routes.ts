@@ -8,6 +8,13 @@ export default [
     route("scheduled", "routes/scheduled.tsx"),
     route("library", "routes/library.tsx"),
     route("account", "routes/account.tsx"),
-    route("admin", "routes/admin.tsx"),
+    route("admin", "routes/admin/layout.tsx", [
+      index("routes/admin/overview.tsx"),
+      route("users", "routes/admin/users.tsx"),
+      route("workspaces", "routes/admin/workspaces.tsx"),
+      route("library", "routes/admin/library.tsx"),
+      route("usage", "routes/admin/usage.tsx"),
+      route("logs", "routes/admin/logs.tsx"),
+    ]),
   ]),
 ] satisfies RouteConfig;

@@ -18,7 +18,7 @@ function formatSize(bytes: number) {
 
 const formatDate = (seconds: number) => new Date(seconds * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 
-type FileListProps = { files: ApiFile[]; onDownload: (file: ApiFile) => void; onDelete: (file: ApiFile) => void };
+type FileListProps = { files: ApiFile[]; onDownload: (file: ApiFile) => void; onDelete?: (file: ApiFile) => void };
 
 export function FileList({ files, onDownload, onDelete }: FileListProps) {
   return (
@@ -35,9 +35,11 @@ export function FileList({ files, onDownload, onDelete }: FileListProps) {
             <Button onClick={() => onDownload(file)} aria-label={`Download ${file.path}`} title="Download" className={iconButton}>
               <LuDownload size={14} />
             </Button>
-            <Button onClick={() => onDelete(file)} aria-label={`Delete ${file.path}`} title="Delete" className={`${iconButton} hover:text-danger`}>
-              <LuTrash2 size={14} />
-            </Button>
+            {onDelete && (
+              <Button onClick={() => onDelete(file)} aria-label={`Delete ${file.path}`} title="Delete" className={`${iconButton} hover:text-danger`}>
+                <LuTrash2 size={14} />
+              </Button>
+            )}
           </span>
         </li>
       ))}

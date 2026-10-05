@@ -2,7 +2,8 @@ import { createContext, use, useCallback, useMemo, useState, type ReactNode } fr
 import { useLocation, useNavigate } from "react-router";
 
 import { DeleteConfirmDialog, type DeleteTarget } from "~/components/ui/delete-confirm-dialog";
-import { setToken, setWorkspaceId } from "~/lib/api";
+import { setWorkspaceId } from "~/lib/api";
+import { queryClient } from "~/lib/query-client";
 import { trex, type ApiProject, type ApiSession, type ApiUser } from "~/lib/trex";
 import { useUiState } from "~/lib/ui-state";
 import { emptyWorkspace, workspaceOf, type Account, type Workspace } from "~/lib/workspace";
@@ -78,10 +79,10 @@ export function WorkspaceProvider({ account, children }: { account: Account; chi
   const logout = useCallback(() => {
     trex
       .logout()
-      .catch((error) => console.warn("could not revoke the session token", error))
+      .catch((error) => console.warn("could not end the session", error))
       .finally(() => {
-        setToken(null);
         setWorkspaceId(null);
+        queryClient.clear();
         navigate("/auth", { replace: true });
       });
   }, [navigate]);

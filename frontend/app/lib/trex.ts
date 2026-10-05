@@ -1,10 +1,19 @@
-import { api, encodePath } from "./api";
+import { api, ApiError, encodePath } from "./api";
 
 // shapes of the trex api, see /docs on the trex server
 
 export type ApiUser = { id: string; email: string; name: string; role: "user" | "admin"; created_at: number };
 export type ApiWorkspace = { id: string; name: string; plan: string; role: string; credits: number; created_at: number };
-export type ApiToken = { token: string; user: ApiUser; workspaces: ApiWorkspace[] };
+export type ApiSignInSession = {
+  id: string;
+  ip: string | null;
+  last_ip: string | null;
+  user_agent: string | null;
+  current: boolean;
+  created_at: number;
+  last_used_at: number;
+  expires_at: number;
+};
 export type ApiMe = { user: ApiUser; workspaces: ApiWorkspace[] };
 export type List<T> = { object: "list"; data: T[]; has_more: boolean };
 
@@ -64,12 +73,33 @@ export type ApiSandboxFile = { path: string; size: number; modified_at: number }
 
 export type ApiFile = { path: string; size: number; modified_at: number };
 
-export type ApiAdminWorkspace = { id: string; name: string; plan: string; credits: number; owner_email: string | null; created_at: number };
+export type ApiAdminWorkspace = { id: string; name: string; plan: string; credits: number; owner_email: string | null; allowed_models: string[] | null; created_at: number };
+export type ApiAdminUser = { id: string; email: string; name: string; role: "user" | "admin"; workspaces: number; created_at: number; last_active_at: number | null };
+export type ApiModelUsage = { model: string; credits: number; input_tokens: number; output_tokens: number; responses: number };
+export type ApiOverview = {
+  users: number;
+  admins: number;
+  workspaces: number;
+  chats: number;
+  running: number;
+  spend_today: number;
+  tokens_today: number;
+  spend_month: number;
+  tokens_month: number;
+  top_models: ApiModelUsage[];
+};
+export type ApiUsageReport = {
+  days: number;
+  daily: { day: number; credits: number; input_tokens: number; output_tokens: number; responses: number }[];
+  models: ApiModelUsage[];
+  workspaces: { workspace: string; name: string; credits: number; tokens: number; responses: number }[];
+};
+export type ApiLogLine = { seq: number; time: number; level: "error" | "warn" | "info" | "debug" | "trace"; target: string; message: string; fields: string };
 
 export type ApiPlan = { id: string; name: string; monthly_credits: number };
 export type ApiLedgerEntry = { id: string; amount: number; balance: number; kind: "grant" | "usage" | "adjustment"; description: string; created_at: number };
 
-export type ApiCredits = { balance: number; plan: { id: string; name: string; monthly_credits: number } | null; enforced: boolean };
+export type ApiCredits = { balance: number; plan: { id: string; name: string; monthly_credits: number } | null };
 
 const MAX_PAGE = 100;
 
@@ -85,9 +115,22 @@ async function all<T extends { id: string }>(path: string): Promise<T[]> {
   }
 }
 
+// the signed-in account, or null when the session cookie is missing or expired
+export async function signedIn(): Promise<ApiMe | null> {
+  try {
+    return await trex.me();
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) return null;
+    throw error;
+  }
+}
+
 export const trex = {
-  signup: (body: { name: string; email: string; password: string }) => api<ApiToken>("POST", "/auth/signup", body),
-  login: (body: { email: string; password: string }) => api<ApiToken>("POST", "/auth/login", body),
+  signup: (body: { name: string; email: string; password: string }) => api<ApiMe>("POST", "/auth/signup", body),
+  login: (body: { email: string; password: string }) => api<ApiMe>("POST", "/auth/login", body),
+  signInSessions: () => api<List<ApiSignInSession>>("GET", "/me/sessions").then((list) => list.data),
+  endSignInSession: (id: string) => api<void>("DELETE", `/me/sessions/${id}`),
+  signOutOthers: () => api<void>("POST", "/me/sessions/sign_out_others"),
   logout: () => api<void>("POST", "/auth/logout"),
   me: () => api<ApiMe>("GET", "/me"),
   models: () => api<List<ApiModel>>("GET", "/models").then((list) => list.data),
@@ -97,6 +140,17 @@ export const trex = {
     adjustCredits: (workspace: string, body: { amount: number; description: string }) =>
       api<{ workspace: string; balance: number }>("POST", `/admin/workspaces/${workspace}/credits`, body),
     setPlan: (workspace: string, plan: string) => api<void>("POST", `/admin/workspaces/${workspace}/plan`, { plan }),
+    setModels: (workspace: string, models: string[] | null) => api<void>("PATCH", `/admin/workspaces/${workspace}`, { allowed_models: models }),
+    models: () => api<List<ApiModel>>("GET", "/admin/models").then((list) => list.data),
+    overview: () => api<ApiOverview>("GET", "/admin/overview"),
+    usage: (days: number) => api<ApiUsageReport>("GET", `/admin/usage?days=${days}`),
+    users: () => api<List<ApiAdminUser>>("GET", "/admin/users").then((list) => list.data),
+    setRole: (user: string, role: "user" | "admin") => api<void>("PATCH", `/admin/users/${user}`, { role }),
+    signOut: (user: string) => api<void>("POST", `/admin/users/${user}/sign_out`),
+    signInSessions: (user: string) => api<List<ApiSignInSession>>("GET", `/admin/users/${user}/sessions`).then((list) => list.data),
+    endSignInSession: (user: string, session: string) => api<void>("DELETE", `/admin/users/${user}/sessions/${session}`),
+    library: (workspace: string) => api<List<ApiFile>>("GET", `/admin/workspaces/${workspace}/library`).then((list) => list.data),
+    logs: () => api<List<ApiLogLine>>("GET", "/admin/logs?limit=1000").then((list) => list.data),
   },
   plans: () => api<List<ApiPlan>>("GET", "/plans").then((list) => list.data),
   ledger: (startingAfter?: string) => api<List<ApiLedgerEntry>>("GET", `/credits/ledger?limit=50${startingAfter ? `&starting_after=${startingAfter}` : ""}`),

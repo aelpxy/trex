@@ -514,7 +514,7 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
   const fail = useCallback((error: unknown) => {
     const event: ChatEvent =
       error instanceof ApiError && error.type === "insufficient_credits_error"
-        ? { type: "run.failed", title: "Your balance ran out", detail: "It tops up with your plan each month, or ask an admin to add funds.", retry: false }
+        ? { type: "run.failed", title: "Your balance ran out", detail: "It tops up with your plan each month, or add funds.", retry: false }
         : { type: "run.failed", title: "Couldn't send the message", detail: error instanceof Error ? error.message : String(error), retry: false };
     updateLast((message) => applyEvent(message, event));
   }, [updateLast]);

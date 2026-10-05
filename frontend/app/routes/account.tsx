@@ -1,21 +1,27 @@
 import { useState, type FormEvent, type ReactNode } from "react";
+import { useMutation, useQueryClient, useSuspenseInfiniteQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { useRevalidator } from "react-router";
 
+import { SessionList } from "~/components/account/session-list";
 import { Button } from "~/components/ui/button";
 import { Page } from "~/components/ui/page";
 import { focusRing } from "~/components/ui/styles";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { formatUsd } from "~/lib/credits";
 import { pageTitle } from "~/lib/meta";
-import { trex, type ApiLedgerEntry } from "~/lib/trex";
-
-import type { Route } from "./+types/account";
+import { queries } from "~/lib/queries";
+import { queryClient } from "~/lib/query-client";
+import { trex, type ApiSignInSession } from "~/lib/trex";
 
 export const meta = () => pageTitle("Account");
 
 export async function clientLoader() {
-  const [credits, ledger] = await Promise.all([trex.credits(), trex.ledger()]);
-  return { credits, ledger };
+  await Promise.all([
+    queryClient.ensureQueryData(queries.credits()),
+    queryClient.ensureInfiniteQueryData(queries.ledger()),
+    queryClient.ensureQueryData(queries.signInSessions()),
+  ]);
+  return null;
 }
 
 const MIN_PASSWORD_LENGTH = 8;
@@ -32,8 +38,8 @@ function Section({ title, description, children }: { title: string; description?
   );
 }
 
-function Status({ error, saved }: { error: string | null; saved: string | null }) {
-  if (error) return <p role="alert" className="text-xs text-danger">{error}</p>;
+function Status({ error, saved }: { error: unknown; saved: string | null }) {
+  if (error) return <p role="alert" className="text-xs text-danger">{errorText(error)}</p>;
   if (saved) return <p role="status" className="text-xs text-muted">{saved}</p>;
   return null;
 }
@@ -42,20 +48,12 @@ function ProfileForm() {
   const { profile } = useWorkspace();
   const revalidator = useRevalidator();
   const [name, setName] = useState(profile.name);
-  const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
+  // the profile comes from the app layout's loader, so it reloads to show the new name everywhere
+  const update = useMutation({ mutationFn: trex.updateMe, onSuccess: () => revalidator.revalidate() });
 
-  async function save(event: FormEvent) {
+  function save(event: FormEvent) {
     event.preventDefault();
-    setError(null);
-    setSaved(null);
-    try {
-      await trex.updateMe({ name: name.trim() });
-      setSaved("Saved");
-      await revalidator.revalidate();
-    } catch (cause) {
-      setError(errorText(cause));
-    }
+    update.mutate({ name: name.trim() });
   }
 
   return (
@@ -69,8 +67,8 @@ function ProfileForm() {
         <input value={profile.email} disabled className="ui-input" />
       </label>
       <div className="flex items-center gap-3">
-        <Button type="submit" disabled={!name.trim() || name.trim() === profile.name}>Save</Button>
-        <Status error={error} saved={saved} />
+        <Button type="submit" disabled={!name.trim() || name.trim() === profile.name || update.isPending}>Save</Button>
+        <Status error={update.error} saved={update.isSuccess ? "Saved" : null} />
       </div>
     </form>
   );
@@ -79,21 +77,19 @@ function ProfileForm() {
 function PasswordForm() {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
+  const change = useMutation({ mutationFn: trex.changePassword });
 
-  async function save(event: FormEvent) {
+  function save(event: FormEvent) {
     event.preventDefault();
-    setError(null);
-    setSaved(null);
-    try {
-      await trex.changePassword({ current_password: current, new_password: next });
-      setCurrent("");
-      setNext("");
-      setSaved("Password changed. Other devices were signed out.");
-    } catch (cause) {
-      setError(errorText(cause));
-    }
+    change.mutate(
+      { current_password: current, new_password: next },
+      {
+        onSuccess: () => {
+          setCurrent("");
+          setNext("");
+        },
+      },
+    );
   }
 
   return (
@@ -115,30 +111,43 @@ function PasswordForm() {
         />
       </label>
       <div className="flex items-center gap-3">
-        <Button type="submit" disabled={!current || next.length < MIN_PASSWORD_LENGTH}>Change password</Button>
-        <Status error={error} saved={saved} />
+        <Button type="submit" disabled={!current || next.length < MIN_PASSWORD_LENGTH || change.isPending}>Change password</Button>
+        <Status error={change.error} saved={change.isSuccess ? "Password changed. Other devices were signed out." : null} />
       </div>
     </form>
   );
 }
 
+function Devices() {
+  const queryClient = useQueryClient();
+  const { data: sessions } = useSuspenseQuery(queries.signInSessions());
+  const refresh = () => queryClient.invalidateQueries({ queryKey: queries.signInSessions().queryKey });
+  const end = useMutation({
+    mutationFn: (session: ApiSignInSession) => trex.endSignInSession(session.id),
+    // signing out this device ends the session the app runs on
+    onSuccess: (_, session) => (session.current ? window.location.assign("/auth") : refresh()),
+  });
+  const others = useMutation({ mutationFn: trex.signOutOthers, onSuccess: refresh });
+  const hasOthers = sessions.some((session) => !session.current);
+
+  return (
+    <div className="space-y-3">
+      <SessionList sessions={sessions} onEnd={(session) => end.mutate(session)} ending={end.isPending ? end.variables.id : null} />
+      <div className="flex items-center gap-3">
+        <Button variant="quiet" onClick={() => others.mutate()} disabled={!hasOthers || others.isPending}>
+          Sign out all other devices
+        </Button>
+        <Status error={end.error ?? others.error} saved={others.isSuccess ? "Other devices were signed out." : null} />
+      </div>
+    </div>
+  );
+}
+
 const KIND_LABEL = { grant: "Grant", usage: "Usage", adjustment: "Adjustment" };
 
-function Ledger({ initial, hasMore: initialHasMore }: { initial: ApiLedgerEntry[]; hasMore: boolean }) {
-  const [entries, setEntries] = useState(initial);
-  const [hasMore, setHasMore] = useState(initialHasMore);
-  const [loading, setLoading] = useState(false);
-
-  async function more() {
-    setLoading(true);
-    try {
-      const page = await trex.ledger(entries.at(-1)?.id);
-      setEntries((current) => [...current, ...page.data]);
-      setHasMore(page.has_more);
-    } finally {
-      setLoading(false);
-    }
-  }
+function Ledger() {
+  const { data, hasNextPage, fetchNextPage, isFetchingNextPage } = useSuspenseInfiniteQuery(queries.ledger());
+  const entries = data.pages.flatMap((page) => page.data);
 
   if (entries.length === 0) return <p className="text-sm text-muted">No activity yet.</p>;
   return (
@@ -171,10 +180,10 @@ function Ledger({ initial, hasMore: initialHasMore }: { initial: ApiLedgerEntry[
           </tbody>
         </table>
       </div>
-      {hasMore && (
+      {hasNextPage && (
         <div className="mt-3 flex justify-center">
-          <Button variant="quiet" onClick={() => void more()} disabled={loading}>
-            {loading ? "Loading…" : "Show older"}
+          <Button variant="quiet" onClick={() => void fetchNextPage()} disabled={isFetchingNextPage}>
+            {isFetchingNextPage ? "Loading…" : "Show older"}
           </Button>
         </div>
       )}
@@ -182,14 +191,14 @@ function Ledger({ initial, hasMore: initialHasMore }: { initial: ApiLedgerEntry[
   );
 }
 
-export default function Account({ loaderData }: Route.ComponentProps) {
-  const { credits, ledger } = loaderData;
+export default function Account() {
+  const { data: credits } = useSuspenseQuery(queries.credits());
   const allowance = credits.plan?.monthly_credits ?? 0;
   const share = allowance > 0 ? Math.max(0, Math.min(1, credits.balance / allowance)) : 0;
 
   return (
     <Page title="Account">
-      <Section title="Balance" description={credits.enforced ? "Each model response is charged by its tokens. Your plan tops the balance up once a month." : "Credits are tracked but not enforced on this server."}>
+      <Section title="Balance" description={credits.plan ? "Each model response is charged by its tokens. Your plan tops the balance up once a month. At $0 you can't send messages." : "Each model response is charged by its tokens. At $0 you can't send messages until an admin adds funds."}>
         <div className="ui-card p-5">
           <div className="flex items-baseline justify-between gap-4">
             <p className="text-3xl font-medium tracking-tight tabular-nums">{formatUsd(credits.balance)}</p>
@@ -203,10 +212,13 @@ export default function Account({ loaderData }: Route.ComponentProps) {
         </div>
       </Section>
       <Section title="Activity">
-        <Ledger initial={ledger.data} hasMore={ledger.has_more} />
+        <Ledger />
       </Section>
       <Section title="Profile">
         <ProfileForm />
+      </Section>
+      <Section title="Devices" description="Browsers signed in to your account. Sign out any you don't recognize.">
+        <Devices />
       </Section>
       <Section title="Password" description={`At least ${MIN_PASSWORD_LENGTH} characters. Changing it signs out your other devices.`}>
         <PasswordForm />

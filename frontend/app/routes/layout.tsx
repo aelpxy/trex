@@ -13,8 +13,8 @@ import { DesktopSidebar } from "~/components/sidebar/desktop-sidebar";
 import { MobileHeader } from "~/components/sidebar/mobile-header";
 import { setModels } from "~/components/chat/models";
 import { WorkspaceProvider } from "~/components/workspace/workspace-provider";
-import { getToken, setWorkspaceId } from "~/lib/api";
-import { trex } from "~/lib/trex";
+import { setWorkspaceId } from "~/lib/api";
+import { signedIn, trex } from "~/lib/trex";
 import { loadUiState, UiStateProvider } from "~/lib/ui-state";
 
 import type { Route } from "./+types/layout";
@@ -23,9 +23,9 @@ const ICON_DEFAULTS = { attr: { "aria-hidden": true } };
 
 // the account loads once; navigating between chats doesn't refetch it
 export async function clientLoader() {
-  if (!getToken()) throw redirect("/auth");
   const uiState = loadUiState();
-  const me = await trex.me();
+  const me = await signedIn();
+  if (!me) throw redirect("/auth");
   const workspace = me.workspaces.find((candidate) => candidate.id === uiState.workspaceId) ?? me.workspaces[0];
   setWorkspaceId(workspace.id);
   const [models, projects, sessions] = await Promise.all([trex.models(), trex.projects(), trex.sessions()]);
@@ -33,7 +33,8 @@ export async function clientLoader() {
   return { uiState: { ...uiState, workspaceId: workspace.id }, account: { me, workspaceId: workspace.id, projects, sessions } };
 }
 
-export const shouldRevalidate = () => false;
+// navigating between chats keeps the account; an explicit revalidate, like after a rename, reloads it
+export const shouldRevalidate = ({ currentUrl, nextUrl }: { currentUrl: URL; nextUrl: URL }) => currentUrl.href === nextUrl.href;
 
 export default function Layout({ loaderData }: Route.ComponentProps) {
   const navigation = useNavigation();

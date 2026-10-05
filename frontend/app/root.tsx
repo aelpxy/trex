@@ -10,7 +10,10 @@ import {
 import type { Route } from "./+types/root";
 import geistFont from "@fontsource-variable/geist/files/geist-latin-wght-normal.woff2?url";
 import geistMonoFont from "@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2?url";
+import { QueryClientProvider } from "@tanstack/react-query";
+
 import { APP_NAME, pageTitle } from "~/lib/meta";
+import { queryClient } from "~/lib/query-client";
 
 import "./app.css";
 
@@ -45,7 +48,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  return <Outlet />;
+  return (
+    <QueryClientProvider client={queryClient}>
+      <Outlet />
+    </QueryClientProvider>
+  );
 }
 
 export function HydrateFallback() {
