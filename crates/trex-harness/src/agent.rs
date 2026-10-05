@@ -11,12 +11,12 @@ use async_openai::{
         OutputItem, ReasoningEffort, Response, ResponseErrorCode, ResponseStreamEvent, Tool,
     },
 };
-use futures::{StreamExt, future::join_all};
+use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, watch},
     time::{sleep, timeout},
 };
-use trex_sandbox::{OpenShell, Sandbox};
+use trex_sandbox::OpenShell;
 use trex_store::library::Library;
 use uuid::Uuid;
 
@@ -25,6 +25,7 @@ use crate::{
     history,
     model::{Model, Turn},
     question::{self, ASK_USER},
+    sandbox::LazySandbox,
     tool::{ToolContext, Tools},
 };
 
@@ -49,6 +50,18 @@ so that you can continue it later from the summary alone. Do not call any tools.
 - what remains to be done, in order, and the immediate next step\n\
 Be specific and complete; anything left out is forgotten. Reply with only the summary.";
 
+// messages the user sent while a run was working, delivered between turns
+pub trait Inbox: Send + Sync {
+    // removes and returns the waiting messages, oldest first
+    fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<String>>>;
+}
+
+pub struct Steering<'a> {
+    pub inbox: &'a dyn Inbox,
+    // each change aborts the current turn; the run then continues with the inbox
+    pub interrupts: watch::Receiver<()>,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum RunOutcome {
     Completed,
@@ -62,12 +75,13 @@ pub struct Agent<'a> {
     pub model: &'a Model,
     pub tools: &'a Tools,
     pub openshell: &'a OpenShell,
-    pub sandbox: &'a Sandbox,
+    pub sandbox: &'a LazySandbox<'a>,
     pub instructions: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub max_turns: usize,
     // requests sharing a key are routed to the same prompt cache
     pub cache_key: Option<String>,
+    pub steering: Option<Steering<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +95,12 @@ struct Sampled {
     calls: Vec<FunctionToolCall>,
     text: String,
     context_tokens: u64,
+}
+
+enum Step {
+    Continue,
+    Completed,
+    NeedsInput,
 }
 
 enum Failure {
@@ -133,58 +153,32 @@ impl Agent<'_> {
 
         for turn in 0..self.max_turns {
             tracing::debug!(turn, model = self.model.id(), "starting turn");
+            self.receive_messages(history, events).await?;
 
-            let sampled = self.sample(history, events).await?;
-            history.extend(sampled.items);
-            if sampled.calls.is_empty() {
-                send(events, Event::Done).await?;
-                return Ok(RunOutcome::Completed);
+            // an interrupt sent before the messages were taken is already answered by them
+            let mut interrupts = self.steering.as_ref().map(|s| s.interrupts.clone());
+            if let Some(interrupts) = &mut interrupts {
+                interrupts.mark_unchanged();
             }
-
-            let (asks, calls): (Vec<_>, Vec<_>) = sampled
-                .calls
-                .into_iter()
-                .partition(|call| call.name == ASK_USER);
-
-            let results = join_all(calls.iter().map(|call| self.call_tool(call, events))).await;
-            let mut output_chars = 0;
-            for (call, output) in calls.into_iter().zip(results) {
-                let output = output?;
-                output_chars += output.len();
-                history.push(output_item(call.call_id, output));
-            }
-
-            let mut asked = false;
-            for call in asks {
-                match question::parse(&call.arguments) {
-                    Ok(questions) => {
-                        send(
-                            events,
-                            Event::Question {
-                                call_id: call.call_id,
-                                questions,
-                            },
-                        )
-                        .await?;
-                        asked = true;
+            let step = tokio::select! {
+                step = self.step(history, events) => Some(step?),
+                _ = interrupted(interrupts) => None,
+            };
+            match step {
+                Some(Step::Continue) => {}
+                Some(Step::Completed) => {
+                    if self.receive_messages(history, events).await? {
+                        continue;
                     }
-                    Err(error) => {
-                        history.push(output_item(call.call_id, format!("error: {error:#}")));
-                    }
+                    send(events, Event::Done).await?;
+                    return Ok(RunOutcome::Completed);
                 }
-            }
-            if asked {
-                return Ok(RunOutcome::NeedsInput);
-            }
-
-            let context_tokens = sampled.context_tokens + (output_chars / CHARS_PER_TOKEN) as u64;
-            if context_tokens >= self.compact_threshold() {
-                tracing::info!(
-                    context_tokens,
-                    model = self.model.id(),
-                    "compacting context"
-                );
-                self.compact(history, events).await?;
+                Some(Step::NeedsInput) => return Ok(RunOutcome::NeedsInput),
+                None => {
+                    tracing::info!(turn, "turn interrupted by the user");
+                    history::close_dangling_calls(history);
+                    send(events, Event::Interrupted).await?;
+                }
             }
         }
 
@@ -192,6 +186,88 @@ impl Agent<'_> {
             "run stopped after reaching the limit of {} turns",
             self.max_turns
         )
+    }
+
+    // appends messages the user sent while the agent was working; true if there were any
+    async fn receive_messages(
+        &self,
+        history: &mut Vec<InputItem>,
+        events: &mpsc::Sender<Event>,
+    ) -> anyhow::Result<bool> {
+        let Some(steering) = &self.steering else {
+            return Ok(false);
+        };
+        let messages = steering.inbox.take().await?;
+        let received = !messages.is_empty();
+        for content in messages {
+            history.push(history::user_message(&content));
+            send(events, Event::MessageReceived { content }).await?;
+        }
+        Ok(received)
+    }
+
+    // one model response and the tools it called; dropping it midway leaves history valid once
+    // dangling calls are closed, because each tool output is saved as soon as it finishes
+    async fn step(
+        &self,
+        history: &mut Vec<InputItem>,
+        events: &mpsc::Sender<Event>,
+    ) -> anyhow::Result<Step> {
+        let sampled = self.sample(history, events).await?;
+        history.extend(sampled.items);
+        if sampled.calls.is_empty() {
+            return Ok(Step::Completed);
+        }
+
+        let (asks, calls): (Vec<_>, Vec<_>) = sampled
+            .calls
+            .into_iter()
+            .partition(|call| call.name == ASK_USER);
+
+        let mut running: FuturesUnordered<_> = calls
+            .iter()
+            .map(|call| async move { (call, self.call_tool(call, events).await) })
+            .collect();
+        let mut output_chars = 0;
+        while let Some((call, output)) = running.next().await {
+            let output = output?;
+            output_chars += output.len();
+            history.push(output_item(call.call_id.clone(), output));
+        }
+
+        let mut asked = false;
+        for call in asks {
+            match question::parse(&call.arguments) {
+                Ok(questions) => {
+                    send(
+                        events,
+                        Event::Question {
+                            call_id: call.call_id,
+                            questions,
+                        },
+                    )
+                    .await?;
+                    asked = true;
+                }
+                Err(error) => {
+                    history.push(output_item(call.call_id, format!("error: {error:#}")));
+                }
+            }
+        }
+        if asked {
+            return Ok(Step::NeedsInput);
+        }
+
+        let context_tokens = sampled.context_tokens + (output_chars / CHARS_PER_TOKEN) as u64;
+        if context_tokens >= self.compact_threshold() {
+            tracing::info!(
+                context_tokens,
+                model = self.model.id(),
+                "compacting context"
+            );
+            self.compact(history, events).await?;
+        }
+        Ok(Step::Continue)
     }
 
     fn compact_threshold(&self) -> u64 {
@@ -319,7 +395,10 @@ impl Agent<'_> {
         let mut seen = HashSet::new();
         loop {
             sleep(ACCESS_POLL_INTERVAL).await;
-            let requests = match self.openshell.pending_access(self.sandbox).await {
+            let Some(sandbox) = self.sandbox.get_if_ready() else {
+                continue;
+            };
+            let requests = match self.openshell.pending_access(sandbox).await {
                 Ok(requests) => requests,
                 Err(error) => {
                     tracing::warn!(
@@ -543,6 +622,16 @@ impl Agent<'_> {
         .await?;
         Ok(output)
     }
+}
+
+async fn interrupted(interrupts: Option<watch::Receiver<()>>) {
+    // without steering, or once the sender is gone, nothing can interrupt
+    if let Some(mut interrupts) = interrupts
+        && interrupts.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending().await
 }
 
 fn retry_delay(attempt: u32) -> Duration {
@@ -770,6 +859,7 @@ mod tests {
         let (url, proxy) = start_proxy(test_base_url(), faults).await;
         let model = test_model_via(&url, 400_000);
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let library = Library::in_memory();
         let tools = Tools::standard().unwrap();
         let agent = Agent {
@@ -783,6 +873,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Low),
             max_turns: 5,
             cache_key: None,
+            steering: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -826,6 +917,7 @@ mod tests {
         // tiny, so every tool turn crosses the threshold and the task spans several checkpoints
         let model = test_model_via(&url, 1_000);
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let library = Library::in_memory();
         let tools = Tools::standard().unwrap();
         let agent = Agent {
@@ -839,6 +931,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Low),
             max_turns: 10,
             cache_key: None,
+            steering: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -862,12 +955,177 @@ mod tests {
         assert_eq!(summaries, compacted);
     }
 
+    // hands out one scripted batch of messages per take
+    struct ScriptedInbox(Mutex<VecDeque<Vec<String>>>);
+
+    impl Inbox for ScriptedInbox {
+        fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<String>>> {
+            let batch = self.0.lock().unwrap().pop_front().unwrap_or_default();
+            Box::pin(async move { Ok(batch) })
+        }
+    }
+
+    fn user_messages(history: &[InputItem]) -> Vec<String> {
+        history
+            .iter()
+            .filter_map(|item| {
+                let value = serde_json::to_value(item).unwrap();
+                (value["role"] == "user").then(|| value["content"].as_str().unwrap().to_owned())
+            })
+            .collect()
+    }
+
+    // needs the openshell gateway tunnel, <workspace>/certs/openshell, and trex.toml
+    #[tokio::test]
+    #[ignore]
+    async fn reads_messages_that_arrive_as_it_finishes() {
+        let models = test_models();
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
+        let library = Library::in_memory();
+        let tools = Tools::standard().unwrap();
+        let inbox = ScriptedInbox(Mutex::new(
+            [vec![], vec!["Now reply with only the word two.".into()]].into(),
+        ));
+        let (_interrupt, interrupts) = watch::channel(());
+        let agent = Agent {
+            user,
+            library: &library,
+            model: models.get(TEST_MODEL).unwrap(),
+            tools: &tools,
+            openshell: &openshell,
+            sandbox: &sandbox,
+            instructions: None,
+            reasoning_effort: Some(ReasoningEffort::Low),
+            max_turns: 5,
+            cache_key: None,
+            steering: Some(Steering {
+                inbox: &inbox,
+                interrupts,
+            }),
+        };
+        let (tx, mut rx) = mpsc::channel(1024);
+        let mut history = vec![history::user_message("Reply with only the word one.")];
+
+        let result = agent.run(&mut history, &tx).await;
+        openshell.delete_workspace(user).await.unwrap();
+
+        let mut received = Vec::new();
+        let mut text = String::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                Event::MessageReceived { content } => received.push(content),
+                Event::TextDelta { delta } => text.push_str(&delta),
+                _ => {}
+            }
+        }
+        assert_eq!(result.unwrap(), RunOutcome::Completed);
+        assert_eq!(received, ["Now reply with only the word two."]);
+        assert_eq!(
+            user_messages(&history),
+            [
+                "Reply with only the word one.",
+                "Now reply with only the word two."
+            ]
+        );
+        assert!(text.to_lowercase().trim_end().ends_with("two"), "{text}");
+    }
+
+    // needs the openshell gateway tunnel, <workspace>/certs/openshell, the dev image, and trex.toml
+    #[tokio::test]
+    #[ignore]
+    async fn interrupts_a_running_tool_to_read_a_message() {
+        let models = test_models();
+        let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
+        let library = Library::in_memory();
+        let tools = Tools::standard().unwrap();
+        let inbox = ScriptedInbox(Mutex::new(VecDeque::new()));
+        let (interrupt, interrupts) = watch::channel(());
+        let agent = Agent {
+            user,
+            library: &library,
+            model: models.get(TEST_MODEL).unwrap(),
+            tools: &tools,
+            openshell: &openshell,
+            sandbox: &sandbox,
+            instructions: None,
+            reasoning_effort: Some(ReasoningEffort::Low),
+            max_turns: 5,
+            cache_key: None,
+            steering: Some(Steering {
+                inbox: &inbox,
+                interrupts,
+            }),
+        };
+        let (tx, mut rx) = mpsc::channel(1024);
+        let mut history = vec![history::user_message(
+            "Use bash to run `sleep 100 && echo finished`, then reply with what it printed.",
+        )];
+
+        let (mut called, mut sent, mut interrupted) = (false, false, 0);
+        let (mut sent_at, mut reaction) = (None, None);
+        let mut text = String::new();
+        let result = {
+            let run = agent.run(&mut history, &tx);
+            tokio::pin!(run);
+            loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    Some(event) = rx.recv() => match event {
+                        Event::ToolCall { .. } => called = true,
+                        // usage marks the end of the response, so the tool is about to run
+                        Event::Usage(_) if called && !sent => {
+                            sent = true;
+                            // the inbox is filled before the signal, like the api does
+                            inbox.0.lock().unwrap().push_back(vec![
+                                "Stop that, I changed my mind. Reply with only the word stopped.".into(),
+                            ]);
+                            interrupt.send_replace(());
+                            sent_at = Some(Instant::now());
+                        }
+                        Event::Interrupted => {
+                            interrupted += 1;
+                            reaction = sent_at.map(|at| at.elapsed());
+                        }
+                        Event::TextDelta { delta } => text.push_str(&delta),
+                        _ => {}
+                    },
+                }
+            }
+        };
+        openshell.delete_workspace(user).await.unwrap();
+
+        assert_eq!(result.unwrap(), RunOutcome::Completed);
+        assert_eq!(interrupted, 1);
+        assert!(
+            reaction.is_some_and(|r| r < Duration::from_secs(5)),
+            "the sleep was not cut short: {reaction:?}"
+        );
+        assert!(text.to_lowercase().contains("stopped"), "{text}");
+        let outputs: Vec<String> = history
+            .iter()
+            .filter_map(|item| match item {
+                InputItem::Item(Item::FunctionCallOutput(output)) => {
+                    serde_json::to_value(&output.output).ok()
+                }
+                _ => None,
+            })
+            .map(|output| output.to_string())
+            .collect();
+        assert!(
+            outputs.iter().any(|output| output.contains("interrupted")),
+            "{outputs:?}"
+        );
+    }
+
     // needs the openshell gateway tunnel, <workspace>/certs/openshell, and trex.toml
     #[tokio::test]
     #[ignore]
     async fn runs_bash_in_sandbox() {
         let models = test_models();
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let tools = Tools::standard().unwrap();
 
         let library = Library::in_memory();
@@ -882,6 +1140,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Low),
             max_turns: 10,
             cache_key: None,
+            steering: None,
         };
 
         let mut history = vec![
@@ -937,6 +1196,7 @@ mod tests {
     async fn replays_encrypted_reasoning() {
         let models = test_models();
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let tools = Tools::standard().unwrap();
 
         let library = Library::in_memory();
@@ -951,6 +1211,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::High),
             max_turns: 10,
             cache_key: None,
+            steering: None,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -992,6 +1253,7 @@ mod tests {
     async fn surfaces_denied_network_access() {
         let models = test_models();
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let tools = Tools::standard().unwrap();
         let library = Library::in_memory();
         let agent = Agent {
@@ -1005,12 +1267,13 @@ mod tests {
             reasoning_effort: None,
             max_turns: 1,
             cache_key: None,
+            steering: None,
         };
 
         let script = "timeout 15 bash -c 'exec 3<>/dev/tcp/example.com/443'";
         let denied = openshell
             .output(
-                &sandbox,
+                sandbox.get_if_ready().unwrap(),
                 ["bash", "-c", script].map(String::from).to_vec(),
                 Vec::new(),
             )
@@ -1059,6 +1322,7 @@ mod tests {
     async fn asks_user_and_continues_with_the_answer() {
         let models = test_models();
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let library = Library::in_memory();
         let tools = Tools::standard().unwrap();
         let agent = Agent {
@@ -1072,6 +1336,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Low),
             max_turns: 10,
             cache_key: None,
+            steering: None,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1118,6 +1383,7 @@ mod tests {
     async fn continues_when_user_ignores_question() {
         let models = test_models();
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let library = Library::in_memory();
         let tools = Tools::standard().unwrap();
         let agent = Agent {
@@ -1131,6 +1397,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Low),
             max_turns: 5,
             cache_key: None,
+            steering: None,
         };
         let mut history = vec![
             EasyInputMessage::from(

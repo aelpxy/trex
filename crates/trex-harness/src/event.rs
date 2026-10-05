@@ -5,6 +5,9 @@ use trex_sandbox::AccessRequest;
 use crate::question::Question;
 
 pub enum Event {
+    SandboxCreating,
+    SandboxStarting,
+    SandboxReady,
     TextDelta {
         delta: String,
     },
@@ -41,6 +44,12 @@ pub enum Event {
     },
     Compacting,
     Compacted,
+    // a message the user sent mid-run, now appended to history
+    MessageReceived {
+        content: String,
+    },
+    // the user cut the turn short; its partial output should be discarded like a retry's
+    Interrupted,
     Done,
 }
 

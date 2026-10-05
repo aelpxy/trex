@@ -1,9 +1,12 @@
-use std::{env, fs, net::SocketAddr, path::PathBuf};
+use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, bail};
 use trex_harness::model::Models;
 use trex_sandbox::Policy;
 use trex_store::library::{Library, S3Config};
+
+// restarting a stopped sandbox takes about a second, so idle ones are stopped early
+const DEFAULT_SANDBOX_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct Config {
     pub addr: SocketAddr,
@@ -15,6 +18,7 @@ pub struct Config {
     pub models: Models,
     pub sandbox_image: String,
     pub sandbox_policy: Policy,
+    pub sandbox_idle_timeout: Duration,
     pub library: Library,
 }
 
@@ -64,6 +68,13 @@ impl Config {
         let sandbox_policy =
             Policy::from_yaml(&policy_yaml).with_context(|| format!("invalid {policy_path}"))?;
 
+        let sandbox_idle_timeout = match env::var("TREX_SANDBOX_IDLE_SECS") {
+            Ok(secs) => {
+                Duration::from_secs(secs.parse().context("invalid TREX_SANDBOX_IDLE_SECS")?)
+            }
+            Err(_) => DEFAULT_SANDBOX_IDLE_TIMEOUT,
+        };
+
         let library = load_library()?;
 
         let path = env::var("TREX_CONFIG").unwrap_or_else(|_| "trex.toml".into());
@@ -80,6 +91,7 @@ impl Config {
             models,
             sandbox_image,
             sandbox_policy,
+            sandbox_idle_timeout,
             library,
         })
     }

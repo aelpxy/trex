@@ -59,7 +59,10 @@ impl Tool for Grep {
         Box::pin(async move {
             let args: GrepArgs = serde_json::from_value(args)?;
             let argv = grep_argv(&args);
-            let output = ctx.openshell.output(ctx.sandbox, argv, Vec::new()).await?;
+            let output = ctx
+                .openshell
+                .output(ctx.sandbox().await?, argv, Vec::new())
+                .await?;
             // ripgrep exits 1 when nothing matched and 2 on errors
             match output.exit_code {
                 Some(0) => Ok(truncate(&String::from_utf8_lossy(&output.stdout))),
@@ -115,7 +118,10 @@ impl Tool for Glob {
             ]
             .map(String::from)
             .to_vec();
-            let output = ctx.openshell.output(ctx.sandbox, argv, Vec::new()).await?;
+            let output = ctx
+                .openshell
+                .output(ctx.sandbox().await?, argv, Vec::new())
+                .await?;
             match output.exit_code {
                 Some(0) => Ok(cap_lines(
                     &String::from_utf8_lossy(&output.stdout),

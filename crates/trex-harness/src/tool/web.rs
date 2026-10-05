@@ -281,6 +281,7 @@ fn error_chain(error: &dyn std::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::LazySandbox;
 
     #[test]
     fn classifies_addresses() {
@@ -355,6 +356,7 @@ mod tests {
         const PDF: &str = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf";
 
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let library = Library::in_memory();
         let (events, _rx) = mpsc::channel(16);
         let tools = Tools::standard().unwrap();
@@ -378,7 +380,7 @@ mod tests {
             call(json!({"url": PDF, "offset": null, "save_to": "/sandbox/dl/dummy.pdf"})).await;
         let header = openshell
             .output(
-                &sandbox,
+                sandbox.get_if_ready().unwrap(),
                 ["head", "-c", "5", "/sandbox/dl/dummy.pdf"]
                     .map(String::from)
                     .to_vec(),

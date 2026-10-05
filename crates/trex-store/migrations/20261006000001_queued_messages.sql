@@ -1,0 +1,1 @@
+ALTER TABLE sessions ADD COLUMN queued_messages JSONB NOT NULL DEFAULT '[]'::JSONB;

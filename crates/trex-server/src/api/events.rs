@@ -37,6 +37,9 @@ pub enum SessionEvent {
     RunStarted,
     #[serde(rename = "sandbox.creating")]
     SandboxCreating,
+    /// The conversation's stopped sandbox is starting again, with its files intact.
+    #[serde(rename = "sandbox.starting")]
+    SandboxStarting,
     #[serde(rename = "sandbox.ready")]
     SandboxReady,
     #[serde(rename = "text.delta")]
@@ -104,6 +107,14 @@ pub enum SessionEvent {
     /// Later requests start from the summary; it appears as a `compaction` item.
     #[serde(rename = "context.compacted")]
     ContextCompacted,
+    /// A message sent while the agent was working is now part of the conversation, after
+    /// everything streamed so far. The agent reads it before its next step.
+    #[serde(rename = "message.received")]
+    MessageReceived { content: String },
+    /// The user interrupted the agent with a message. Discard the text and reasoning streamed
+    /// since the last `tool.result`; tool calls without a result were stopped. The run continues.
+    #[serde(rename = "run.interrupted")]
+    RunInterrupted,
     #[serde(rename = "run.completed")]
     RunCompleted,
     /// Waiting for answers to the session's `pending_questions`.
@@ -125,6 +136,9 @@ pub enum ToolStream {
 // harness events become api events here; anything internal (review tokens, raw items) stays out
 pub fn to_api(event: Event) -> Option<SessionEvent> {
     let event = match event {
+        Event::SandboxCreating => SessionEvent::SandboxCreating,
+        Event::SandboxStarting => SessionEvent::SandboxStarting,
+        Event::SandboxReady => SessionEvent::SandboxReady,
         Event::TextDelta { delta } => SessionEvent::TextDelta { delta },
         Event::ReasoningDelta { delta } => SessionEvent::ReasoningDelta { delta },
         Event::ToolCall {
@@ -192,6 +206,8 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
         },
         Event::Compacting => SessionEvent::ContextCompacting,
         Event::Compacted => SessionEvent::ContextCompacted,
+        Event::MessageReceived { content } => SessionEvent::MessageReceived { content },
+        Event::Interrupted => SessionEvent::RunInterrupted,
         Event::Done => return None,
     };
     Some(event)

@@ -52,6 +52,10 @@ pub struct ListQuery {
 pub struct CreateMessage {
     #[schema(example = "Plot the CSV in my library")]
     content: String,
+    /// While a run is in progress, stop the agent's current step so it reads the message right
+    /// away instead of after the step finishes.
+    #[serde(default)]
+    interrupt: bool,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -138,6 +142,9 @@ pub struct Run {
     session: String,
     #[schema(example = "running")]
     status: &'static str,
+    /// True when the session was already running: the message waits for the agent's next step
+    /// and arrives on the events stream as `message.received`.
+    queued: bool,
 }
 
 /// A conversation item, rendered by `type`.
@@ -352,7 +359,8 @@ pub async fn items(
 
 /// Send a message
 ///
-/// Starts a run; follow it on the events stream.
+/// Starts a run; follow it on the events stream. While a run is in progress the message is
+/// queued for the agent instead, and `interrupt` makes it stop the current step to read it.
 #[utoipa::path(
     post,
     operation_id = "create_message",
@@ -364,7 +372,7 @@ pub async fn items(
         (status = 202, body = Run),
         (status = 400, response = ErrorResponse),
         (status = 404, response = ErrorResponse),
-        (status = 409, description = "A run is already in progress", body = ErrorResponse),
+        (status = 409, description = "The run was changing state; retry", body = ErrorResponse),
     ),
 )]
 pub async fn create_message(
@@ -377,9 +385,9 @@ pub async fn create_message(
         return Err(ApiError::invalid("content must not be empty", "content"));
     }
     let session = find_session(&state, user, &id).await?;
-    let input = history::to_json(&[history::user_message(&body.content)])?;
-    runs::start(&state, user, &session, input).await?;
-    Ok((StatusCode::ACCEPTED, Json(run_object(&session))))
+    let started = runs::send_message(&state, user, &session, &body.content, body.interrupt).await?;
+    let queued = matches!(started, runs::Started::Queued);
+    Ok((StatusCode::ACCEPTED, Json(run_object(&session, queued))))
 }
 
 /// Answer questions
@@ -421,7 +429,7 @@ pub async fn create_answers(
     let item = question::answer_item(&pending.call_id, &pending.questions, &answers);
     let input = history::to_json(&[item])?;
     runs::start(&state, user, &session, input).await?;
-    Ok((StatusCode::ACCEPTED, Json(run_object(&session))))
+    Ok((StatusCode::ACCEPTED, Json(run_object(&session, false))))
 }
 
 /// Cancel the run
@@ -659,11 +667,12 @@ impl From<question::Question> for Question {
     }
 }
 
-fn run_object(session: &store::Session) -> Run {
+fn run_object(session: &store::Session, queued: bool) -> Run {
     Run {
         object: "run",
         session: ids::encode(SESSION, session.id),
         status: "running",
+        queued,
     }
 }
 

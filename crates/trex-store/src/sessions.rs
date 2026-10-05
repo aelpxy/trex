@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use anyhow::{Context, bail};
 use serde_json::Value;
-use sqlx::{FromRow, Row, postgres::PgRow};
+use sqlx::{FromRow, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::Store;
@@ -8,7 +10,7 @@ use crate::Store;
 // sqlx only accepts static sql, so the shared column list is spliced in at compile time
 macro_rules! columns {
     () => {
-        "id, user_id, model, reasoning_effort, sandbox, status, pending_question, last_error, \
+        "id, user_id, model, reasoning_effort, sandbox, sandbox_stopped, status, pending_question, last_error, \
          EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at, EXTRACT(EPOCH FROM updated_at)::BIGINT AS updated_at"
     };
 }
@@ -27,11 +29,34 @@ pub struct Session {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub sandbox: Option<String>,
+    pub sandbox_stopped: bool,
     pub status: SessionStatus,
     pub pending_question: Option<Value>,
     pub last_error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+// holds the session's row lock, so no run can start until the sandbox is marked stopped
+pub struct IdleSandbox {
+    pub session: Uuid,
+    pub user: Uuid,
+    pub sandbox: String,
+    tx: Transaction<'static, Postgres>,
+}
+
+impl IdleSandbox {
+    pub async fn mark_stopped(mut self) -> anyhow::Result<()> {
+        sqlx::query("UPDATE sessions SET sandbox_stopped = TRUE WHERE id = $1")
+            .bind(self.session)
+            .execute(&mut *self.tx)
+            .await
+            .context("failed to mark sandbox stopped")?;
+        self.tx
+            .commit()
+            .await
+            .context("failed to mark sandbox stopped")
+    }
 }
 
 pub struct UsageRecord<'a> {
@@ -75,6 +100,7 @@ impl FromRow<'_, PgRow> for Session {
             model: row.try_get("model")?,
             reasoning_effort: row.try_get("reasoning_effort")?,
             sandbox: row.try_get("sandbox")?,
+            sandbox_stopped: row.try_get("sandbox_stopped")?,
             status: SessionStatus::parse(&status)
                 .map_err(|error| sqlx::Error::Decode(error.into()))?,
             pending_question: row.try_get("pending_question")?,
@@ -172,6 +198,44 @@ impl Store {
         Ok(())
     }
 
+    // the oldest session whose sandbox has idled for `idle`; rows other instances hold are skipped
+    pub async fn next_idle_sandbox(&self, idle: Duration) -> anyhow::Result<Option<IdleSandbox>> {
+        let mut tx = self
+            .pg
+            .begin()
+            .await
+            .context("failed to find idle sandboxes")?;
+        let row = sqlx::query(
+            "SELECT id, user_id, sandbox FROM sessions \
+             WHERE sandbox IS NOT NULL AND NOT sandbox_stopped AND status <> 'running' \
+             AND updated_at < NOW() - MAKE_INTERVAL(secs => $1) \
+             ORDER BY updated_at LIMIT 1 FOR UPDATE SKIP LOCKED",
+        )
+        .bind(idle.as_secs_f64())
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to find idle sandboxes")?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(IdleSandbox {
+            session: row.try_get("id")?,
+            user: row.try_get("user_id")?,
+            sandbox: row.try_get("sandbox")?,
+            tx,
+        }))
+    }
+
+    pub async fn mark_sandbox_started(&self, user: Uuid, id: Uuid) -> anyhow::Result<()> {
+        sqlx::query("UPDATE sessions SET sandbox_stopped = FALSE WHERE id = $1 AND user_id = $2")
+            .bind(id)
+            .bind(user)
+            .execute(&self.pg)
+            .await
+            .context("failed to mark sandbox started")?;
+        Ok(())
+    }
+
     // the conditional update is what guarantees one run per session, even across trex instances
     pub async fn start_run(&self, user: Uuid, id: Uuid) -> anyhow::Result<Option<Session>> {
         let sql = concat!(
@@ -187,6 +251,7 @@ impl Store {
             .context("failed to start run")
     }
 
+    // refuses while messages are queued, so a message sent as the run ends is never left unread
     pub async fn finish_run(
         &self,
         user: Uuid,
@@ -194,10 +259,10 @@ impl Store {
         status: SessionStatus,
         pending_question: Option<&Value>,
         last_error: Option<&str>,
-    ) -> anyhow::Result<()> {
-        sqlx::query(
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
             "UPDATE sessions SET status = $3, pending_question = $4, last_error = $5, updated_at = NOW() \
-             WHERE id = $1 AND user_id = $2",
+             WHERE id = $1 AND user_id = $2 AND queued_messages = '[]'::JSONB",
         )
         .bind(id)
         .bind(user)
@@ -207,7 +272,40 @@ impl Store {
         .execute(&self.pg)
         .await
         .context("failed to finish run")?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
+    }
+
+    // only a running session takes messages into its queue; otherwise the caller starts a run
+    pub async fn queue_message(&self, user: Uuid, id: Uuid, content: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE sessions SET queued_messages = queued_messages || JSONB_BUILD_ARRAY($3::TEXT), updated_at = NOW() \
+             WHERE id = $1 AND user_id = $2 AND status = 'running'",
+        )
+        .bind(id)
+        .bind(user)
+        .bind(content)
+        .execute(&self.pg)
+        .await
+        .context("failed to queue message")?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn take_queued_messages(&self, user: Uuid, id: Uuid) -> anyhow::Result<Vec<String>> {
+        let queued: Option<Value> = sqlx::query_scalar(
+            "UPDATE sessions s SET queued_messages = '[]'::JSONB \
+             FROM (SELECT id, queued_messages FROM sessions WHERE id = $1 AND user_id = $2 FOR UPDATE) old \
+             WHERE s.id = old.id RETURNING old.queued_messages",
+        )
+        .bind(id)
+        .bind(user)
+        .fetch_optional(&self.pg)
+        .await
+        .context("failed to take queued messages")?;
+        queued
+            .map(serde_json::from_value)
+            .transpose()
+            .context("invalid queued messages")
+            .map(Option::unwrap_or_default)
     }
 
     // a run that was in flight when trex stopped can never finish, so it is marked failed on startup
@@ -360,17 +458,70 @@ mod tests {
                 .is_empty()
         );
 
+        assert!(
+            store
+                .queue_message(alice, session.id, "first")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .queue_message(alice, session.id, "second")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .queue_message(mallory, session.id, "evil")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .finish_run(alice, session.id, SessionStatus::Idle, None, None)
+                .await
+                .unwrap(),
+            "queued messages keep the run going"
+        );
+        assert!(
+            store
+                .take_queued_messages(mallory, session.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.take_queued_messages(alice, session.id).await.unwrap(),
+            ["first", "second"]
+        );
+        assert!(
+            store
+                .take_queued_messages(alice, session.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
         let question = json!({"call_id": "call_1"});
-        store
-            .finish_run(
-                alice,
-                session.id,
-                SessionStatus::NeedsInput,
-                Some(&question),
-                None,
-            )
-            .await
-            .unwrap();
+        assert!(
+            store
+                .finish_run(
+                    alice,
+                    session.id,
+                    SessionStatus::NeedsInput,
+                    Some(&question),
+                    None,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .queue_message(alice, session.id, "late")
+                .await
+                .unwrap(),
+            "only running sessions queue"
+        );
         let reloaded = store.session(alice, session.id).await.unwrap().unwrap();
         assert_eq!(reloaded.status, SessionStatus::NeedsInput);
         assert_eq!(reloaded.pending_question, Some(question));

@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod idle;
 mod logging;
 mod runs;
 
@@ -48,6 +49,10 @@ async fn main() -> anyhow::Result<()> {
         sandbox_policy: config.sandbox_policy,
         runs: Runs::default(),
     });
+    tokio::spawn(idle::stop_idle_sandboxes(
+        state.clone(),
+        config.sandbox_idle_timeout,
+    ));
 
     let listener = TcpListener::bind(config.addr).await?;
     tracing::info!(addr = %listener.local_addr()?, version = env!("CARGO_PKG_VERSION"), "listening");

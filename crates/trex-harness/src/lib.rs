@@ -4,6 +4,7 @@ pub mod history;
 pub mod library;
 pub mod model;
 pub mod question;
+pub mod sandbox;
 pub mod tool;
 
 #[cfg(test)]

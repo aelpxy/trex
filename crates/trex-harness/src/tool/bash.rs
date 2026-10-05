@@ -52,7 +52,10 @@ impl Tool for Bash {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)?;
             let argv = vec!["bash".to_owned(), "-c".to_owned(), args.command];
-            let mut stream = ctx.openshell.exec(ctx.sandbox, argv, Vec::new()).await?;
+            let mut stream = ctx
+                .openshell
+                .exec(ctx.sandbox().await?, argv, Vec::new())
+                .await?;
 
             let mut output = Vec::new();
             let mut exit_code = None;

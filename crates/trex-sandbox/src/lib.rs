@@ -1,9 +1,15 @@
-use std::{collections::HashMap, fmt::Write, fs, path::Path, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::Write,
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, bail};
 use futures::stream;
 use openshell_sdk::{
-    DeleteOptions, EdgeAuthInterceptor, ListOptions, OpenShellClient, SdkError,
+    DeleteOptions, EdgeAuthInterceptor, ListOptions, OpenShellClient, SandboxPhase, SdkError,
     raw::proto::{self, exec_sandbox_event::Payload, exec_sandbox_input},
 };
 use sha2::{Digest, Sha256};
@@ -18,6 +24,7 @@ const STDIN_CHUNK_BYTES: usize = 256 * 1024;
 const USER_LABEL: &str = "trex-user";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
+const PHASE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg(test)]
 const DEV_IMAGE: &str = "localhost/trex-sandbox:latest";
 
@@ -336,6 +343,47 @@ impl OpenShell {
         Ok(output)
     }
 
+    // frees the sandbox's compute; its files survive until it is started again
+    pub async fn stop(&self, sandbox: &Sandbox) -> anyhow::Result<()> {
+        self.client
+            .workspace(&sandbox.workspace)
+            .stop_sandbox(&sandbox.name)
+            .await
+            .context("failed to stop sandbox")?;
+        Ok(())
+    }
+
+    // brings a stopped sandbox back and waits until it runs commands; a running one is left alone
+    pub async fn start(&self, sandbox: &Sandbox) -> anyhow::Result<()> {
+        let client = self.client.workspace(&sandbox.workspace);
+        let deadline = Instant::now() + READY_TIMEOUT;
+        loop {
+            let phase = client
+                .get_sandbox(&sandbox.name)
+                .await
+                .context("failed to look up sandbox")?
+                .phase;
+            match phase {
+                SandboxPhase::Ready => return Ok(()),
+                SandboxPhase::Stopped => {
+                    client
+                        .start_sandbox(&sandbox.name)
+                        .await
+                        .context("failed to start sandbox")?;
+                    break;
+                }
+                SandboxPhase::Provisioning | SandboxPhase::Starting => break,
+                // a stop still in progress has to finish before the sandbox can start again
+                SandboxPhase::Stopping if Instant::now() < deadline => {
+                    tokio::time::sleep(PHASE_POLL_INTERVAL).await;
+                }
+                phase => bail!("sandbox cannot be started while {phase:?}"),
+            }
+        }
+        client.wait_ready(&sandbox.name, READY_TIMEOUT).await?;
+        Ok(())
+    }
+
     pub async fn delete(&self, sandbox: &Sandbox) -> anyhow::Result<()> {
         self.client
             .workspace(&sandbox.workspace)
@@ -613,6 +661,53 @@ mod tests {
     }
 
     // needs the gateway tunnel, certs, internet on the gateway host, and the image from images/sandbox built on it
+    // needs the openshell gateway tunnel, <workspace>/certs/openshell, and the dev image
+    #[tokio::test]
+    #[ignore]
+    async fn stopped_sandboxes_keep_their_files() {
+        let tls_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/openshell");
+        let openshell = OpenShell::connect("https://127.0.0.1:17670", &tls_dir)
+            .await
+            .unwrap();
+        let policy = Policy::from_yaml(include_str!("../../../sandbox-policy.yaml")).unwrap();
+        let user = Uuid::now_v7();
+        let workspace = openshell.ensure_workspace(user).await.unwrap();
+        let sandbox = openshell
+            .create(&workspace, Some(DEV_IMAGE.into()), Some(&policy))
+            .await
+            .unwrap();
+        let run = |script: &str| {
+            openshell.output(
+                &sandbox,
+                ["bash", "-c", script].map(String::from).to_vec(),
+                Vec::new(),
+            )
+        };
+
+        let written = run("mkdir -p /sandbox/project && echo kept > /sandbox/project/note.txt && pip install --quiet six && echo ok").await.unwrap();
+        openshell.start(&sandbox).await.unwrap();
+        openshell.stop(&sandbox).await.unwrap();
+        let while_stopped = run("echo up").await;
+        let started = Instant::now();
+        openshell.start(&sandbox).await.unwrap();
+        let start_time = started.elapsed();
+        let read = run("cat /sandbox/project/note.txt && python3 -c 'import six; print(\"six\")'")
+            .await
+            .unwrap();
+        eprintln!("start took {start_time:?}");
+
+        openshell.delete_workspace(user).await.unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&written.stdout).trim(), "ok");
+        assert!(while_stopped.map_or(true, |output| output.exit_code != Some(0)));
+        assert_eq!(
+            String::from_utf8_lossy(&read.stdout),
+            "kept\nsix\n",
+            "{}",
+            String::from_utf8_lossy(&read.stderr)
+        );
+    }
+
     #[tokio::test]
     #[ignore]
     async fn dev_image_tools_work_under_policy() {

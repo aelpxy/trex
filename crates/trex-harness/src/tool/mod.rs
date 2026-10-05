@@ -20,7 +20,7 @@ pub use self::{
     search::{Glob, Grep},
     web::WebFetch,
 };
-use crate::event::Event;
+use crate::{event::Event, sandbox::LazySandbox};
 
 // keeps a single noisy result from flooding the model context
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
@@ -30,9 +30,15 @@ pub struct ToolContext<'a> {
     pub user: Uuid,
     pub library: &'a Library,
     pub openshell: &'a OpenShell,
-    pub sandbox: &'a Sandbox,
+    pub sandbox: &'a LazySandbox<'a>,
     pub call_id: &'a str,
     pub events: &'a mpsc::Sender<Event>,
+}
+
+impl ToolContext<'_> {
+    pub async fn sandbox(&self) -> anyhow::Result<&Sandbox> {
+        self.sandbox.get(self.events).await
+    }
 }
 
 pub trait Tool: Send + Sync {
@@ -113,6 +119,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::sandbox::LazySandbox;
     use crate::test_support::sandbox_for_new_user;
 
     // needs the openshell gateway tunnel, <workspace>/certs/openshell, and the dev image
@@ -120,6 +127,7 @@ mod tests {
     #[ignore]
     async fn search_and_library_tools_in_sandbox() {
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let library = Library::in_memory();
         let (events, _rx) = mpsc::channel(64);
         let tools = Tools::standard().unwrap();

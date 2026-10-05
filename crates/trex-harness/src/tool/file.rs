@@ -170,7 +170,10 @@ async fn read(ctx: &ToolContext<'_>, path: &str) -> anyhow::Result<String> {
 
 pub(super) async fn read_bytes(ctx: &ToolContext<'_>, path: &str) -> anyhow::Result<Vec<u8>> {
     let argv = ["cat", "--", path].map(String::from).to_vec();
-    let output = ctx.openshell.output(ctx.sandbox, argv, Vec::new()).await?;
+    let output = ctx
+        .openshell
+        .output(ctx.sandbox().await?, argv, Vec::new())
+        .await?;
     if output.exit_code != Some(0) {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
@@ -183,7 +186,7 @@ pub(super) async fn write(ctx: &ToolContext<'_>, path: &str, content: &[u8]) -> 
     let argv = ["sh", "-c", script, "sh", path].map(String::from).to_vec();
     let output = ctx
         .openshell
-        .output(ctx.sandbox, argv, content.to_vec())
+        .output(ctx.sandbox().await?, argv, content.to_vec())
         .await?;
     if output.exit_code != Some(0) {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
@@ -250,6 +253,7 @@ mod tests {
     use trex_store::library::Library;
 
     use super::*;
+    use crate::sandbox::LazySandbox;
     use crate::{test_support::sandbox_for_new_user, tool::Tools};
 
     // needs the openshell gateway tunnel and <workspace>/certs/openshell: cargo test -- --ignored
@@ -257,6 +261,7 @@ mod tests {
     #[ignore]
     async fn file_tools_round_trip_in_sandbox() {
         let (openshell, user, sandbox) = sandbox_for_new_user().await;
+        let sandbox = LazySandbox::ready(sandbox);
         let (events, _rx) = mpsc::channel(64);
         let tools = Tools::standard().unwrap();
         let library = Library::in_memory();
@@ -294,7 +299,7 @@ mod tests {
         .await;
         let listing = openshell
             .output(
-                &sandbox,
+                sandbox.get_if_ready().unwrap(),
                 ["sh", "-c", "ls -A /tmp/trex\\ test; ls -A ."]
                     .map(String::from)
                     .to_vec(),
