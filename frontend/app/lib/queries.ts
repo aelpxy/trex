@@ -3,7 +3,7 @@ import { queryOptions } from "@tanstack/react-query";
 import { trex } from "./trex";
 
 const LOG_POLL_MS = 2000;
-export const LEDGER_PAGE_SIZE = 25;
+export const LEDGER_PAGE_SIZE = 10;
 
 // every server read the app caches, keyed so a change can invalidate exactly what it affects
 export const queries = {
