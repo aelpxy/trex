@@ -13,7 +13,7 @@ Backend, agent harness and web UI for a Codex/Claude Code-style app on the web. 
 | `crates/trex-eval` | End-to-end eval suite against a server it starts itself |
 | `frontend/` | React Router 8 SPA (`ssr: false`), TypeScript, Tailwind v4, Base UI, TanStack Query and Table |
 | `images/sandbox/Dockerfile`, `sandbox-policy.yaml` | Sandbox image and default network policy |
-| `Dockerfile`, `deploy/` | trex's image and the production deployment (podman-compose: trex, Postgres 18, Valkey, optional `cloudflared`; see `deploy/README.md`) |
+| `Dockerfile`, `deploy/` | trex's image and the production deployment (podman-compose: trex, Postgres 18, Valkey, optional `cloudflared`) |
 
 Shared dependency versions live in the root `[workspace.dependencies]`.
 
@@ -27,7 +27,7 @@ Shared dependency versions live in the root `[workspace.dependencies]`.
 - `trex` serves the built app (`web.rs`): release builds embed `frontend/build/client`, debug builds read it from disk
 - CI runs fmt, clippy `-D warnings`, unit tests, frontend typecheck and build
 - Sandbox image, on the gateway host: `podman build -t localhost/trex-sandbox:latest images/sandbox` (copy `images/sandbox` over with `scp` and build there; only new sandboxes get a new image); dev gateway tunnel: `ssh -fN -L 17670:127.0.0.1:17670 fedora-server`
-- Production runs on `fedora-server` from the git checkout `~/projects/trex` (secrets and data in its gitignored `deploy/`), behind a Cloudflare Tunnel. Update with `deploy/update.sh` after pushing: `podman-compose up --force-recreate` keeps the old image, and `cloudflared` depends on trex, so the script removes both containers before starting them. User-level services only on that host.
+- Deploying: update a host with `deploy/update.sh`, never `podman-compose up --force-recreate`, which keeps the old image.
 
 ## Config
 

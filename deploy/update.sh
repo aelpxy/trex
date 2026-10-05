@@ -1,14 +1,13 @@
 #!/bin/sh
-# pulls the latest code, rebuilds trex and swaps it in; the secrets and data in this folder stay
 set -eu
 cd "$(dirname "$0")"
 
 git -C .. pull --ff-only
 podman-compose build trex
 
-# podman-compose keeps a container's old image when recreating it, so trex is replaced outright;
-# cloudflared depends on it and goes first
-podman rm -f trex_cloudflared_1 trex_trex_1 >/dev/null 2>&1 || true
+for container in trex_cloudflared_1 trex_trex_1; do
+  if podman container exists "$container"; then podman rm -f "$container" >/dev/null; fi
+done
 if grep -q '^CLOUDFLARE_TUNNEL_TOKEN=.' .env; then
   podman-compose --profile tunnel up -d
 else
