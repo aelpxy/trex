@@ -1,5 +1,7 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 
+import { tokens } from "~/components/admin/format";
+import { Meter } from "~/components/ui/meter";
 import { Pagination, usePage } from "~/components/ui/pagination";
 import { formatUsd } from "~/lib/credits";
 import { LEDGER_PAGE_SIZE, queries } from "~/lib/queries";
@@ -10,7 +12,7 @@ const date = (seconds: number) => new Date(seconds * 1000).toLocaleString(undefi
 export function BalanceCard() {
   const { data: credits } = useSuspenseQuery(queries.credits());
   const allowance = credits.plan?.monthly_credits ?? 0;
-  const share = allowance > 0 ? Math.max(0, Math.min(1, credits.balance / allowance)) : 0;
+  const left = allowance > 0 ? Math.round(Math.max(0, Math.min(1, credits.balance / allowance)) * 100) : 0;
   return (
     <div className="ui-card p-5">
       <div className="flex items-baseline justify-between gap-4">
@@ -18,9 +20,59 @@ export function BalanceCard() {
         <p className="text-xs text-muted">{credits.plan ? `${credits.plan.name} plan · ${formatUsd(allowance)} a month` : "No plan"}</p>
       </div>
       {allowance > 0 && (
-        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-subtle" role="meter" aria-label="Balance left of this month's allowance" aria-valuemin={0} aria-valuemax={allowance} aria-valuenow={credits.balance}>
-          <div className="h-full rounded-full bg-ink transition-[width]" style={{ width: `${share * 100}%` }} />
+        <div className="mt-4">
+          <Meter label="Left of this month's allowance" value={credits.balance} max={allowance} detail={`${left}%`} valueText={`${formatUsd(credits.balance)} of ${formatUsd(allowance)} left`} />
         </div>
+      )}
+    </div>
+  );
+}
+
+const month = (seconds: number) => new Date(seconds * 1000).toLocaleDateString(undefined, { month: "long" });
+
+// this month's spend, and how it splits across models
+export function MonthUsage() {
+  const { data: usage } = useSuspenseQuery(queries.monthUsage());
+  // prices can be zero, and then tokens show the split instead
+  const bySpend = usage.credits > 0;
+  const total = bySpend ? usage.credits : usage.input_tokens + usage.output_tokens;
+  const stats = [
+    { label: "Spent", value: formatUsd(usage.credits) },
+    { label: "Responses", value: usage.responses.toLocaleString() },
+    { label: "Input tokens", value: tokens(usage.input_tokens) },
+    { label: "Output tokens", value: tokens(usage.output_tokens) },
+  ];
+
+  return (
+    <div className="ui-card p-5">
+      <p className="text-xs text-muted">Since {month(usage.period_start)} 1</p>
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+        {stats.map((stat) => (
+          <div key={stat.label} className="min-w-0">
+            <dt className="text-[11px] text-muted">{stat.label}</dt>
+            <dd className="mt-0.5 truncate text-base font-medium tabular-nums">{stat.value}</dd>
+          </div>
+        ))}
+      </dl>
+      {usage.models.length > 0 ? (
+        <div className="mt-5 space-y-3 border-t border-line pt-4">
+          {usage.models.map((model) => {
+            const value = bySpend ? model.credits : model.input_tokens + model.output_tokens;
+            const share = total > 0 ? Math.round((value / total) * 100) : 0;
+            return (
+              <Meter
+                key={model.model}
+                label={model.name}
+                value={value}
+                max={total}
+                detail={`${bySpend ? formatUsd(model.credits) : `${tokens(value)} tokens`} · ${share}%`}
+                valueText={`${share}% of this month's ${bySpend ? "spend" : "tokens"}`}
+              />
+            );
+          })}
+        </div>
+      ) : (
+        <p className="mt-4 text-sm text-muted">Nothing used yet this month.</p>
       )}
     </div>
   );

@@ -13,6 +13,7 @@ export default [
       index("routes/account/billing.tsx"),
       route("profile", "routes/account/profile.tsx"),
       route("devices", "routes/account/devices.tsx"),
+      route("appearance", "routes/account/appearance.tsx"),
     ]),
     route("admin", "routes/admin/layout.tsx", [
       index("routes/admin/overview.tsx"),

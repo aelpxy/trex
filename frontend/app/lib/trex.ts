@@ -106,7 +106,7 @@ export type ApiSandboxFile = { path: string; size: number; modified_at: number }
 export type ApiFile = { path: string; size: number; modified_at: number };
 
 export type ApiAdminWorkspace = { id: string; name: string; plan: string; credits: number; owner_email: string | null; allowed_models: string[] | null; created_at: number };
-export type ApiAdminUser = { id: string; email: string; name: string; role: "user" | "admin"; workspaces: number; credits: number | null; created_at: number; last_active_at: number | null };
+export type ApiAdminUser = { id: string; email: string; name: string; role: "user" | "admin"; workspaces: number; credits: number | null; created_at: number; last_active_at: number | null; suspended_at: number | null };
 export type ApiModelUsage = { model: string; credits: number; input_tokens: number; output_tokens: number; responses: number };
 export type ApiOverview = {
   users: number;
@@ -124,19 +124,27 @@ export type ApiUsageReport = {
   days: number;
   daily: { day: number; credits: number; input_tokens: number; output_tokens: number; responses: number }[];
   models: ApiModelUsage[];
-  workspaces: { workspace: string; name: string; credits: number; tokens: number; responses: number }[];
+  accounts: { user: string; name: string; email: string; credits: number; tokens: number; responses: number }[];
 };
 export type ApiLogLine = { seq: number; time: number; level: "error" | "warn" | "info" | "debug" | "trace"; target: string; message: string; fields: string };
 
 export type ApiPlan = { id: string; name: string; monthly_credits: number };
 export type ApiLedgerEntry = { id: string; amount: number; balance: number; kind: "grant" | "usage" | "adjustment"; description: string; created_at: number };
 
+export type ApiMonthUsage = {
+  period_start: number;
+  credits: number;
+  input_tokens: number;
+  output_tokens: number;
+  responses: number;
+  models: { model: string; name: string; credits: number; input_tokens: number; output_tokens: number; responses: number }[];
+};
 export type ApiCredits = { balance: number; plan: { id: string; name: string; monthly_credits: number } | null };
 
 const MAX_PAGE = 100;
 
-const pageQuery = (page: number, perPage: number, search: string) =>
-  new URLSearchParams({ page: String(page), limit: String(perPage), ...(search.trim() ? { q: search.trim() } : {}) }).toString();
+const pageQuery = (page: number, perPage: number, search: string, sort = "") =>
+  new URLSearchParams({ page: String(page), limit: String(perPage), ...(search.trim() ? { q: search.trim() } : {}), ...(sort ? { sort } : {}) }).toString();
 
 // every page, since the sidebar shows all chats and projects
 async function all<T extends { id: string }>(path: string): Promise<T[]> {
@@ -170,8 +178,9 @@ export const trex = {
   me: () => api<ApiMe>("GET", "/me"),
   models: () => api<List<ApiModel>>("GET", "/models").then((list) => list.data),
   credits: () => api<ApiCredits>("GET", "/credits"),
+  monthUsage: () => api<ApiMonthUsage>("GET", "/credits/usage"),
   admin: {
-    workspaces: (page: number, perPage: number, search: string) => api<Paged<ApiAdminWorkspace>>("GET", `/admin/workspaces?${pageQuery(page, perPage, search)}`),
+    workspaces: (page: number, perPage: number, search: string, sort = "") => api<Paged<ApiAdminWorkspace>>("GET", `/admin/workspaces?${pageQuery(page, perPage, search, sort)}`),
     adjustCredits: (workspace: string, body: { amount: number; description: string }) =>
       api<{ workspace: string; balance: number }>("POST", `/admin/workspaces/${workspace}/credits`, body),
     setPlan: (workspace: string, plan: string) => api<void>("POST", `/admin/workspaces/${workspace}/plan`, { plan }),
@@ -179,9 +188,11 @@ export const trex = {
     models: () => api<List<ApiModel>>("GET", "/admin/models").then((list) => list.data),
     overview: () => api<ApiOverview>("GET", "/admin/overview"),
     usage: (days: number) => api<ApiUsageReport>("GET", `/admin/usage?days=${days}`),
-    users: (page: number, perPage: number, search: string) => api<Paged<ApiAdminUser>>("GET", `/admin/users?${pageQuery(page, perPage, search)}`),
-    setRole: (user: string, role: "user" | "admin") => api<void>("PATCH", `/admin/users/${user}`, { role }),
+    users: (page: number, perPage: number, search: string, sort = "") => api<Paged<ApiAdminUser>>("GET", `/admin/users?${pageQuery(page, perPage, search, sort)}`),
+    updateUser: (user: string, changes: { role?: "user" | "admin"; suspended?: boolean }) => api<void>("PATCH", `/admin/users/${user}`, changes),
+    setPassword: (user: string, password: string) => api<void>("POST", `/admin/users/${user}/password`, { password }),
     signOut: (user: string) => api<void>("POST", `/admin/users/${user}/sign_out`),
+    deleteUser: (user: string) => api<void>("DELETE", `/admin/users/${user}`),
     signInSessions: (user: string) => api<List<ApiSignInSession>>("GET", `/admin/users/${user}/sessions`).then((list) => list.data),
     endSignInSession: (user: string, session: string) => api<void>("DELETE", `/admin/users/${user}/sessions/${session}`),
     library: (workspace: string) => api<List<ApiFile>>("GET", `/admin/workspaces/${workspace}/library`).then((list) => list.data),
@@ -228,5 +239,6 @@ export const trex = {
   deleteSandboxFile: (id: string, path: string) => api<unknown>("DELETE", `/sessions/${id}/files/${encodePath(path)}`),
 
   files: () => api<List<ApiFile>>("GET", "/library").then((list) => list.data),
+  moveFile: (from: string, to: string) => api<ApiFile>("POST", "/library/move", { from, to }),
   deleteFile: (path: string) => api<unknown>("DELETE", `/library/files/${path.split("/").map(encodeURIComponent).join("/")}`),
 };

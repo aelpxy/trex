@@ -7,6 +7,7 @@ const VARIANTS = {
   primary: "bg-ink text-on-solid hover:bg-ink/85",
   quiet: "text-muted hover:bg-subtle hover:text-ink",
   danger: "bg-danger text-on-solid hover:bg-danger/85",
+  subtleDanger: "text-danger hover:bg-danger/10",
 };
 
 type ButtonProps = ComponentProps<typeof BaseButton> & { variant?: keyof typeof VARIANTS };

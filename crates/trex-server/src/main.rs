@@ -7,6 +7,7 @@ mod preview;
 mod runs;
 mod schedule;
 mod scheduler;
+mod users;
 mod web;
 
 use std::{future::IntoFuture, net::SocketAddr, sync::Arc, time::Duration};

@@ -7,8 +7,6 @@ type Appearance = {
   setSettings: (settings: GlassSettings) => void;
   backgroundUrl: string | null;
   setBackground: (image: File | null) => Promise<void>;
-  settingsOpen: boolean;
-  setSettingsOpen: (open: boolean) => void;
 };
 
 const AppearanceContext = createContext<Appearance | null>(null);
@@ -23,7 +21,6 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [loaded, setLoaded] = useState(false);
   const [backgroundUrl, setBackgroundUrl] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const urlRef = useRef<string | null>(null);
 
   const showImage = useCallback((image: Blob | null) => {
@@ -59,8 +56,8 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ settings, setSettings, backgroundUrl, setBackground, settingsOpen, setSettingsOpen }),
-    [settings, backgroundUrl, setBackground, settingsOpen],
+    () => ({ settings, setSettings, backgroundUrl, setBackground }),
+    [settings, backgroundUrl, setBackground],
   );
 
   return <AppearanceContext value={value}>{children}</AppearanceContext>;

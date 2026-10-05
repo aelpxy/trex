@@ -1,7 +1,7 @@
 use std::{fmt::Write, fs, path::Path as FsPath, sync::Arc};
 
 use anyhow::Context;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::{
     ObjectStore, ObjectStoreExt, aws::AmazonS3Builder, local::LocalFileSystem, memory::InMemory,
     path::Path,
@@ -140,6 +140,22 @@ impl Library {
         Ok(bytes.to_vec())
     }
 
+    // the workspace's library and attachments, for when the workspace itself is deleted
+    pub async fn delete_workspace(&self, workspace: Uuid) -> anyhow::Result<()> {
+        let prefix = Path::from_iter(["workspaces", &workspace.to_string()]);
+        let locations = self
+            .store
+            .list(Some(&prefix))
+            .map_ok(|meta| meta.location)
+            .boxed();
+        self.store
+            .delete_stream(locations)
+            .try_collect::<Vec<_>>()
+            .await
+            .context("failed to delete workspace files")?;
+        Ok(())
+    }
+
     pub async fn list(&self, workspace: Uuid) -> anyhow::Result<Vec<LibraryFile>> {
         let root = root(workspace);
         let prefix = format!("{root}/");
@@ -262,6 +278,19 @@ mod tests {
                 .is_err()
         );
         assert!(library.rename(workspace, "b.txt", "../x").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn deletes_only_that_workspaces_files() {
+        let library = Library::in_memory();
+        let (gone, kept) = (Uuid::now_v7(), Uuid::now_v7());
+        library.put(gone, "a.txt", b"a".to_vec()).await.unwrap();
+        let hash = library.put_attachment(gone, b"img".to_vec()).await.unwrap();
+        library.put(kept, "b.txt", b"b".to_vec()).await.unwrap();
+        library.delete_workspace(gone).await.unwrap();
+        assert!(library.list(gone).await.unwrap().is_empty());
+        assert!(library.get_attachment(gone, &hash).await.is_err());
+        assert_eq!(library.list(kept).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

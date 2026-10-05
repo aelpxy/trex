@@ -143,6 +143,71 @@ pub async fn get(
     }))
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct MonthUsage {
+    #[schema(example = "usage")]
+    object: &'static str,
+    /// Unix seconds, when this month began; plans top up for the same month.
+    period_start: i64,
+    /// Credits spent this month, in millionths of a US dollar.
+    credits: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    responses: i64,
+    /// Per model, most spent first.
+    models: Vec<ModelUsage>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ModelUsage {
+    model: String,
+    /// The model's display name from the catalog, or its id if it's gone.
+    name: String,
+    credits: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    responses: i64,
+}
+
+/// Get this month's usage
+///
+/// What the workspace spent this month, in total and per model.
+#[utoipa::path(
+    get,
+    operation_id = "get_month_usage",
+    path = "/credits/usage",
+    tag = "credits",
+    responses((status = 200, body = MonthUsage), (status = 401, response = ErrorResponse)),
+)]
+pub async fn usage(
+    State(state): State<Arc<AppState>>,
+    Auth { workspace, .. }: Auth,
+) -> Result<Json<MonthUsage>, ApiError> {
+    let (period_start, models) = state.store.month_usage(workspace).await?;
+    Ok(Json(MonthUsage {
+        object: "usage",
+        period_start,
+        credits: models.iter().map(|model| model.credits).sum(),
+        input_tokens: models.iter().map(|model| model.input_tokens).sum(),
+        output_tokens: models.iter().map(|model| model.output_tokens).sum(),
+        responses: models.iter().map(|model| model.responses).sum(),
+        models: models
+            .into_iter()
+            .map(|usage| ModelUsage {
+                name: state
+                    .models
+                    .get(&usage.model)
+                    .map_or_else(|| usage.model.clone(), |model| model.name().to_owned()),
+                model: usage.model,
+                credits: usage.credits,
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                responses: usage.responses,
+            })
+            .collect(),
+    }))
+}
+
 /// List credit history
 ///
 /// Grants, usage charges and adjustments, newest first.

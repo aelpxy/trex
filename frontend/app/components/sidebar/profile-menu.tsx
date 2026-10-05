@@ -4,7 +4,6 @@ import { Link } from "react-router";
 import { Menu } from "@base-ui/react/menu";
 import { LuCheck, LuChevronUp, LuCoins, LuLogOut, LuMoon, LuSettings, LuShield, LuUser, LuUserCog } from "react-icons/lu";
 
-import { useAppearance } from "~/components/appearance/appearance-provider";
 import { useTheme } from "~/components/appearance/use-theme";
 import { focusRing, menuItem, menuSeparator, popup } from "~/components/ui/styles";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
@@ -25,7 +24,6 @@ function WorkspaceAvatar({ name }: { name: string }) {
 type ProfileMenuProps = { collapsed?: boolean; onNavigate?: () => void };
 
 export function ProfileMenu({ collapsed = false, onNavigate }: ProfileMenuProps) {
-  const { setSettingsOpen } = useAppearance();
   const { theme, setTheme } = useTheme();
   const { workspaces, current, switchWorkspace, profile: PROFILE, logout } = useWorkspace();
   const subtitle = `${current.name} · ${current.plan}`;
@@ -94,7 +92,7 @@ export function ProfileMenu({ collapsed = false, onNavigate }: ProfileMenuProps)
               </span>
             </Menu.CheckboxItem>
             <Menu.LinkItem render={<Link to="/account" onClick={onNavigate} />} closeOnClick className={menuItem}><LuUserCog size={14} />Account</Menu.LinkItem>
-            <Menu.Item onClick={() => setSettingsOpen(true)} className={menuItem}><LuSettings size={14} />Settings</Menu.Item>
+            <Menu.LinkItem render={<Link to="/account/appearance" onClick={onNavigate} />} closeOnClick className={menuItem}><LuSettings size={14} />Appearance</Menu.LinkItem>
             {PROFILE.role === "admin" && (
               <Menu.LinkItem render={<Link to="/admin" onClick={onNavigate} />} closeOnClick className={menuItem}><LuShield size={14} />Admin</Menu.LinkItem>
             )}

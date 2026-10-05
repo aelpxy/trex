@@ -75,7 +75,8 @@ impl Store {
     ) -> anyhow::Result<Option<UserSession>> {
         let row = sqlx::query(concat!(
             "UPDATE user_sessions SET last_used_at = NOW(), last_ip = COALESCE($2, last_ip) \
-             WHERE token_hash = $1 AND expires_at > NOW() RETURNING ",
+             WHERE token_hash = $1 AND expires_at > NOW() \
+             AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = user_sessions.user_id AND u.suspended_at IS NOT NULL) RETURNING ",
             columns!()
         ))
         .bind(token_hash)
@@ -178,6 +179,25 @@ mod tests {
         assert_eq!(
             (used.id, used.ip.as_deref(), used.last_ip.as_deref()),
             (a, Some("10.0.0.1"), Some("10.0.0.2"))
+        );
+        assert!(store.set_user_suspended(user.id, true).await.unwrap());
+        assert!(
+            store
+                .use_user_session(b"session-a", None)
+                .await
+                .unwrap()
+                .is_none(),
+            "suspended"
+        );
+        let (suspended, _) = store.user(user.id).await.unwrap().unwrap();
+        assert!(suspended.suspended_at.is_some());
+        assert!(store.set_user_suspended(user.id, false).await.unwrap());
+        assert!(
+            store
+                .use_user_session(b"session-a", None)
+                .await
+                .unwrap()
+                .is_some()
         );
         assert!(
             store

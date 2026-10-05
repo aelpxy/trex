@@ -1,9 +1,18 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 
+import { columnsFor, DataTable } from "~/components/ui/data-table";
 import { formatUsd } from "~/lib/credits";
 import { queries } from "~/lib/queries";
+import type { ApiOverview } from "~/lib/trex";
 
 import { count, tokens } from "./format";
+
+const column = columnsFor<ApiOverview["top_models"][number]>();
+const COLUMNS = [
+  column.accessor("model", { header: "Model", cell: (info) => <span className="font-mono text-[13px]">{info.getValue()}</span> }),
+  column.accessor((row) => row.input_tokens + row.output_tokens, { id: "tokens", header: "Tokens", cell: (info) => tokens(info.getValue()), meta: { align: "right" } }),
+  column.accessor("credits", { header: "Spend", cell: (info) => formatUsd(info.getValue()), meta: { align: "right" } }),
+];
 
 function Stat({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
@@ -28,19 +37,7 @@ export function Overview() {
       </div>
       <section>
         <h2 className="text-sm font-medium">Top models, last 30 days</h2>
-        {overview.top_models.length === 0 ? (
-          <p className="mt-2 text-sm text-muted">No usage yet.</p>
-        ) : (
-          <ul className="ui-card mt-3 divide-y divide-line overflow-hidden">
-            {overview.top_models.map((model) => (
-              <li key={model.model} className="flex items-center gap-4 px-4 py-2.5 text-sm">
-                <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{model.model}</span>
-                <span className="text-xs text-muted tabular-nums">{tokens(model.input_tokens + model.output_tokens)} tokens</span>
-                <span className="w-20 text-right tabular-nums">{formatUsd(model.credits)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
+        <DataTable label="Top models" data={overview.top_models} columns={COLUMNS} rowId={(row) => row.model} empty="No usage yet." />
       </section>
     </div>
   );

@@ -39,11 +39,15 @@ function writingFrom(messages: Message[]) {
   return last.parts.flatMap((part) => (part.type === "tool" && part.state === "running" && (part.name === "write_file" || part.name === "edit_file") && part.input.path ? [part.input.path] : []));
 }
 
+// the panel covers the whole chat on narrow screens, so it only opens itself when there's room
+const roomForPanel = () => window.matchMedia("(min-width: 768px)").matches;
+
 // like an artifact, a page or document the agent starts writing opens in the panel, once per file
 function OpenWhileWriting({ writing }: { writing: string[] }) {
   const { open } = useFiles();
   const opened = useRef(new Set<string>());
   useEffect(() => {
+    if (!roomForPanel()) return;
     const path = writing.find((candidate) => previewOf(candidate) && !opened.current.has(candidate));
     if (!path) return;
     opened.current.add(path);
@@ -67,7 +71,7 @@ function OpenLivePreviews({ messages }: { messages: Message[] }) {
       return;
     }
     const next = opened.find((preview) => !seen.current!.has(preview));
-    if (!next) return;
+    if (!next || !roomForPanel()) return;
     seen.current.add(next);
     const [, port, path] = next.match(/^(\d+)(.*)$/) ?? [];
     void openPreview(Number(port), path || "/");

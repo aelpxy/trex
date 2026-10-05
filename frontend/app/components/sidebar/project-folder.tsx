@@ -7,6 +7,9 @@ import type { Project } from "~/lib/workspace";
 import { toggleItem, useUiState } from "~/lib/ui-state";
 
 import { ChatLink } from "./chat-link";
+import { useWorkspace } from "~/components/workspace/workspace-provider";
+
+import { useChatDrop } from "./chat-drag";
 import { ItemContextMenu } from "./item-context-menu";
 import { sectionItem } from "./styles";
 
@@ -15,11 +18,17 @@ type ProjectFolderProps = { project: Project; onNavigate?: () => void };
 export function ProjectFolder({ project, onNavigate }: ProjectFolderProps) {
   const { state, update } = useUiState();
   const setOpen = (open: boolean) => update((current) => ({ openProjects: toggleItem(current.openProjects, project.id, open) }));
+  const { moveChat } = useWorkspace();
+  const drop = useChatDrop((chatId) => {
+    if (project.chats.some((chat) => chat.id === chatId)) return;
+    moveChat(chatId, project.id);
+    setOpen(true);
+  });
 
   return (
     <Collapsible.Root open={state.openProjects.includes(project.id)} onOpenChange={setOpen}>
       <ItemContextMenu target={{ kind: "project", id: project.id, name: project.name }}>
-        <div className="relative">
+        <div {...drop.props} className={`relative rounded-md transition-shadow ${drop.over ? "bg-subtle ring-1 ring-accent" : ""}`}>
           <NavLink
             to={`/projects/${project.id}`}
             onClick={() => {

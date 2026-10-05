@@ -185,6 +185,7 @@ impl Store {
 
     // takes the tasks that are due and moves each to its next run in the same transaction, so every
     // instance can tick without two of them starting the same run; `next` gives the following run
+    // tasks wait while every member of their workspace is suspended, then run once
     pub async fn claim_due_tasks(
         &self,
         limit: i64,
@@ -198,7 +199,10 @@ impl Store {
         let sql = concat!(
             "SELECT ",
             columns!(),
-            " FROM scheduled_tasks WHERE NOT paused AND next_run_at <= NOW() ORDER BY next_run_at LIMIT $1 FOR UPDATE SKIP LOCKED"
+            " FROM scheduled_tasks WHERE NOT paused AND next_run_at <= NOW() \
+             AND EXISTS (SELECT 1 FROM workspace_members m JOIN users u ON u.id = m.user_id \
+             WHERE m.workspace_id = scheduled_tasks.workspace_id AND u.suspended_at IS NULL) \
+             ORDER BY next_run_at LIMIT $1 FOR UPDATE SKIP LOCKED"
         );
         let due: Vec<ScheduledTask> = sqlx::query_as(sql)
             .bind(limit)
@@ -279,5 +283,24 @@ impl Store {
             })
             .unwrap_or_default();
         Ok(Some((row.try_get("at")?, text)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Store;
+
+    // needs Postgres from .env; a limit of 0 checks the query without taking the dev server's tasks
+    #[tokio::test]
+    #[ignore]
+    async fn claims_due_tasks() {
+        dotenvy::dotenv().ok();
+        let store = Store::connect(
+            &std::env::var("TREX_DATABASE_URL").unwrap(),
+            &std::env::var("TREX_REDIS_URL").unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(store.claim_due_tasks(0, |_| None).await.unwrap().is_empty());
     }
 }

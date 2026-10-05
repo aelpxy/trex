@@ -2,7 +2,7 @@ use anyhow::Context;
 use sqlx::{FromRow, Row, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::{Store, sessions::UsageRecord};
+use crate::{Store, admin::ModelUsage, sessions::UsageRecord};
 
 pub struct LedgerEntry {
     pub id: Uuid,
@@ -180,6 +180,39 @@ impl Store {
         .context("failed to list credit ledger")
     }
 
+    // the workspace's usage per model since the month began, the period plans top up for, and
+    // when it began in unix seconds
+    pub async fn month_usage(&self, workspace: Uuid) -> anyhow::Result<(i64, Vec<ModelUsage>)> {
+        let rows = sqlx::query(
+            "SELECT model, SUM(credits)::BIGINT AS credits, SUM(input_tokens)::BIGINT AS input_tokens, \
+             SUM(output_tokens)::BIGINT AS output_tokens, COUNT(*) AS responses \
+             FROM usage_records WHERE workspace_id = $1 AND created_at >= DATE_TRUNC('month', NOW()) \
+             GROUP BY model ORDER BY SUM(credits) DESC, SUM(input_tokens + output_tokens) DESC",
+        )
+        .bind(workspace)
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to load this month's usage")?;
+        let start: i64 =
+            sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM DATE_TRUNC('month', NOW()))::BIGINT")
+                .fetch_one(&self.pg)
+                .await
+                .context("failed to load this month's usage")?;
+        let models = rows
+            .iter()
+            .map(|row| {
+                Ok(ModelUsage {
+                    model: row.try_get("model")?,
+                    credits: row.try_get("credits")?,
+                    input_tokens: row.try_get("input_tokens")?,
+                    output_tokens: row.try_get("output_tokens")?,
+                    responses: row.try_get("responses")?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok((start, models))
+    }
+
     pub async fn ledger_count(&self, workspace: Uuid) -> anyhow::Result<i64> {
         sqlx::query_scalar("SELECT COUNT(*) FROM credit_ledger WHERE workspace_id = $1")
             .bind(workspace)
@@ -267,6 +300,21 @@ mod tests {
             store.charge_usage(&usage, 900).await.unwrap(),
             -150,
             "a run may dip below zero"
+        );
+        let (start, models) = store.month_usage(workspace).await.unwrap();
+        assert!(start > 0);
+        assert_eq!(
+            models
+                .iter()
+                .map(|m| (
+                    m.model.as_str(),
+                    m.credits,
+                    m.input_tokens,
+                    m.output_tokens,
+                    m.responses
+                ))
+                .collect::<Vec<_>>(),
+            [("gpt-6.1-sol", 1150, 2000, 200, 2)]
         );
         assert_eq!(
             store

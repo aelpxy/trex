@@ -5,15 +5,15 @@ import { queryClient } from "~/lib/query-client";
 
 import type { Route } from "./+types/library";
 
+// without a workspace it's a list to pick one from; with one, that workspace's files
 export async function clientLoader({ request }: Route.ClientLoaderArgs) {
-  const { search } = listParams(request);
-  const requested = new URL(request.url).searchParams.get("workspace") ?? "";
-  const [matching, browsed] = await Promise.all([
-    queryClient.ensureQueryData(queries.admin.workspaces(1, search)),
-    queryClient.ensureQueryData(queries.admin.workspaces(1, requested)),
-  ]);
-  const workspace = browsed.data.find((candidate) => candidate.id === requested) ?? matching.data[0];
-  if (workspace) await queryClient.ensureQueryData(queries.admin.library(workspace.id));
+  const workspace = new URL(request.url).searchParams.get("workspace");
+  if (workspace) {
+    await Promise.all([queryClient.ensureQueryData(queries.admin.workspaces(1, workspace)), queryClient.ensureQueryData(queries.admin.library(workspace))]);
+    return null;
+  }
+  const { page, search, sort } = listParams(request);
+  await queryClient.ensureQueryData(queries.admin.workspaces(page, search, sort));
   return null;
 }
 

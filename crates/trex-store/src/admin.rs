@@ -2,7 +2,73 @@ use anyhow::Context;
 use sqlx::Row;
 use uuid::Uuid;
 
+use sqlx::{Postgres, QueryBuilder};
+
 use crate::{Store, accounts::UserRole};
+
+// what a paged admin list is ordered by; ties go to the newest
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sort<K> {
+    pub key: K,
+    pub descending: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserSort {
+    Created,
+    Name,
+    Email,
+    LastActive,
+    Credits,
+}
+
+impl UserSort {
+    fn column(self) -> &'static str {
+        match self {
+            Self::Created => "u.created_at",
+            Self::Name => "LOWER(u.name)",
+            Self::Email => "LOWER(u.email)",
+            Self::LastActive => "last_active_at",
+            Self::Credits => "credits",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceSort {
+    Created,
+    Name,
+    Owner,
+    Plan,
+    Credits,
+}
+
+impl WorkspaceSort {
+    pub(crate) fn column(self) -> &'static str {
+        match self {
+            Self::Created => "w.created_at",
+            Self::Name => "LOWER(w.name)",
+            Self::Owner => "owner_email",
+            Self::Plan => "w.plan",
+            Self::Credits => "w.credits",
+        }
+    }
+}
+
+// columns only ever come from the sort enums above, never from input
+pub(crate) fn push_order(
+    query: &mut QueryBuilder<Postgres>,
+    column: &'static str,
+    descending: bool,
+    id: &'static str,
+) {
+    let direction = if descending {
+        "DESC NULLS LAST"
+    } else {
+        "ASC NULLS LAST"
+    };
+    query.push(format_args!(" ORDER BY {column} {direction}, {id} DESC"));
+}
 
 // server-wide numbers for the admin overview; usage covers responses since midnight utc and the
 // last 30 days
@@ -38,6 +104,7 @@ pub struct UserSummary {
     pub created_at: i64,
     // when any of their sessions last made a request; none if they have no live session
     pub last_active_at: Option<i64>,
+    pub suspended_at: Option<i64>,
 }
 
 pub struct DayUsage {
@@ -49,9 +116,11 @@ pub struct DayUsage {
     pub responses: i64,
 }
 
-pub struct WorkspaceUsage {
-    pub workspace: Uuid,
+// usage of the workspaces an account owns
+pub struct AccountUsage {
+    pub user: Uuid,
     pub name: String,
+    pub email: String,
     pub credits: i64,
     pub tokens: i64,
     pub responses: i64,
@@ -60,11 +129,11 @@ pub struct WorkspaceUsage {
 pub struct UsageReport {
     pub days: Vec<DayUsage>,
     pub models: Vec<ModelUsage>,
-    pub workspaces: Vec<WorkspaceUsage>,
+    pub accounts: Vec<AccountUsage>,
 }
 
 const TOP_MODELS: i64 = 5;
-const TOP_WORKSPACES: i64 = 20;
+const TOP_ACCOUNTS: i64 = 20;
 
 impl Store {
     pub async fn overview(&self) -> anyhow::Result<Overview> {
@@ -145,23 +214,25 @@ impl Store {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let rows = sqlx::query(
-            "SELECT u.workspace_id, w.name, SUM(u.credits)::BIGINT AS credits, \
-             SUM(u.input_tokens + u.output_tokens)::BIGINT AS tokens, COUNT(*) AS responses \
-             FROM usage_records u JOIN workspaces w ON w.id = u.workspace_id \
-             WHERE u.created_at >= NOW() - MAKE_INTERVAL(days => $1) \
-             GROUP BY u.workspace_id, w.name ORDER BY SUM(u.credits) DESC, SUM(u.input_tokens + u.output_tokens) DESC LIMIT $2",
+            "WITH spend AS (SELECT workspace_id, SUM(credits) AS credits, SUM(input_tokens + output_tokens) AS tokens, COUNT(*) AS responses \
+             FROM usage_records WHERE created_at >= NOW() - MAKE_INTERVAL(days => $1) GROUP BY workspace_id) \
+             SELECT o.id, o.name, o.email, SUM(s.credits)::BIGINT AS credits, SUM(s.tokens)::BIGINT AS tokens, SUM(s.responses)::BIGINT AS responses \
+             FROM spend s CROSS JOIN LATERAL (SELECT x.id, x.name, x.email FROM workspace_members m JOIN users x ON x.id = m.user_id \
+              WHERE m.workspace_id = s.workspace_id ORDER BY m.role = 'owner' DESC, x.created_at LIMIT 1) o \
+             GROUP BY o.id, o.name, o.email ORDER BY credits DESC, tokens DESC LIMIT $2",
         )
         .bind(days)
-        .bind(TOP_WORKSPACES)
+        .bind(TOP_ACCOUNTS)
         .fetch_all(&self.pg)
         .await
-        .context("failed to load usage by workspace")?;
-        let workspaces = rows
+        .context("failed to load usage by account")?;
+        let accounts = rows
             .iter()
             .map(|row| {
-                Ok(WorkspaceUsage {
-                    workspace: row.try_get("workspace_id")?,
+                Ok(AccountUsage {
+                    user: row.try_get("id")?,
                     name: row.try_get("name")?,
+                    email: row.try_get("email")?,
                     credits: row.try_get("credits")?,
                     tokens: row.try_get("tokens")?,
                     responses: row.try_get("responses")?,
@@ -171,32 +242,45 @@ impl Store {
         Ok(UsageReport {
             days: days_usage,
             models: self.model_usage(days, i64::MAX).await?,
-            workspaces,
+            accounts,
         })
     }
 
-    // a page of users, newest first, whose name or email contains `search`
+    // a page of users whose name or email contains `search`
     pub async fn users_page(
         &self,
         search: Option<&str>,
+        sort: Sort<UserSort>,
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<Vec<UserSummary>> {
-        let rows = sqlx::query(
+        let pattern = search.map(contains_pattern);
+        let mut query = QueryBuilder::new(
             "SELECT u.id, u.email, u.name, u.role, EXTRACT(EPOCH FROM u.created_at)::BIGINT AS created_at, \
+             EXTRACT(EPOCH FROM u.suspended_at)::BIGINT AS suspended_at, \
              (SELECT COUNT(*) FROM workspace_members m WHERE m.user_id = u.id) AS workspaces, \
              (SELECT w.credits FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id \
               WHERE m.user_id = u.id AND m.role = 'owner' ORDER BY w.created_at LIMIT 1) AS credits, \
              (SELECT EXTRACT(EPOCH FROM MAX(t.last_used_at))::BIGINT FROM user_sessions t WHERE t.user_id = u.id) AS last_active_at \
-             FROM users u WHERE $1::TEXT IS NULL OR u.email ILIKE $1 OR u.name ILIKE $1 \
-             ORDER BY u.created_at DESC, u.id DESC LIMIT $2 OFFSET $3",
-        )
-        .bind(search.map(contains_pattern))
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pg)
-        .await
-        .context("failed to list users")?;
+             FROM users u WHERE ",
+        );
+        query
+            .push_bind(pattern.clone())
+            .push("::TEXT IS NULL OR u.email ILIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR u.name ILIKE ")
+            .push_bind(pattern);
+        push_order(&mut query, sort.key.column(), sort.descending, "u.id");
+        query
+            .push(" LIMIT ")
+            .push_bind(limit)
+            .push(" OFFSET ")
+            .push_bind(offset);
+        let rows = query
+            .build()
+            .fetch_all(&self.pg)
+            .await
+            .context("failed to list users")?;
         rows.iter()
             .map(|row| {
                 Ok(UserSummary {
@@ -212,6 +296,7 @@ impl Store {
                     credits: row.try_get("credits")?,
                     created_at: row.try_get("created_at")?,
                     last_active_at: row.try_get("last_active_at")?,
+                    suspended_at: row.try_get("suspended_at")?,
                 })
             })
             .collect()
@@ -235,6 +320,20 @@ impl Store {
             .execute(&self.pg)
             .await
             .context("failed to set user role")?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // false when there's no such user; suspending again keeps the first time
+    pub async fn set_user_suspended(&self, id: Uuid, suspended: bool) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE users SET suspended_at = CASE WHEN $2 THEN COALESCE(suspended_at, NOW()) END, \
+             updated_at = NOW() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(suspended)
+        .execute(&self.pg)
+        .await
+        .context("failed to suspend user")?;
         Ok(result.rows_affected() > 0)
     }
 }
@@ -278,8 +377,12 @@ mod tests {
         }
 
         assert_eq!(store.user_count(Some(&tag)).await.unwrap(), 3);
-        let first = store.users_page(Some(&tag), 2, 0).await.unwrap();
-        let second = store.users_page(Some(&tag), 2, 2).await.unwrap();
+        let newest = Sort {
+            key: UserSort::Created,
+            descending: true,
+        };
+        let first = store.users_page(Some(&tag), newest, 2, 0).await.unwrap();
+        let second = store.users_page(Some(&tag), newest, 2, 2).await.unwrap();
         let names: Vec<_> = first
             .iter()
             .chain(&second)
@@ -291,6 +394,13 @@ mod tests {
             "newest first, split across pages"
         );
         assert_eq!(second[0].credits, Some(0));
+        let by_name = Sort {
+            key: UserSort::Name,
+            descending: false,
+        };
+        let sorted = store.users_page(Some(&tag), by_name, 20, 0).await.unwrap();
+        let names: Vec<_> = sorted.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(names, ["Ann", "Bob", "Cy"]);
         assert_eq!(
             store.user_count(Some(&format!("ann-{tag}"))).await.unwrap(),
             1
@@ -301,15 +411,34 @@ mod tests {
             "% is literal"
         );
 
+        let report = store.usage_report(30).await.unwrap();
+        assert!(report.accounts.len() as i64 <= TOP_ACCOUNTS);
+
         assert_eq!(store.workspace_count(Some(&tag), None).await.unwrap(), 3);
+        let by_owner = Sort {
+            key: WorkspaceSort::Owner,
+            descending: true,
+        };
         let (_, bob_workspace, bob_email) = &created[1];
         let found = store
-            .workspaces_page(None, Some(*bob_workspace), 20, 0)
+            .workspaces_page(None, Some(*bob_workspace), by_owner, 20, 0)
             .await
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].owner_email.as_deref(), Some(bob_email.as_str()));
-        let page = store.workspaces_page(Some(&tag), None, 2, 2).await.unwrap();
+        let page = store
+            .workspaces_page(Some(&tag), None, by_owner, 2, 2)
+            .await
+            .unwrap();
         assert_eq!(page.len(), 1);
+        assert_eq!(page[0].owner_email.as_deref(), Some(created[0].2.as_str()));
+
+        for (user, workspace, _) in &created {
+            assert_eq!(store.sole_workspaces(*user).await.unwrap(), [*workspace]);
+            assert!(store.delete_user(*user, &[*workspace]).await.unwrap());
+            assert!(!store.delete_user(*user, &[*workspace]).await.unwrap());
+        }
+        assert_eq!(store.user_count(Some(&tag)).await.unwrap(), 0);
+        assert_eq!(store.workspace_count(Some(&tag), None).await.unwrap(), 0);
     }
 }

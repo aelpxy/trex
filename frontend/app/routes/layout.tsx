@@ -5,7 +5,6 @@ import { IconContext } from "react-icons";
 
 import { AppearanceProvider } from "~/components/appearance/appearance-provider";
 import { Background } from "~/components/appearance/background";
-import { SettingsDialog } from "~/components/appearance/settings-dialog";
 import { ChatSkeleton } from "~/components/chat/chat-skeleton";
 import { CommandPalette } from "~/components/command/command-palette";
 import { useGlobalShortcuts } from "~/components/command/shortcuts";
@@ -63,7 +62,6 @@ export default function Layout({ loaderData }: Route.ComponentProps) {
                     </main>
                   </div>
                 </div>
-                <SettingsDialog />
                 <CommandPalette />
                 <GlobalShortcuts />
               </Tooltip.Provider>

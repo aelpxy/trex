@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type
 import { Button } from "@base-ui/react/button";
 import { LuArrowUp, LuBrain, LuClock, LuFileText, LuPaperclip, LuSquare, LuX } from "react-icons/lu";
 
-import { isMac } from "~/components/command/shortcuts";
+import { isMac, isTouch } from "~/components/command/shortcuts";
 import { focusRingOutset, iconButton } from "~/components/ui/styles";
 import { ATTACHMENT_TYPES, kindOf, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_MESSAGE_CHARS, readAsDataUrl } from "~/lib/attachments";
 
@@ -105,7 +105,7 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
       onStop();
       return;
     }
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) submit(event, event.metaKey || event.ctrlKey);
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && (!isTouch() || event.metaKey || event.ctrlKey)) submit(event, event.metaKey || event.ctrlKey);
   }
 
   function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
@@ -146,13 +146,13 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
         onKeyDown={onKeyDown}
         onPaste={onPaste}
         rows={1}
-        autoFocus
+        autoFocus={!isTouch()}
         aria-label="Message"
         placeholder={streaming ? "Add to the task" : "Ask anything"}
         className="block max-h-50 w-full resize-none bg-transparent px-2 py-1.5 text-sm leading-6 text-ink outline-none placeholder:text-muted"
       />
       {streaming && canSend && !error && (
-        <p className="px-2 pb-1 text-[11px] text-muted">
+        <p className="px-2 pb-1 text-[11px] text-muted pointer-coarse:hidden">
           <kbd className="font-sans">Enter</kbd> adds it after the current step · <kbd className="font-sans">{isMac() ? "⌘" : "Ctrl"}+Enter</kbd> sends it now
         </p>
       )}

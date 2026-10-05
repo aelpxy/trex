@@ -5,14 +5,19 @@ import { LuChevronRight } from "react-icons/lu";
 import { collapsiblePanel, focusRing } from "~/components/ui/styles";
 import { toggleItem, useUiState } from "~/lib/ui-state";
 
+import { useChatDrop } from "./chat-drag";
 
-type SidebarSectionProps = { id: string; title: string; action?: ReactNode; children: ReactNode };
+// `drop` makes the whole section a place to drop chats on
+type SidebarSectionProps = { id: string; title: string; action?: ReactNode; drop?: (chatId: string) => void; children: ReactNode };
 
-export function SidebarSection({ id, title, action, children }: SidebarSectionProps) {
+export function SidebarSection({ id, title, action, drop, children }: SidebarSectionProps) {
   const { state, update } = useUiState();
+  const target = useChatDrop((chatId) => drop?.(chatId));
 
   return (
     <Collapsible.Root
+      {...(drop && target.props)}
+      className={`rounded-md transition-shadow ${drop && target.over ? "bg-subtle/60 ring-1 ring-accent" : ""}`}
       open={!state.closedSections.includes(id)}
       onOpenChange={(open) => update((current) => ({ closedSections: toggleItem(current.closedSections, id, !open) }))}
     >

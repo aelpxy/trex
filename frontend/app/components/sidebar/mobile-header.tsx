@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Drawer } from "@base-ui/react/drawer";
-import { LuMenu, LuX } from "react-icons/lu";
+import { Link } from "react-router";
+import { LuMenu, LuMessageSquarePlus, LuX } from "react-icons/lu";
 
 import { Brand } from "~/components/ui/brand";
 import { iconButton } from "~/components/ui/styles";
@@ -34,6 +35,9 @@ export function MobileHeader() {
         </Drawer.Portal>
       </Drawer.Root>
       <Brand />
+      <Link to="/" aria-label="New chat" title="New chat" className={`${iconButton} ml-auto`}>
+        <LuMessageSquarePlus size={16} />
+      </Link>
     </header>
   );
 }

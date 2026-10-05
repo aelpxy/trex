@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use trex_harness::attachment;
 use utoipa::{IntoParams, ToSchema};
 
-use trex_store::accounts::UserRole;
+use trex_store::{
+    accounts::UserRole,
+    admin::{Sort, UserSort, WorkspaceSort},
+};
 
 use super::{
     AppState, List, Page,
@@ -35,6 +38,9 @@ pub struct PageQuery {
     /// Text to search for.
     #[param(example = "ada@example.com")]
     q: Option<String>,
+    /// A column to order by, descending with a leading `-`; newest first by default.
+    #[param(example = "-credits")]
+    sort: Option<String>,
 }
 
 impl PageQuery {
@@ -57,7 +63,50 @@ impl PageQuery {
     fn search(&self) -> Option<&str> {
         self.q.as_deref().map(str::trim).filter(|q| !q.is_empty())
     }
+
+    // `keys` names the sortable columns; the first is the newest-first default
+    fn sort<K: Copy>(&self, keys: &[(&str, K)]) -> Result<Sort<K>, ApiError> {
+        let Some(raw) = self.sort.as_deref().filter(|raw| !raw.is_empty()) else {
+            return Ok(Sort {
+                key: keys[0].1,
+                descending: true,
+            });
+        };
+        let (name, descending) = match raw.strip_prefix('-') {
+            Some(name) => (name, true),
+            None => (raw, false),
+        };
+        keys.iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|&(_, key)| Sort { key, descending })
+            .ok_or_else(|| {
+                let names: Vec<_> = keys.iter().map(|(name, _)| *name).collect();
+                ApiError::invalid(
+                    format!(
+                        "sort must be one of {}, optionally with a leading -",
+                        names.join(", ")
+                    ),
+                    "sort",
+                )
+            })
+    }
 }
+
+const USER_SORTS: &[(&str, UserSort)] = &[
+    ("created_at", UserSort::Created),
+    ("name", UserSort::Name),
+    ("email", UserSort::Email),
+    ("last_active_at", UserSort::LastActive),
+    ("credits", UserSort::Credits),
+];
+
+const WORKSPACE_SORTS: &[(&str, WorkspaceSort)] = &[
+    ("created_at", WorkspaceSort::Created),
+    ("name", WorkspaceSort::Name),
+    ("owner_email", WorkspaceSort::Owner),
+    ("plan", WorkspaceSort::Plan),
+    ("credits", WorkspaceSort::Credits),
+];
 
 // a signed-in user with the admin role; admins are made with `trex admin grant <email>`
 pub struct Admin {
@@ -108,7 +157,8 @@ pub struct AdminWorkspace {
 
 /// List all workspaces
 ///
-/// Every workspace on the server, newest first. `q` matches a workspace id, or text in the name or
+/// Every workspace on the server, newest first unless `sort` (`created_at`, `name`,
+/// `owner_email`, `plan`, `credits`) says otherwise. `q` matches a workspace id, or text in the name or
 /// a member's email.
 #[utoipa::path(
     get,
@@ -128,12 +178,13 @@ pub async fn list_workspaces(
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Page<AdminWorkspace>>, ApiError> {
     let (limit, offset) = query.window()?;
+    let sort = query.sort(WORKSPACE_SORTS)?;
     let id = query.search().and_then(|q| ids::decode(WORKSPACE, q));
     let search = if id.is_some() { None } else { query.search() };
     let total_count = state.store.workspace_count(search, id).await?;
     let mut workspaces = state
         .store
-        .workspaces_page(search, id, limit + 1, offset)
+        .workspaces_page(search, id, sort, limit + 1, offset)
         .await?;
     let has_more = workspaces.len() as i64 > limit;
     workspaces.truncate(limit as usize);
@@ -338,8 +389,8 @@ pub struct UsageReport {
     /// Days with usage, oldest first.
     daily: Vec<DayUsage>,
     models: Vec<ModelUsage>,
-    /// The 20 workspaces that spent the most.
-    workspaces: Vec<WorkspaceUsage>,
+    /// The 20 accounts whose workspaces spent the most; a workspace counts for its owner.
+    accounts: Vec<AccountUsage>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -353,9 +404,10 @@ pub struct DayUsage {
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct WorkspaceUsage {
-    workspace: String,
+pub struct AccountUsage {
+    user: String,
     name: String,
+    email: String,
     credits: i64,
     tokens: i64,
     responses: i64,
@@ -401,15 +453,16 @@ pub async fn usage(
             })
             .collect(),
         models: report.models.into_iter().map(model_usage).collect(),
-        workspaces: report
-            .workspaces
+        accounts: report
+            .accounts
             .into_iter()
-            .map(|workspace| WorkspaceUsage {
-                workspace: ids::encode(WORKSPACE, workspace.workspace),
-                name: workspace.name,
-                credits: workspace.credits,
-                tokens: workspace.tokens,
-                responses: workspace.responses,
+            .map(|account| AccountUsage {
+                user: ids::encode(USER, account.user),
+                name: account.name,
+                email: account.email,
+                credits: account.credits,
+                tokens: account.tokens,
+                responses: account.responses,
             })
             .collect(),
     }))
@@ -431,11 +484,14 @@ pub struct AdminUser {
     credits: Option<i64>,
     /// Unix seconds, the last request from any of their signed-in devices.
     last_active_at: Option<i64>,
+    /// Unix seconds; suspended users can't sign in and their scheduled tasks wait.
+    suspended_at: Option<i64>,
 }
 
 /// List users
 ///
-/// Every user, newest first. `q` matches text in the name or email.
+/// Every user, newest first unless `sort` (`created_at`, `name`, `email`, `last_active_at`,
+/// `credits`) says otherwise. `q` matches text in the name or email.
 #[utoipa::path(
     get,
     operation_id = "list_users",
@@ -454,9 +510,13 @@ pub async fn list_users(
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Page<AdminUser>>, ApiError> {
     let (limit, offset) = query.window()?;
+    let sort = query.sort(USER_SORTS)?;
     let search = query.search();
     let total_count = state.store.user_count(search).await?;
-    let mut users = state.store.users_page(search, limit + 1, offset).await?;
+    let mut users = state
+        .store
+        .users_page(search, sort, limit + 1, offset)
+        .await?;
     let has_more = users.len() as i64 > limit;
     users.truncate(limit as usize);
     let data = users
@@ -471,6 +531,7 @@ pub async fn list_users(
             credits: user.credits,
             created_at: user.created_at,
             last_active_at: user.last_active_at,
+            suspended_at: user.suspended_at,
         })
         .collect();
     Ok(Json(Page::new(data, has_more, total_count)))
@@ -478,12 +539,15 @@ pub async fn list_users(
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateUser {
-    role: super::account::Role,
+    role: Option<super::account::Role>,
+    /// Suspending signs them out, stops their runs and blocks signing in until it's lifted.
+    suspended: Option<bool>,
 }
 
-/// Change a user's role
+/// Update a user
 ///
-/// Admins can't change their own role, so there is always one left.
+/// Changes their role or suspends them. Admins can't change themselves, so there is always one
+/// left.
 #[utoipa::path(
     patch,
     operation_id = "update_user",
@@ -507,13 +571,103 @@ pub async fn update_user(
     let not_found = || ApiError::NotFound(format!("no user {id}"));
     let user = ids::decode(USER, &id).ok_or_else(not_found)?;
     if user == admin.user {
-        return Err(ApiError::Conflict("you can't change your own role".into()));
+        return Err(ApiError::Conflict(
+            "you can't change your own account here".into(),
+        ));
     }
-    let role = UserRole::from(body.role);
-    if !state.store.set_user_role_by_id(user, role).await? {
+    if let Some(role) = body.role.map(UserRole::from) {
+        if !state.store.set_user_role_by_id(user, role).await? {
+            return Err(not_found());
+        }
+        tracing::info!(admin = %admin.user, user = %user, role = role.as_str(), "changed user role");
+    }
+    if let Some(suspended) = body.suspended {
+        if !crate::users::set_suspended(&state, user, suspended).await? {
+            return Err(not_found());
+        }
+        tracing::info!(admin = %admin.user, user = %user, suspended, "changed user suspension");
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SetPassword {
+    password: String,
+}
+
+/// Set a user's password
+///
+/// For users locked out of their account. Signs them out everywhere; admins change their own
+/// password from their account.
+#[utoipa::path(
+    post,
+    operation_id = "set_user_password",
+    path = "/admin/users/{id}/password",
+    tag = "admin",
+    params(("id" = String, Path, description = "User id")),
+    request_body = SetPassword,
+    responses(
+        (status = 204),
+        (status = 400, response = ErrorResponse),
+        (status = 403, response = ErrorResponse),
+        (status = 404, response = ErrorResponse),
+        (status = 409, response = ErrorResponse),
+    ),
+)]
+pub async fn set_user_password(
+    State(state): State<Arc<AppState>>,
+    admin: Admin,
+    Path(id): Path<String>,
+    Json(body): Json<SetPassword>,
+) -> Result<StatusCode, ApiError> {
+    let not_found = || ApiError::NotFound(format!("no user {id}"));
+    let user = ids::decode(USER, &id).ok_or_else(not_found)?;
+    if user == admin.user {
+        return Err(ApiError::Conflict(
+            "change your own password from your account".into(),
+        ));
+    }
+    super::account::valid_password(&body.password, "password")?;
+    let hash = super::account::hash_password(body.password).await?;
+    if !crate::users::set_password(&state, user, &hash).await? {
         return Err(not_found());
     }
-    tracing::info!(admin = %admin.user, user = %user, role = role.as_str(), "changed user role");
+    tracing::info!(admin = %admin.user, user = %user, "set a user's password");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete a user
+///
+/// Signs them out and deletes them with every workspace only they belong to, including its
+/// chats, sandboxes, library, projects, scheduled tasks and credits. Admins can't delete
+/// themselves.
+#[utoipa::path(
+    delete,
+    operation_id = "delete_user",
+    path = "/admin/users/{id}",
+    tag = "admin",
+    params(("id" = String, Path, description = "User id")),
+    responses(
+        (status = 204),
+        (status = 403, response = ErrorResponse),
+        (status = 404, response = ErrorResponse),
+        (status = 409, response = ErrorResponse),
+    ),
+)]
+pub async fn delete_user(
+    State(state): State<Arc<AppState>>,
+    admin: Admin,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let not_found = || ApiError::NotFound(format!("no user {id}"));
+    let user = ids::decode(USER, &id).ok_or_else(not_found)?;
+    if user == admin.user {
+        return Err(ApiError::Conflict("you can't delete yourself".into()));
+    }
+    if !crate::users::delete(&state, user).await? {
+        return Err(not_found());
+    }
+    tracing::info!(admin = %admin.user, user = %user, "deleted a user");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -780,4 +934,43 @@ pub async fn delete_user_session(
     }
     tracing::info!(admin = %admin.user, user = %user, session = %session, "signed out a user's session");
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(sort: Option<&str>) -> PageQuery {
+        PageQuery {
+            limit: None,
+            page: None,
+            q: None,
+            sort: sort.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn reads_the_sort() {
+        let newest = Sort {
+            key: UserSort::Created,
+            descending: true,
+        };
+        assert_eq!(query(None).sort(USER_SORTS).ok().unwrap(), newest);
+        assert_eq!(
+            query(Some("email")).sort(USER_SORTS).ok().unwrap(),
+            Sort {
+                key: UserSort::Email,
+                descending: false
+            }
+        );
+        assert_eq!(
+            query(Some("-credits")).sort(WORKSPACE_SORTS).ok().unwrap(),
+            Sort {
+                key: WorkspaceSort::Credits,
+                descending: true
+            }
+        );
+        assert!(query(Some("password")).sort(USER_SORTS).is_err());
+        assert_eq!(query(None).window().ok().unwrap(), (DEFAULT_PAGE_SIZE, 0));
+    }
 }

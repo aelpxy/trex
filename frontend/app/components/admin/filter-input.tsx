@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Input } from "@base-ui/react/input";
 
 import { focusRing } from "~/components/ui/styles";
 
@@ -20,5 +21,5 @@ export function FilterInput({ value, onChange, label }: { value: string; onChang
     return () => clearTimeout(timer);
   }, [draft, value, onChange]);
 
-  return <input type="search" value={draft} onChange={(event) => setDraft(event.target.value)} aria-label={label} placeholder={label} className={`ui-input h-10 ${focusRing}`} />;
+  return <Input type="search" value={draft} onValueChange={setDraft} aria-label={label} placeholder={label} className={`ui-input h-10 ${focusRing}`} />;
 }

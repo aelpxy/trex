@@ -6,9 +6,9 @@ import { queryClient } from "~/lib/query-client";
 import type { Route } from "./+types/users";
 
 export async function clientLoader({ request }: Route.ClientLoaderArgs) {
-  const { page, search } = listParams(request);
+  const { page, search, sort } = listParams(request);
   await Promise.all([
-    queryClient.ensureQueryData(queries.admin.users(page, search)),
+    queryClient.ensureQueryData(queries.admin.users(page, search, sort)),
     queryClient.ensureQueryData(queries.admin.models()),
     queryClient.ensureQueryData(queries.plans()),
   ]);

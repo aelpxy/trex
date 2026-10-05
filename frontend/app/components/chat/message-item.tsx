@@ -160,7 +160,7 @@ function UserMessageView({ message, onEdit }: { message: UserMessage; onEdit?: (
         message.content && <p className="max-w-[85%] rounded-2xl bg-subtle px-4 py-2.5 text-sm leading-6 break-words whitespace-pre-wrap">{message.content}</p>
       )}
       {!editing && (message.content || onEdit) && (
-        <div className="-mt-1 flex opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+        <div className="-mt-1 flex opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100">
           {onEdit && (
             <Button onClick={() => setEditing(true)} aria-label="Edit message" title="Edit in a new chat" className={`${iconButton} size-7`}>
               <LuPencil size={13} />

@@ -120,11 +120,13 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(credits::plans))
         .routes(routes!(credits::get))
         .routes(routes!(credits::ledger))
+        .routes(routes!(credits::usage))
         .routes(routes!(admin::overview))
         .routes(routes!(admin::usage))
         .routes(routes!(admin::list_users))
-        .routes(routes!(admin::update_user))
+        .routes(routes!(admin::update_user, admin::delete_user))
         .routes(routes!(admin::sign_out_user))
+        .routes(routes!(admin::set_user_password))
         .routes(routes!(admin::user_sessions))
         .routes(routes!(admin::delete_user_session))
         .routes(routes!(admin::logs))
@@ -415,11 +417,13 @@ mod tests {
                 "/v1/plans",
                 "/v1/credits",
                 "/v1/credits/ledger",
+                "/v1/credits/usage",
                 "/v1/admin/overview",
                 "/v1/admin/usage",
                 "/v1/admin/users",
                 "/v1/admin/users/{id}",
                 "/v1/admin/users/{id}/sign_out",
+                "/v1/admin/users/{id}/password",
                 "/v1/admin/users/{id}/sessions",
                 "/v1/admin/users/{id}/sessions/{session_id}",
                 "/v1/admin/logs",

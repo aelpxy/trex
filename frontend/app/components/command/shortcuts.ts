@@ -4,6 +4,8 @@ import { useNavigate } from "react-router";
 export const OPEN_SEARCH_EVENT = "open-search";
 
 export const isMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+// phones and tablets, where enter is for new lines and focusing a field opens the keyboard
+export const isTouch = () => typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches;
 
 export const openSearch = () => window.dispatchEvent(new Event(OPEN_SEARCH_EVENT));
 

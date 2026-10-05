@@ -1,8 +1,11 @@
 use anyhow::Context;
-use sqlx::{FromRow, Row, postgres::PgRow};
+use sqlx::{FromRow, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::Store;
+use crate::{
+    Store,
+    admin::{Sort, WorkspaceSort, push_order},
+};
 
 const PERSONAL_WORKSPACE: &str = "Personal";
 const UNIQUE_VIOLATION: &str = "23505";
@@ -13,6 +16,8 @@ pub struct User {
     pub name: String,
     pub role: UserRole,
     pub created_at: i64,
+    // suspended users can't sign in, and their workspaces' scheduled tasks wait
+    pub suspended_at: Option<i64>,
 }
 
 // admins run the server: they manage every workspace's credits and plans
@@ -68,6 +73,7 @@ impl FromRow<'_, PgRow> for User {
             name: row.try_get("name")?,
             role: UserRole::parse(row.try_get::<&str, _>("role")?),
             created_at: row.try_get("created_at")?,
+            suspended_at: row.try_get("suspended_at")?,
         })
     }
 }
@@ -96,7 +102,7 @@ impl Store {
         let mut tx = self.pg.begin().await.context("failed to create user")?;
         let user: User = match sqlx::query_as(
             "INSERT INTO users (id, email, name, password_hash) VALUES ($1, $2, $3, $4) \
-             RETURNING id, email, name, role, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at",
+             RETURNING id, email, name, role, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at, EXTRACT(EPOCH FROM suspended_at)::BIGINT AS suspended_at",
         )
         .bind(Uuid::now_v7())
         .bind(email)
@@ -131,7 +137,7 @@ impl Store {
     // the user and their password hash, for logging in
     pub async fn user_by_email(&self, email: &str) -> anyhow::Result<Option<(User, String)>> {
         let row = sqlx::query(
-            "SELECT id, email, name, role, password_hash, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at \
+            "SELECT id, email, name, role, password_hash, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at, EXTRACT(EPOCH FROM suspended_at)::BIGINT AS suspended_at \
              FROM users WHERE LOWER(email) = LOWER($1)",
         )
         .bind(email)
@@ -144,7 +150,7 @@ impl Store {
 
     pub async fn user(&self, id: Uuid) -> anyhow::Result<Option<(User, String)>> {
         let row = sqlx::query(
-            "SELECT id, email, name, role, password_hash, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at \
+            "SELECT id, email, name, role, password_hash, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at, EXTRACT(EPOCH FROM suspended_at)::BIGINT AS suspended_at \
              FROM users WHERE id = $1",
         )
         .bind(id)
@@ -169,30 +175,47 @@ impl Store {
     }
 
     // every workspace, newest first, for admins
-    // a page of workspaces, newest first, matching `id` or whose name or a member's email contains
-    // `search`
+    // a page of workspaces matching `id`, or whose name or a member's email contains `search`
     pub async fn workspaces_page(
         &self,
         search: Option<&str>,
         id: Option<Uuid>,
+        sort: Sort<WorkspaceSort>,
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<Vec<WorkspaceSummary>> {
-        let rows = sqlx::query(
+        let pattern = search.map(crate::admin::contains_pattern);
+        let mut query = QueryBuilder::new(
             "SELECT w.id, w.name, w.plan, w.credits, w.allowed_models, EXTRACT(EPOCH FROM w.created_at)::BIGINT AS created_at, \
              (SELECT u.email FROM workspace_members m JOIN users u ON u.id = m.user_id \
               WHERE m.workspace_id = w.id ORDER BY m.role = 'owner' DESC, u.created_at LIMIT 1) AS owner_email \
-             FROM workspaces w WHERE ($1::TEXT IS NULL OR w.name ILIKE $1 OR EXISTS (SELECT 1 FROM workspace_members m JOIN users u ON u.id = m.user_id \
-             WHERE m.workspace_id = w.id AND u.email ILIKE $1)) AND ($2::UUID IS NULL OR w.id = $2) \
-             ORDER BY w.created_at DESC, w.id DESC LIMIT $3 OFFSET $4",
-        )
-        .bind(search.map(crate::admin::contains_pattern))
-        .bind(id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pg)
-        .await
-        .context("failed to list workspaces")?;
+             FROM workspaces w WHERE (",
+        );
+        query
+            .push_bind(pattern.clone())
+            .push("::TEXT IS NULL OR w.name ILIKE ")
+            .push_bind(pattern.clone())
+            .push(
+                " OR EXISTS (SELECT 1 FROM workspace_members m JOIN users u ON u.id = m.user_id \
+                 WHERE m.workspace_id = w.id AND u.email ILIKE ",
+            )
+            .push_bind(pattern)
+            .push(")) AND (")
+            .push_bind(id)
+            .push("::UUID IS NULL OR w.id = ")
+            .push_bind(id)
+            .push(")");
+        push_order(&mut query, sort.key.column(), sort.descending, "w.id");
+        query
+            .push(" LIMIT ")
+            .push_bind(limit)
+            .push(" OFFSET ")
+            .push_bind(offset);
+        let rows = query
+            .build()
+            .fetch_all(&self.pg)
+            .await
+            .context("failed to list workspaces")?;
         rows.iter()
             .map(|row| {
                 Ok(WorkspaceSummary {
@@ -267,6 +290,50 @@ impl Store {
         .await
         .context("failed to update user")?;
         Ok(())
+    }
+
+    // workspaces the user is the only member of, which go when the user does
+    pub async fn sole_workspaces(&self, user: Uuid) -> anyhow::Result<Vec<Uuid>> {
+        sqlx::query_scalar(
+            "SELECT m.workspace_id FROM workspace_members m WHERE m.user_id = $1 \
+             AND NOT EXISTS (SELECT 1 FROM workspace_members o WHERE o.workspace_id = m.workspace_id AND o.user_id <> $1)",
+        )
+        .bind(user)
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to list sole workspaces")
+    }
+
+    pub async fn workspace_session_ids(&self, workspace: Uuid) -> anyhow::Result<Vec<Uuid>> {
+        sqlx::query_scalar("SELECT id FROM sessions WHERE workspace_id = $1")
+            .bind(workspace)
+            .fetch_all(&self.pg)
+            .await
+            .context("failed to list workspace sessions")
+    }
+
+    // deletes the user and those of `workspaces` nobody else has joined since; false when there's no
+    // such user
+    pub async fn delete_user(&self, user: Uuid, workspaces: &[Uuid]) -> anyhow::Result<bool> {
+        let mut tx = self.pg.begin().await.context("failed to begin")?;
+        sqlx::query(
+            "DELETE FROM workspaces w WHERE w.id = ANY($2) \
+             AND NOT EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id = w.id AND m.user_id <> $1)",
+        )
+        .bind(user)
+        .bind(workspaces)
+        .execute(&mut *tx)
+        .await
+        .context("failed to delete workspaces")?;
+        let deleted = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&mut *tx)
+            .await
+            .context("failed to delete user")?
+            .rows_affected()
+            > 0;
+        tx.commit().await.context("failed to commit")?;
+        Ok(deleted)
     }
 
     pub async fn workspaces(&self, user: Uuid) -> anyhow::Result<Vec<Workspace>> {

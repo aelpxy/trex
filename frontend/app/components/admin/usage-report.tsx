@@ -1,6 +1,7 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 
+import { columnsFor, DataTable } from "~/components/ui/data-table";
 import { focusRing } from "~/components/ui/styles";
 import { formatUsd } from "~/lib/credits";
 import { queries } from "~/lib/queries";
@@ -50,42 +51,33 @@ function DailyChart({ report }: { report: ApiUsageReport }) {
   );
 }
 
-function Table({ title, headings, rows }: { title: string; headings: string[]; rows: (string | number)[][] }) {
-  return (
-    <section>
-      <h2 className="text-sm font-medium">{title}</h2>
-      <table className="ui-card mt-3 w-full overflow-hidden text-left text-xs">
-        <thead className="border-b border-line text-muted">
-          <tr>
-            {headings.map((heading, index) => (
-              <th key={heading} className={`px-4 py-2.5 font-medium ${index > 0 ? "text-right" : ""}`}>
-                {heading}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={String(row[0])} className="border-b border-line last:border-0">
-              {row.map((cell, index) => (
-                <td key={index} className={`px-4 py-2.5 ${index > 0 ? "text-right tabular-nums" : ""}`}>
-                  {cell}
-                </td>
-              ))}
-            </tr>
-          ))}
-          {rows.length === 0 && (
-            <tr>
-              <td colSpan={headings.length} className="px-4 py-4 text-center text-muted">
-                No usage in this range.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    </section>
-  );
-}
+type ModelRow = ApiUsageReport["models"][number];
+type AccountRow = ApiUsageReport["accounts"][number];
+
+const modelColumn = columnsFor<ModelRow>();
+const MODEL_COLUMNS = [
+  modelColumn.accessor("model", { header: "Model", cell: (info) => <span className="font-mono text-[13px]">{info.getValue()}</span> }),
+  modelColumn.accessor("responses", { header: "Responses", cell: (info) => count(info.getValue()), meta: { align: "right", className: "hidden sm:table-cell" } }),
+  modelColumn.accessor("input_tokens", { header: "Input", cell: (info) => tokens(info.getValue()), meta: { align: "right", className: "hidden sm:table-cell" } }),
+  modelColumn.accessor("output_tokens", { header: "Output", cell: (info) => tokens(info.getValue()), meta: { align: "right", className: "hidden sm:table-cell" } }),
+  modelColumn.accessor("credits", { header: "Spend", cell: (info) => formatUsd(info.getValue()), meta: { align: "right" } }),
+];
+
+const accountColumn = columnsFor<AccountRow>();
+const ACCOUNT_COLUMNS = [
+  accountColumn.accessor("name", {
+    header: "Account",
+    cell: ({ row }) => (
+      <span className="block min-w-0">
+        <span className="block truncate font-medium">{row.original.name}</span>
+        <span className="block truncate text-xs text-muted">{row.original.email}</span>
+      </span>
+    ),
+  }),
+  accountColumn.accessor("responses", { header: "Responses", cell: (info) => count(info.getValue()), meta: { align: "right", className: "hidden sm:table-cell" } }),
+  accountColumn.accessor("tokens", { header: "Tokens", cell: (info) => tokens(info.getValue()), meta: { align: "right" } }),
+  accountColumn.accessor("credits", { header: "Spend", cell: (info) => formatUsd(info.getValue()), meta: { align: "right" } }),
+];
 
 export function UsageReport({ days }: { days: number }) {
   const { data: report } = useSuspenseQuery(queries.admin.usage(days));
@@ -106,16 +98,14 @@ export function UsageReport({ days }: { days: number }) {
         ))}
       </nav>
       <DailyChart report={report} />
-      <Table
-        title="By model"
-        headings={["Model", "Responses", "Input", "Output", "Spend"]}
-        rows={report.models.map((model) => [model.model, count(model.responses), tokens(model.input_tokens), tokens(model.output_tokens), formatUsd(model.credits)])}
-      />
-      <Table
-        title="Top workspaces"
-        headings={["Workspace", "Responses", "Tokens", "Spend"]}
-        rows={report.workspaces.map((workspace) => [workspace.name, count(workspace.responses), tokens(workspace.tokens), formatUsd(workspace.credits)])}
-      />
+      <section>
+        <h2 className="text-sm font-medium">By model</h2>
+        <DataTable label="Usage by model" data={report.models} columns={MODEL_COLUMNS} rowId={(row) => row.model} empty="No usage in this range." />
+      </section>
+      <section>
+        <h2 className="text-sm font-medium">Top accounts</h2>
+        <DataTable label="Top accounts" data={report.accounts} columns={ACCOUNT_COLUMNS} rowId={(row) => row.user} empty="No usage in this range." />
+      </section>
     </div>
   );
 }

@@ -12,6 +12,7 @@ const TABS = [
   { to: "/account", label: "Billing", end: true },
   { to: "/account/profile", label: "Profile" },
   { to: "/account/devices", label: "Devices" },
+  { to: "/account/appearance", label: "Appearance" },
 ];
 
 export default function AccountLayout() {

@@ -27,10 +27,10 @@ export function ChatHeader({ title, chatId, project, onRename, onDelete, actions
     <header className="glass sticky top-0 z-10 flex h-12 shrink-0 items-center px-3">
       {project && (
         <>
-          <Link to={`/projects/${project.id}`} className={`max-w-48 shrink-0 truncate rounded-md px-2 py-1 text-sm text-muted transition-colors hover:bg-subtle hover:text-ink ${focusRing}`}>
+          <Link to={`/projects/${project.id}`} className={`hidden max-w-48 shrink-0 truncate rounded-md px-2 py-1 text-sm text-muted sm:block transition-colors hover:bg-subtle hover:text-ink ${focusRing}`}>
             {project.name}
           </Link>
-          <span className="text-sm text-muted/60">/</span>
+          <span className="hidden text-sm text-muted/60 sm:inline">/</span>
         </>
       )}
       {editing ? (

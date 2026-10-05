@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
 import { Button } from "~/components/ui/button";
-import { focusRing } from "~/components/ui/styles";
+import { SelectField } from "~/components/ui/select-field";
 import { queries } from "~/lib/queries";
 
 import { ActionStatus } from "./action-status";
@@ -39,18 +39,14 @@ export function LogTail() {
   return (
     <div>
       <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={level}
-          onChange={(event) => setParams((current) => ({ ...Object.fromEntries(current), level: event.target.value }), { replace: true })}
-          aria-label="Lowest level shown"
-          className={`ui-input h-10 w-32 ${focusRing}`}
-        >
-          {LEVELS.map((option) => (
-            <option key={option} value={option}>
-              {LEVEL_LABEL[option]}
-            </option>
-          ))}
-        </select>
+        <div className="w-32 shrink-0">
+          <SelectField
+            label="Lowest level shown"
+            value={level}
+            onChange={(next) => setParams((current) => ({ ...Object.fromEntries(current), level: next }), { replace: true })}
+            options={LEVELS.map((option) => ({ value: option, label: LEVEL_LABEL[option] }))}
+          />
+        </div>
         <div className="min-w-0 flex-1">
           <FilterInput value={filter} onChange={setFilter} label="Search logs" />
         </div>

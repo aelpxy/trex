@@ -82,6 +82,7 @@ export function WorkspaceProvider({ account, children }: { account: Account; chi
 
   const moveChat = useCallback((id: string, projectId: string | null) => {
     const previous = sessions.find((session) => session.id === id)?.project_id ?? null;
+    if (previous === projectId) return;
     const place = (project_id: string | null) => setSessions((current) => current.map((session) => (session.id === id ? { ...session, project_id } : session)));
     place(projectId);
     trex.updateSession(id, { project_id: projectId }).catch((error) => {

@@ -219,6 +219,7 @@ pub async fn signup(
     responses(
         (status = 200, body = Me),
         (status = 401, description = "Wrong email or password", body = ErrorResponse),
+        (status = 403, description = "The account is suspended", body = ErrorResponse),
     ),
 )]
 pub async fn login(
@@ -234,6 +235,11 @@ pub async fn login(
     let Some((user, _)) = found.filter(|_| matches) else {
         return Err(ApiError::Authentication("wrong email or password".into()));
     };
+    if user.suspended_at.is_some() {
+        return Err(ApiError::Permission(
+            "this account is suspended; contact an administrator".into(),
+        ));
+    }
     let cookie = sign_in(&state, user.id, &client).await?;
     let workspaces = state.store.workspaces(user.id).await?;
     let me = Me {
@@ -467,7 +473,7 @@ async fn sign_in(
 }
 
 // argon2 is deliberately slow, so it runs off the async workers
-async fn hash_password(password: String) -> anyhow::Result<String> {
+pub async fn hash_password(password: String) -> anyhow::Result<String> {
     tokio::task::spawn_blocking(move || {
         Argon2::default()
             .hash_password(password.as_bytes())
@@ -514,7 +520,7 @@ fn valid_name(name: &str) -> Result<String, ApiError> {
     Ok(name.to_owned())
 }
 
-fn valid_password(password: &str, param: &'static str) -> Result<(), ApiError> {
+pub fn valid_password(password: &str, param: &'static str) -> Result<(), ApiError> {
     if password.chars().count() < MIN_PASSWORD_CHARS || password.len() > MAX_PASSWORD_BYTES {
         return Err(ApiError::invalid(
             format!("passwords need at least {MIN_PASSWORD_CHARS} characters"),

@@ -16,7 +16,7 @@ import { SidebarSection } from "./sidebar-section";
 type SidebarContentProps = { collapsed?: boolean; onNavigate?: () => void };
 
 export function SidebarContent({ collapsed = false, onNavigate }: SidebarContentProps) {
-  const { projects, recents } = useWorkspace();
+  const { projects, recents, moveChat } = useWorkspace();
   return (
     <>
       <ScrollArea.Root className="relative min-h-0 flex-1">
@@ -37,7 +37,7 @@ export function SidebarContent({ collapsed = false, onNavigate }: SidebarContent
                 </li>
               ))}
             </SidebarSection>
-            <SidebarSection id="recents" title="Recents">
+            <SidebarSection id="recents" title="Recents" drop={(chatId) => moveChat(chatId, null)}>
               {recents.map((chat) => (
                 <li key={chat.id}>
                   <ChatLink chat={chat} onNavigate={onNavigate} />
