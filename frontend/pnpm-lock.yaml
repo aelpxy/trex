@@ -41,6 +41,9 @@ importers:
       codemirror:
         specifier: ^6.0.2
         version: 6.0.2
+      cronstrue:
+        specifier: ^3.27.0
+        version: 3.27.0
       diff:
         specifier: ^9.0.0
         version: 9.0.0
@@ -832,6 +835,10 @@ packages:
 
   crelt@1.0.7:
     resolution: {integrity: sha512-aK6BbWfhf4U/wCcLHKPJl/xa6VkVstRaPywWtMKGwuOLc/wZTyQYuoxgvZnNsBvv7Kg3YTBQYYBCggcviQczuA==}
+
+  cronstrue@3.27.0:
+    resolution: {integrity: sha512-AKhV4ilvx73NmicrZCGASdszUIf2ew0A/6jQQTh4pu3lIUzgWOGjT3Gv3CGIcTQ/p8Qy/tZuCmlaOftj8PXaNg==}
+    hasBin: true
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
@@ -2781,6 +2788,8 @@ snapshots:
     optional: true
 
   crelt@1.0.7: {}
+
+  cronstrue@3.27.0: {}
 
   csstype@3.2.3: {}
 

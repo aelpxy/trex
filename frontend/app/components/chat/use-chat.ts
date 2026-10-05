@@ -5,7 +5,7 @@ import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { ApiError, streamEvents, type StreamEvent } from "~/lib/api";
 import { kindOf, type MessageAttachment } from "~/lib/attachments";
 import { partialString } from "~/lib/partial-json";
-import { trex, type ApiAccessRequest, type ApiItem, type ApiQuestion, type ApiSession, type ApiUsage } from "~/lib/trex";
+import { trex, type ApiAccessRequest, type ApiItem, type ApiItemAttachment, type ApiQuestion, type ApiSession, type ApiUsage } from "~/lib/trex";
 
 import { applyEvent } from "./events";
 import { sessionSettings, type ChatSettings } from "./models";
@@ -70,10 +70,14 @@ export type FreshChat = { content: string };
 export type OutgoingAttachment = MessageAttachment & { url: string };
 
 // a message sent during a run, waiting for the agent to read it
-export type QueuedMessage = { id: string; content: string; attachments: OutgoingAttachment[] };
+export type QueuedMessage = { id: string; content: string; attachments: MessageAttachment[] };
 
-const savedAttachments = (item: Extract<ApiItem, { type: "message" }>): MessageAttachment[] =>
+const savedAttachments = (item: { attachments: ApiItemAttachment[] }): MessageAttachment[] =>
   item.attachments.map((saved) => ({ id: saved.id, name: saved.filename ?? saved.mime_type, kind: kindOf(saved.mime_type) }));
+
+// a refreshed page picks the queue back up from the server, which keeps it until the agent reads it
+const queuedFrom = (data?: ChatData): QueuedMessage[] =>
+  (data?.session.queued_messages ?? []).map((message) => ({ id: crypto.randomUUID(), content: message.content, attachments: savedAttachments(message) }));
 
 type ToolCall = { name: string; args: Record<string, unknown> };
 
@@ -310,8 +314,8 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
   // a chat reloaded mid-run replays that run from its start, rebuilt on top of the items saved before it
   const replaying = useRef(Boolean(data && !fresh && data.session.status === "running"));
   const answers = useRef(new Map<string, string>());
-  const [queued, setQueued] = useState<QueuedMessage[]>([]);
-  const queuedRef = useRef<QueuedMessage[]>([]);
+  const [queued, setQueued] = useState<QueuedMessage[]>(() => queuedFrom(data));
+  const queuedRef = useRef<QueuedMessage[]>(queued);
   const changeQueued = useCallback((change: (current: QueuedMessage[]) => QueuedMessage[]) => {
     queuedRef.current = change(queuedRef.current);
     setQueued(queuedRef.current);

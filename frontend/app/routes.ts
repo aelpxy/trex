@@ -6,8 +6,13 @@ export default [
     index("routes/home.tsx"),
     route("chat/:chatId", "routes/chat.tsx"),
     route("scheduled", "routes/scheduled.tsx"),
+    route("scheduled/:taskId", "routes/scheduled-task.tsx"),
     route("library", "routes/library.tsx"),
-    route("account", "routes/account.tsx"),
+    route("account", "routes/account/layout.tsx", [
+      index("routes/account/billing.tsx"),
+      route("profile", "routes/account/profile.tsx"),
+      route("devices", "routes/account/devices.tsx"),
+    ]),
     route("admin", "routes/admin/layout.tsx", [
       index("routes/admin/overview.tsx"),
       route("users", "routes/admin/users.tsx"),

@@ -4,6 +4,34 @@ import { api, ApiError, encodePath } from "./api";
 
 export type ApiUser = { id: string; email: string; name: string; role: "user" | "admin"; created_at: number };
 export type ApiWorkspace = { id: string; name: string; plan: string; role: string; credits: number; created_at: number };
+export type ApiScheduledTask = {
+  id: string;
+  title: string;
+  prompt: string;
+  model: string;
+  reasoning_effort: string | null;
+  schedule: string;
+  timezone: string;
+  paused: boolean;
+  project_id: string | null;
+  next_run_at: number | null;
+  last_run_at: number | null;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+export type TaskInput = {
+  title: string;
+  prompt: string;
+  model: string;
+  reasoning_effort: string | null;
+  schedule: string;
+  timezone: string;
+  project_id: string | null;
+  paused?: boolean;
+};
+
 export type ApiSignInSession = {
   id: string;
   ip: string | null;
@@ -38,14 +66,17 @@ export type ApiSession = {
   status: "idle" | "running" | "needs_input" | "failed";
   pending_questions: ApiQuestion[] | null;
   last_error: string | null;
+  queued_messages: { content: string; attachments: ApiItemAttachment[] }[];
   created_at: number;
   updated_at: number;
 };
 
 export type ApiProject = { id: string; name: string; instructions: string | null; created_at: number; updated_at: number };
 
+export type ApiItemAttachment = { id: string; kind: string; mime_type: string; filename: string | null };
+
 export type ApiItem = (
-  | { type: "message"; role: string; text: string; attachments: { id: string; kind: string; mime_type: string; filename: string | null }[] }
+  | { type: "message"; role: string; text: string; attachments: ApiItemAttachment[] }
   | { type: "tool_call"; call_id: string; name: string; arguments: string }
   | { type: "tool_result"; call_id: string; output: string }
   | { type: "reasoning"; summary: string }
@@ -153,7 +184,7 @@ export const trex = {
     logs: () => api<List<ApiLogLine>>("GET", "/admin/logs?limit=1000").then((list) => list.data),
   },
   plans: () => api<List<ApiPlan>>("GET", "/plans").then((list) => list.data),
-  ledger: (startingAfter?: string) => api<List<ApiLedgerEntry>>("GET", `/credits/ledger?limit=50${startingAfter ? `&starting_after=${startingAfter}` : ""}`),
+  ledger: (page: number, perPage: number) => api<List<ApiLedgerEntry> & { total_count: number }>("GET", `/credits/ledger?page=${page}&limit=${perPage}`),
   updateMe: (body: { name: string }) => api<ApiUser>("PATCH", "/me", body),
   changePassword: (body: { current_password: string; new_password: string }) => api<void>("POST", "/me/password", body),
 
@@ -162,6 +193,15 @@ export const trex = {
   deleteProject: (id: string) => api<unknown>("DELETE", `/projects/${id}`),
 
   sessions: () => all<ApiSession>("/sessions"),
+  scheduled: {
+    list: () => api<List<ApiScheduledTask>>("GET", "/scheduled_tasks").then((list) => list.data),
+    get: (id: string) => api<ApiScheduledTask>("GET", `/scheduled_tasks/${id}`),
+    create: (body: TaskInput) => api<ApiScheduledTask>("POST", "/scheduled_tasks", body),
+    update: (id: string, body: Partial<TaskInput>) => api<ApiScheduledTask>("PATCH", `/scheduled_tasks/${id}`, body),
+    remove: (id: string) => api<void>("DELETE", `/scheduled_tasks/${id}`),
+    run: (id: string) => api<ApiSession>("POST", `/scheduled_tasks/${id}/run`),
+    runs: (id: string) => all<ApiSession>(`/sessions?scheduled_task_id=${id}`),
+  },
   session: (id: string) => api<ApiSession>("GET", `/sessions/${id}`),
   createSession: (body: { model: string; reasoning_effort: string | null; fast: boolean; project_id?: string | null }) => api<ApiSession>("POST", "/sessions", body),
   updateSession: (id: string, body: { title?: string; project_id?: string | null; model?: string; reasoning_effort?: string | null; fast?: boolean }) => api<ApiSession>("PATCH", `/sessions/${id}`, body),

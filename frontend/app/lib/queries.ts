@@ -1,19 +1,20 @@
-import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
+import { queryOptions } from "@tanstack/react-query";
 
 import { trex } from "./trex";
 
 const LOG_POLL_MS = 2000;
+export const LEDGER_PAGE_SIZE = 25;
 
 // every server read the app caches, keyed so a change can invalidate exactly what it affects
 export const queries = {
   credits: () => queryOptions({ queryKey: ["credits"], queryFn: trex.credits }),
-  ledger: () =>
-    infiniteQueryOptions({
-      queryKey: ["credits", "ledger"],
-      queryFn: ({ pageParam }) => trex.ledger(pageParam),
-      initialPageParam: undefined as string | undefined,
-      getNextPageParam: (page) => (page.has_more ? page.data.at(-1)?.id : undefined),
-    }),
+  ledger: (page: number) => queryOptions({ queryKey: ["credits", "ledger", page], queryFn: () => trex.ledger(page, LEDGER_PAGE_SIZE) }),
+  scheduled: {
+    all: ["scheduled"] as const,
+    list: () => queryOptions({ queryKey: ["scheduled", "list"], queryFn: trex.scheduled.list }),
+    task: (id: string) => queryOptions({ queryKey: ["scheduled", "task", id], queryFn: () => trex.scheduled.get(id) }),
+    runs: (id: string) => queryOptions({ queryKey: ["scheduled", "runs", id], queryFn: () => trex.scheduled.runs(id) }),
+  },
   plans: () => queryOptions({ queryKey: ["plans"], queryFn: trex.plans }),
   signInSessions: () => queryOptions({ queryKey: ["me", "sessions"], queryFn: trex.signInSessions }),
   admin: {
