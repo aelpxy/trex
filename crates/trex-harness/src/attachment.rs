@@ -21,6 +21,11 @@ pub fn reference(hash: &str, mime: &str) -> String {
     format!("{SCHEME}{hash}#{mime}")
 }
 
+// how an image in a tool's output reads as text, for the ui and logs; the ui shows the image
+pub fn image_placeholder(reference: &str) -> String {
+    format!("[image: {reference}]")
+}
+
 pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")

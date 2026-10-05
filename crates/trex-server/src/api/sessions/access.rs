@@ -154,7 +154,8 @@ async fn find_access_request(
         .pending_access(&sandbox)
         .await?
         .into_iter()
-        .find(|request| request.id == request_id)
+        // the user may be answering a request openshell has since refined into a new one
+        .find(|request| request.id == request_id || request.supersedes == request_id)
         .ok_or_else(not_found)?;
     Ok((sandbox, request))
 }

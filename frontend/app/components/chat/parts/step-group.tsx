@@ -19,6 +19,7 @@ export function summarize(parts: Part[]) {
     count("read_file") && `read ${plural(count("read_file"), "file", "files")}`,
     count("search") && plural(count("search"), "search", "searches"),
     count("web") && `fetched ${plural(count("web"), "page", "pages")}`,
+    count("browse") && `checked ${plural(count("browse"), "page", "pages")} in the browser`,
     count("image") && `viewed ${plural(count("image"), "image", "images")}`,
     count("library") && "used the library",
     count("process") && `checked ${plural(count("process"), "process", "processes")}`,

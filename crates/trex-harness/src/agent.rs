@@ -35,7 +35,8 @@ use crate::{
 // the model would otherwise assume files and installs from earlier in the conversation still exist
 const SANDBOX_REPLACED_NOTE: &str = "[The sandbox stopped working and was replaced with a fresh one. Files, installed packages and processes from earlier in this conversation are gone; recreate what you need, or load it from the library.]";
 const ACCESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const BASH: &str = "bash";
+// the tools whose connections go through the sandbox, and can be denied there
+const NETWORK_TOOLS: &[&str] = &["bash", "browse"];
 // attempts per model request; the client already retries failed connections and statuses beneath this
 const MAX_ATTEMPTS: u32 = 5;
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
@@ -747,12 +748,14 @@ impl Agent<'_> {
         call: &FunctionToolCall,
         events: &mpsc::Sender<Event>,
     ) -> anyhow::Result<ToolOutput> {
-        // only sandbox commands reach the network through openshell, so only they wait for access
-        let gate = (call.name == BASH).then_some(AccessGate {
-            openshell: self.openshell,
-            sandbox: self.sandbox,
-            unattended: self.unattended,
-        });
+        // only sandbox commands and the sandbox browser reach the network through openshell
+        let gate = NETWORK_TOOLS
+            .contains(&call.name.as_str())
+            .then_some(AccessGate {
+                openshell: self.openshell,
+                sandbox: self.sandbox,
+                unattended: self.unattended,
+            });
         let before = match &gate {
             Some(gate) => gate.pending().await,
             None => HashSet::new(),

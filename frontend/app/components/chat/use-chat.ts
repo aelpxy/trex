@@ -145,6 +145,8 @@ function toolView(name: string, args: Record<string, unknown>): { name: ToolName
       return { name: "process", title: "Stop process", input: { detail: text(args.id) } };
     case "get_current_time":
       return { name: "time", input: { detail: text(args.timezone) } };
+    case "browse":
+      return { name: "browse", input: { detail: typeof args.port === "number" ? `localhost:${args.port}${text(args.path) || "/"}` : text(args.url) } };
     case SCHEDULE_TASK:
       return { name: "time", title: "Schedule task", input: { detail: `${text(args.title)} · ${text(args.schedule)} ${text(args.timezone)}` } };
     case "show_preview":
@@ -719,7 +721,15 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
       if (response.kind === "access") {
         // deciding never changes whether the run is going
         updateLast((message) => ({ ...applyEvent(message, { type: "access.resolved", id: key, approved: response.approved }), state: message.state }));
-        trex.decideAccess(chatId, key, response.approved).catch((error) => console.warn("could not decide the access request", error));
+        // the card shows the answer at once; if it didn't go through, it goes back to waiting for one
+        trex.decideAccess(chatId, key, response.approved).catch((error) => {
+          setMessages((current) =>
+            current.map((message) =>
+              message.role === "assistant" ? { ...message, parts: message.parts.map((part) => (part.type === "access" && part.id === key ? { ...part, state: "pending" } : part)) } : message,
+            ),
+          );
+          toasts.add({ title: response.approved ? "Couldn't approve the access request" : "Couldn't reject the access request", description: errorMessage(error), type: "error" });
+        });
         return;
       }
       if (response.kind === "skip") {

@@ -205,7 +205,7 @@ fn item(item: &Value) -> Option<Item> {
         }),
         "function_call_output" => Some(Item::ToolResult {
             call_id: text_of(&item["call_id"]),
-            output: text_of(&item["output"]),
+            output: output_text(&item["output"]),
         }),
         "reasoning" => {
             let summary: Vec<&str> = item["summary"]
@@ -219,6 +219,24 @@ fn item(item: &Value) -> Option<Item> {
         }
         _ => None,
     }
+}
+
+// tool output saved as content parts reads as its text, each image as a reference the ui can show
+fn output_text(value: &Value) -> String {
+    let Value::Array(parts) = value else {
+        return text_of(value);
+    };
+    parts
+        .iter()
+        .map(|part| match part["type"].as_str() {
+            Some("input_text") => text_of(&part["text"]),
+            Some("input_image") => {
+                attachment::image_placeholder(part["image_url"].as_str().unwrap_or_default())
+            }
+            _ => "[file]".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn text_of(value: &Value) -> String {
@@ -252,6 +270,14 @@ mod tests {
         assert_eq!(item_json(&assistant).unwrap()["text"], "hello");
         assert_eq!(item_json(&call).unwrap()["type"], "tool_call");
         assert_eq!(item_json(&output).unwrap()["output"], "ok");
+        let shown = json!({"type": "function_call_output", "call_id": "c2", "output": [
+            {"type": "input_text", "text": "the page:"},
+            {"type": "input_image", "image_url": "attachment://abc#image/jpeg", "detail": "auto"}
+        ]});
+        assert_eq!(
+            item_json(&shown).unwrap()["output"],
+            "the page:\n[image: attachment://abc#image/jpeg]"
+        );
         assert_eq!(
             item_json(&reasoning).unwrap(),
             json!({"type": "reasoning", "summary": "thinking"})

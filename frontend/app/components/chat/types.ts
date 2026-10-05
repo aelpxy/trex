@@ -1,6 +1,6 @@
 import type { MessageAttachment } from "~/lib/attachments";
 
-export type ToolName = "shell" | "write_file" | "edit_file" | "read_file" | "search" | "web" | "library" | "image" | "process" | "time";
+export type ToolName = "shell" | "write_file" | "edit_file" | "read_file" | "search" | "web" | "browse" | "library" | "image" | "process" | "time";
 
 export type ReasoningPart = { type: "reasoning"; text: string; startedAt: number; endedAt?: number };
 export type TextPart = { type: "text"; text: string };

@@ -35,6 +35,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
 const PHASE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const POLICY_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+const APPROVE_ATTEMPTS: usize = 3;
 const FORWARD_BUFFER_FRAMES: usize = 16;
 #[cfg(test)]
 const DEV_IMAGE: &str = "localhost/trex-sandbox:latest";
@@ -59,6 +60,8 @@ pub struct AccessRequest {
     pub rationale: String,
     pub security_notes: String,
     pub hit_count: i32,
+    // the request this refined one replaces, if any
+    pub supersedes: String,
 }
 
 // where the user's review of an access request stands
@@ -226,7 +229,8 @@ impl OpenShell {
         })
     }
 
-    // every request's review status by id, decided ones included
+    // every request's review status by id, decided ones included; a replaced request takes the
+    // status of the refined one replacing it
     pub async fn access_statuses(
         &self,
         sandbox: &Sandbox,
@@ -243,19 +247,9 @@ impl OpenShell {
             .await
             .context("failed to get access requests")?
             .into_inner();
-        Ok(response
-            .chunks
-            .into_iter()
-            .filter_map(|chunk| {
-                let status = match chunk.status.as_str() {
-                    "pending" => AccessStatus::Pending,
-                    "approved" => AccessStatus::Approved,
-                    "rejected" => AccessStatus::Rejected,
-                    _ => return None,
-                };
-                Some((chunk.id, status))
-            })
-            .collect())
+        Ok(statuses_of(response.chunks.into_iter().map(|chunk| {
+            (chunk.id, chunk.status, chunk.supersedes_chunk_id)
+        })))
     }
 
     // openshell has no push notification for new drafts, so callers poll this
@@ -295,33 +289,52 @@ impl OpenShell {
                 rationale: chunk.rationale,
                 security_notes: chunk.security_notes,
                 hit_count: chunk.hit_count,
+                supersedes: chunk.supersedes_chunk_id,
             })
             .collect();
         Ok(requests)
     }
 
     // the review token pins approval to the exact proposal the user saw
+    // openshell re-evaluates a request as more denials arrive, which invalidates the review token
+    // the user saw; approving then refetches the request, or the refined one replacing it, and retries
     pub async fn approve_access(
         &self,
         sandbox: &Sandbox,
         request: &AccessRequest,
     ) -> anyhow::Result<()> {
-        let approve = proto::ApproveDraftChunkRequest {
-            workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
-            sandbox: sandbox.name.clone(),
-            chunk_id: request.id.clone(),
-            review_token: request.review_token.clone(),
-            ..Default::default()
-        };
-        let version = self
-            .client
-            .raw_grpc()
-            .approve_draft_chunk(approve)
-            .await
-            .context("failed to approve access request")?
-            .into_inner()
-            .policy_version;
-        self.wait_policy_loaded(sandbox, version).await
+        let (mut id, mut token) = (request.id.clone(), request.review_token.clone());
+        for attempt in 1..=APPROVE_ATTEMPTS {
+            let approve = proto::ApproveDraftChunkRequest {
+                workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
+                sandbox: sandbox.name.clone(),
+                chunk_id: id.clone(),
+                review_token: token.clone(),
+                ..Default::default()
+            };
+            match self.client.raw_grpc().approve_draft_chunk(approve).await {
+                Ok(response) => {
+                    let version = response.into_inner().policy_version;
+                    return self.wait_policy_loaded(sandbox, version).await;
+                }
+                Err(status)
+                    if status.code() == tonic::Code::FailedPrecondition
+                        && attempt < APPROVE_ATTEMPTS =>
+                {
+                    let current = self
+                        .pending_access(sandbox)
+                        .await?
+                        .into_iter()
+                        .find(|pending| pending.id == id || pending.supersedes == id)
+                        .context("the access request is no longer pending")?;
+                    (id, token) = (current.id, current.review_token);
+                }
+                Err(status) => {
+                    return Err(status).context("failed to approve access request");
+                }
+            }
+        }
+        unreachable!("the last attempt returns")
     }
 
     // the sandbox loads an approved policy asynchronously, so a retry right after approving can
@@ -662,6 +675,33 @@ impl OpenShell {
     }
 }
 
+// review status by request id from (id, status, the id it replaces); a refined request decides for
+// the one it replaced, which may stay pending or disappear
+fn statuses_of(
+    chunks: impl IntoIterator<Item = (String, String, String)>,
+) -> HashMap<String, AccessStatus> {
+    let mut statuses = HashMap::new();
+    let mut refined = Vec::new();
+    for (id, status, replaces) in chunks {
+        let status = match status.as_str() {
+            "pending" => AccessStatus::Pending,
+            "approved" => AccessStatus::Approved,
+            "rejected" => AccessStatus::Rejected,
+            _ => continue,
+        };
+        if !replaces.is_empty() {
+            refined.push((replaces, status));
+        }
+        statuses.insert(id, status);
+    }
+    for (replaced, status) in refined {
+        if status != AccessStatus::Pending || !statuses.contains_key(&replaced) {
+            statuses.insert(replaced, status);
+        }
+    }
+    statuses
+}
+
 // a sandbox's lifecycle as the gateway reports it, for admins looking across workspaces
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxState {
@@ -750,6 +790,35 @@ impl ExecStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refined_request_decides_for_the_one_it_replaced() {
+        let chunk = |id: &str, status: &str, replaces: &str| {
+            (id.to_owned(), status.to_owned(), replaces.to_owned())
+        };
+        let statuses = statuses_of([
+            chunk("a", "pending", ""),
+            chunk("a2", "approved", "a"),
+            chunk("b2", "rejected", "b"),
+            chunk("c", "approved", ""),
+            chunk("c2", "pending", "c"),
+        ]);
+        assert_eq!(
+            statuses["a"],
+            AccessStatus::Approved,
+            "the refinement was approved"
+        );
+        assert_eq!(
+            statuses["b"],
+            AccessStatus::Rejected,
+            "the original disappeared"
+        );
+        assert_eq!(
+            statuses["c"],
+            AccessStatus::Approved,
+            "a pending refinement doesn't undo a decision"
+        );
+    }
 
     // needs the gateway tunnel on 127.0.0.1:17670 and certs in <workspace>/certs/openshell: cargo test -- --ignored
     #[tokio::test]

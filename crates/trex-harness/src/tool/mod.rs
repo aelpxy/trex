@@ -1,4 +1,5 @@
 mod bash;
+mod browse;
 mod file;
 mod image;
 mod library;
@@ -24,6 +25,7 @@ use uuid::Uuid;
 
 pub use self::{
     bash::Bash,
+    browse::Browse,
     file::{EditFile, ReadFile, WriteFile},
     image::ViewImage,
     library::{LibraryList, LibraryLoad, LibrarySave},
@@ -113,7 +115,7 @@ impl ToolOutput {
         }
     }
 
-    // what the ui and logs show; images and files appear as placeholders
+    // what the ui and logs show; images appear as references the ui can show, files as placeholders
     pub fn text(&self) -> String {
         match self {
             Self::Text(text) => text.clone(),
@@ -121,7 +123,10 @@ impl ToolOutput {
                 .iter()
                 .map(|part| match part {
                     InputContent::InputText(text) => text.text.clone(),
-                    InputContent::InputImage(_) => "[image]".to_owned(),
+                    InputContent::InputImage(image) => image.image_url.as_deref().map_or_else(
+                        || "[image]".to_owned(),
+                        crate::attachment::image_placeholder,
+                    ),
                     InputContent::InputFile(_) => "[file]".to_owned(),
                 })
                 .collect::<Vec<_>>()
@@ -166,6 +171,7 @@ impl Tools {
             Box::new(StopProcess),
             Box::new(ViewImage),
             Box::new(ShowPreview),
+            Box::new(Browse),
             Box::new(ScheduleTask),
         ]))
     }

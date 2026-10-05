@@ -1,23 +1,7 @@
 import { Collapsible } from "@base-ui/react/collapsible";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@base-ui/react/button";
-import {
-  LuActivity,
-  LuChevronRight,
-  LuCircleCheck,
-  LuCircleX,
-  LuClock,
-  LuFileCode,
-  LuFilePen,
-  LuFileText,
-  LuGlobe,
-  LuImage,
-  LuLibrary,
-  LuLoaderCircle,
-  LuPanelRightOpen,
-  LuSearch,
-  LuSquareTerminal,
-} from "react-icons/lu";
+import { LuActivity, LuAppWindow, LuChevronRight, LuCircleCheck, LuCircleX, LuClock, LuFileCode, LuFilePen, LuFileText, LuGlobe, LuImage, LuLibrary, LuLoaderCircle, LuPanelRightOpen, LuSearch, LuSquareTerminal } from "react-icons/lu";
 
 import { diffRows, diffStats } from "~/components/diff/diff";
 import { DiffView } from "~/components/diff/diff-view";
@@ -28,6 +12,7 @@ import { CodeBlock } from "~/components/markdown/code-block";
 import { collapsiblePanel, focusRing, iconButton } from "~/components/ui/styles";
 
 import type { ToolPart } from "../types";
+import { AttachmentImage, imagesIn, withoutImages } from "./attachment-image";
 import { formatDuration, languageOf } from "./format";
 
 
@@ -39,6 +24,7 @@ const TOOL_LABEL = {
   read_file: "Read",
   search: "Search",
   web: "Fetch",
+  browse: "Browse",
   library: "Library",
   image: "View image",
   process: "Check process",
@@ -51,6 +37,7 @@ const TOOL_ICON = {
   read_file: LuFileText,
   search: LuSearch,
   web: LuGlobe,
+  browse: LuAppWindow,
   library: LuLibrary,
   image: LuImage,
   process: LuActivity,
@@ -151,6 +138,15 @@ export function ToolCall({ part }: { part: ToolPart }) {
             </pre>
           ) : edit ? (
             <DiffView path={part.input.path ?? ""} before={part.input.before ?? ""} after={part.input.after ?? ""} className="max-h-80 py-1" />
+          ) : part.name === "browse" ? (
+            <div className="space-y-3 p-3">
+              {imagesIn(part.output).map((hash) => (
+                <AttachmentImage key={hash} hash={hash} alt={`Screenshot of ${part.input.detail ?? "the page"}`} />
+              ))}
+              <pre className={`max-h-72 overflow-auto font-mono text-[11px] leading-5 whitespace-pre-wrap ${part.state === "error" ? "text-danger" : "text-muted"}`}>
+                {withoutImages(part.output) || (part.state === "running" ? "Opening the page…" : "No output")}
+              </pre>
+            </div>
           ) : part.name === "image" && part.state === "done" && part.input.path ? (
             <SandboxImage path={part.input.path} />
           ) : file ? (

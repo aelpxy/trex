@@ -25,7 +25,7 @@ Shared dependency versions live in the root `[workspace.dependencies]`.
 - Frontend (`frontend/`, pnpm only): `pnpm dev` (:5173, proxies `/v1` to `TREX_URL`), `pnpm typecheck`, `pnpm build`
 - `trex` serves the built app (`web.rs`): release builds embed `frontend/build/client`, debug builds read it from disk
 - CI runs fmt, clippy `-D warnings`, unit tests, frontend typecheck and build
-- Sandbox image, on the gateway host: `podman build -t localhost/trex-sandbox:latest images/sandbox`; dev gateway tunnel: `ssh -fN -L 17670:127.0.0.1:17670 fedora-server`
+- Sandbox image, on the gateway host: `podman build -t localhost/trex-sandbox:latest images/sandbox` (copy `images/sandbox` over with `scp` and build there; only new sandboxes get a new image); dev gateway tunnel: `ssh -fN -L 17670:127.0.0.1:17670 fedora-server`
 
 ## Config
 
@@ -52,7 +52,8 @@ Loaded once in `trex-server/src/config.rs` from env (`.env`, real env wins) and 
 
 ## Tools and sandboxes
 
-- Tools: `bash` (with `background`), file tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `grep`, `glob`), `web_fetch`, `library_*`, `view_image`, `process_output`, `stop_process`, `update_plan`, `get_current_time`, `show_preview`, `schedule_task`, `ask_user`. File tools emit `file.changed` with a diff.
+- Tools: `bash` (with `background`), file tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `grep`, `glob`), `web_fetch`, `library_*`, `view_image`, `process_output`, `stop_process`, `update_plan`, `get_current_time`, `show_preview`, `browse`, `schedule_task`, `ask_user`. File tools emit `file.changed` with a diff.
+- `browse` drives headless Chromium in the sandbox (Playwright from the image; the script `tool/browse.mjs` is sent with each call, so changing it needs no new image) and returns a screenshot, console errors, failed requests and an aria outline. Chromium runs with `--no-sandbox --no-zygote`, since OpenShell's seccomp filter crashes its zygote; local servers are opened at `localhost`. Image results read as `[image: attachment://…]` in tool output, which the chat shows.
 - Background processes run under a `setsid` wrapper in `/tmp/.processes/<id>/`; `stop_process` drops a `stop` file since one exec can't signal another.
 - Attachments are content-addressed at `workspaces/{uuid}/attachments/{sha256}`, referenced as `attachment://` in history and inlined right before each request; they're also copied to `/sandbox/uploads/`.
 - One sandbox per chat, created lazily; idle ones are stopped after `TREX_SANDBOX_IDLE_SECS`; ones in Error or gone are replaced (`sandbox.replaced`).

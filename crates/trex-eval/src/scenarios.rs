@@ -178,6 +178,7 @@ scenarios![
     schedule_from_chat,
     serve_in_the_background,
     preview_a_site,
+    check_a_page_in_the_browser,
     run_a_long_job,
     steer_mid_run,
     edit_in_a_branch,
@@ -768,6 +769,33 @@ async fn serve_in_the_background(cx: Arc<Ctx>) -> anyhow::Result<()> {
     cx.check(
         "fetched the page",
         reply.contains("hello from the background"),
+        excerpt(&reply),
+    );
+    Ok(())
+}
+
+// the agent checks its own page in the sandbox browser, and the click it makes there works
+async fn check_a_page_in_the_browser(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let prompt = "Create /sandbox/site/index.html with a button labelled Reveal; clicking it shows the text \
+        secret-7731, which is hidden at first. Serve /sandbox/site with Python's http.server on port 8000 in the \
+        background, then check in the browser that clicking Reveal shows the text, and tell me what you saw.";
+    let (session, watch) = cx.one_shot(MODEL, prompt).await?;
+    cx.check("used the browser", called(&watch, "browse"), names(&watch));
+    let saw_secret = watch.seen.iter().any(|event| {
+        event["type"] == "tool.result"
+            && event["output"].as_str().is_some_and(|output| {
+                output.contains("Page outline") && output.contains("secret-7731")
+            })
+    });
+    cx.check(
+        "the page showed the text after the click",
+        saw_secret,
+        "no browse result had it in the outline",
+    );
+    let reply = cx.reply(&session).await?;
+    cx.check(
+        "reported it",
+        reply.contains("secret-7731"),
         excerpt(&reply),
     );
     Ok(())

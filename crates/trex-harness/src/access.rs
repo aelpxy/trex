@@ -29,6 +29,8 @@ const BLOCKED_SIGNS: &[&str] = &[
     "econnrefused",
     "econnreset",
     "eai_again",
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
 ];
 
 // whether a command's output reads like a connection the sandbox denied
@@ -128,7 +130,8 @@ impl AccessGate<'_> {
                     statuses
                         .get(&request.id)
                         .copied()
-                        .unwrap_or(AccessStatus::Rejected)
+                        // one openshell dropped without a decision is unanswered, never a rejection
+                        .unwrap_or(AccessStatus::Pending)
                 })
                 .collect();
             if !decided.contains(&AccessStatus::Pending) || started.elapsed() >= DECISION_TIMEOUT {
@@ -194,6 +197,7 @@ mod tests {
             rationale: String::new(),
             security_notes: String::new(),
             hit_count: 1,
+            supersedes: String::new(),
         }
     }
 

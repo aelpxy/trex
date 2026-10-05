@@ -57,6 +57,17 @@ RUN . /tmp/arch \
     && chmod 0755 /usr/local/bin/micromamba \
     && rm -rf /tmp/bin /tmp/arch
 
+# headless chromium for the agent's browse tool, installed system-wide where the read-only policy
+# allows it; playwright's --with-deps pulls the libraries it needs, emoji fonts render pages faithfully
+ARG PLAYWRIGHT_VERSION=1.63.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/ms-playwright
+RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
+    && playwright install --with-deps --only-shell chromium \
+    && apt-get install -y --no-install-recommends fonts-noto-color-emoji fonts-liberation \
+    && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH" \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm cache clean --force
+
 RUN groupadd --gid 1500 agent \
     && useradd --uid 1500 --gid agent --home-dir /sandbox --shell /bin/bash agent \
     && install -d -o agent -g agent /sandbox
