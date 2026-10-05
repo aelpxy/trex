@@ -420,16 +420,16 @@ impl OpenShell {
         Ok(())
     }
 
-    // false when the sandbox is gone or in the error phase, which starting can't recover from
-    pub async fn usable(&self, sandbox: &Sandbox) -> anyhow::Result<bool> {
+    pub async fn health(&self, sandbox: &Sandbox) -> anyhow::Result<SandboxHealth> {
         match self
             .client
             .workspace(&sandbox.workspace)
             .get_sandbox(&sandbox.name)
             .await
         {
-            Ok(found) => Ok(found.phase != SandboxPhase::Error),
-            Err(SdkError::NotFound { .. }) => Ok(false),
+            Ok(found) if found.phase == SandboxPhase::Error => Ok(SandboxHealth::Broken),
+            Ok(_) => Ok(SandboxHealth::Usable),
+            Err(SdkError::NotFound { .. }) => Ok(SandboxHealth::Missing),
             Err(error) => Err(error).context("failed to look up sandbox"),
         }
     }
@@ -477,6 +477,14 @@ impl OpenShell {
             .await?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxHealth {
+    Usable,
+    // in the error phase, which the gateway can neither stop nor start
+    Broken,
+    Missing,
 }
 
 impl Policy {
@@ -776,13 +784,14 @@ mod tests {
             .await
             .unwrap();
         eprintln!("start took {start_time:?}");
-        let usable_while_running = openshell.usable(&sandbox).await.unwrap();
+        let health_while_running = openshell.health(&sandbox).await.unwrap();
 
         openshell.delete_workspace(user).await.unwrap();
-        assert!(usable_while_running);
-        assert!(
-            !openshell.usable(&sandbox).await.unwrap(),
-            "a deleted sandbox is not usable"
+        assert_eq!(health_while_running, SandboxHealth::Usable);
+        assert_eq!(
+            openshell.health(&sandbox).await.unwrap(),
+            SandboxHealth::Missing,
+            "a deleted sandbox is missing"
         );
 
         assert_eq!(String::from_utf8_lossy(&written.stdout).trim(), "ok");

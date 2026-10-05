@@ -380,6 +380,17 @@ impl Store {
         }))
     }
 
+    // using a session's sandbox, e.g. browsing its files, keeps it from being stopped as idle
+    pub async fn touch_session(&self, workspace: Uuid, id: Uuid) -> anyhow::Result<()> {
+        sqlx::query("UPDATE sessions SET updated_at = NOW() WHERE id = $1 AND workspace_id = $2")
+            .bind(id)
+            .bind(workspace)
+            .execute(&self.pg)
+            .await
+            .context("failed to touch session")?;
+        Ok(())
+    }
+
     pub async fn mark_sandbox_started(&self, workspace: Uuid, id: Uuid) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE sessions SET sandbox_stopped = FALSE WHERE id = $1 AND workspace_id = $2",

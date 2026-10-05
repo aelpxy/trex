@@ -31,6 +31,8 @@ use crate::{
     tool::{ToolContext, ToolOutput, Tools},
 };
 
+// the model would otherwise assume files and installs from earlier in the conversation still exist
+const SANDBOX_REPLACED_NOTE: &str = "[The sandbox stopped working and was replaced with a fresh one. Files, installed packages and processes from earlier in this conversation are gone; recreate what you need, or load it from the library.]";
 const ACCESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 // attempts per model request; the client already retries failed connections and statuses beneath this
 const MAX_ATTEMPTS: u32 = 5;
@@ -720,6 +722,11 @@ impl Agent<'_> {
         {
             Ok(output) => (output, false),
             Err(error) => (ToolOutput::Text(format!("error: {error:#}")), true),
+        };
+        let output = if self.sandbox.take_replaced() {
+            output.prepend(SANDBOX_REPLACED_NOTE)
+        } else {
+            output
         };
         tracing::debug!(
             call_id = call.call_id,

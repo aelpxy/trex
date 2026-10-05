@@ -654,9 +654,18 @@ pub async fn create_message(
             .map_err(|error| ApiError::invalid(format!("{error:#}"), "attachments"))?;
         parts.push(part);
     }
-    let message = history::to_json(&[attachment::user_message(&body.content, parts)])?
+    let mut message = history::to_json(&[attachment::user_message(&body.content, parts)])?
         .pop()
         .expect("one item was serialized");
+    // the model sees attachments directly, and is told where its tools find them
+    let items = state.store.session_items(workspace, session.id).await?;
+    let uploads = attachment::new_uploads(&items, &message);
+    if let (Some(note), Some(content)) = (
+        attachment::uploads_note(&uploads),
+        message["content"].as_array_mut(),
+    ) {
+        content.push(serde_json::to_value(note).map_err(anyhow::Error::from)?);
+    }
     let started = runs::send_message(&state, workspace, &session, message, body.interrupt).await?;
     let queued = matches!(started, runs::Started::Queued);
     Ok((StatusCode::ACCEPTED, Json(run_object(&session, queued))))
@@ -988,15 +997,10 @@ fn item(item: &Value) -> Option<Item> {
         // developer messages are the harness talking to the model, not part of the conversation
         "message" if item["role"] == "developer" => None,
         "message" => {
-            let text = match &item["content"] {
-                Value::String(text) => text.clone(),
-                Value::Array(parts) => parts
-                    .iter()
-                    .filter_map(|part| part["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(""),
-                _ => return None,
-            };
+            if !matches!(item["content"], Value::String(_) | Value::Array(_)) {
+                return None;
+            }
+            let text = history::message_text(item);
             let attachments = attachment::references(item)
                 .into_iter()
                 .map(|(kind, hash, mime_type, filename)| Attachment {

@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod attachment;
 pub mod event;
+pub mod files;
 pub mod history;
 pub mod library;
 pub mod model;

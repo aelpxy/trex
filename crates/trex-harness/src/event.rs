@@ -9,6 +9,10 @@ pub enum Event {
     SandboxCreating,
     SandboxStarting,
     SandboxReady,
+    // the session's sandbox was lost and a new, empty one took its place
+    SandboxReplaced {
+        reason: String,
+    },
     TextDelta {
         delta: String,
     },

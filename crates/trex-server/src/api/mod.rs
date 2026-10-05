@@ -5,6 +5,7 @@ mod auth;
 mod credits;
 pub mod error;
 pub mod events;
+mod files;
 mod ids;
 mod library;
 mod projects;
@@ -38,6 +39,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use crate::{credits::Plans, runs::Runs};
 
 const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
+const MAX_SANDBOX_FILE_BYTES: usize = trex_harness::files::MAX_FILE_BYTES as usize;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const DOCS_PAGE: &str = include_str!("docs.html");
 
@@ -123,6 +125,15 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(sessions::list_access))
         .routes(routes!(sessions::approve_access))
         .routes(routes!(sessions::reject_access))
+        .routes(routes!(files::list))
+        .routes(routes!(files::move_file))
+        .route(
+            "/sessions/{id}/files/{*path}",
+            get(files::download)
+                .put(files::upload)
+                .delete(files::delete)
+                .layer(DefaultBodyLimit::max(MAX_SANDBOX_FILE_BYTES)),
+        )
         .routes(routes!(library::list))
         .routes(routes!(library::move_file))
         .routes(routes!(attachments::download))
@@ -139,6 +150,7 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .nest("/v1", v1)
         .split_for_parts();
     spec.merge(LibraryFiles::openapi());
+    spec.merge(SandboxFiles::openapi());
     (router, spec)
 }
 
@@ -157,6 +169,10 @@ struct ApiDoc;
 #[derive(OpenApi)]
 #[openapi(paths(library::download, library::upload, library::delete))]
 struct LibraryFiles;
+
+#[derive(OpenApi)]
+#[openapi(paths(files::download, files::upload, files::delete))]
+struct SandboxFiles;
 
 struct BearerToken;
 
@@ -327,10 +343,13 @@ mod tests {
                 "/v1/sessions/{id}/access_requests",
                 "/v1/sessions/{id}/access_requests/{request_id}/approve",
                 "/v1/sessions/{id}/access_requests/{request_id}/reject",
+                "/v1/sessions/{id}/files",
+                "/v1/sessions/{id}/files/move",
                 "/v1/library",
                 "/v1/library/move",
                 "/v1/attachments/{id}",
                 "/v1/library/files/{path}",
+                "/v1/sessions/{id}/files/{path}",
             ]
         );
         let json = serde_json::to_value(&spec).unwrap();

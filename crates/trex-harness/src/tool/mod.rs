@@ -11,7 +11,7 @@ mod web;
 
 use anyhow::Context;
 use async_openai::types::responses::{
-    FunctionCallOutput, FunctionTool, InputContent, Tool as ToolDefinition,
+    FunctionCallOutput, FunctionTool, InputContent, InputTextContent, Tool as ToolDefinition,
 };
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -78,6 +78,22 @@ pub enum ToolOutput {
 }
 
 impl ToolOutput {
+    pub fn prepend(self, note: &str) -> Self {
+        match self {
+            Self::Text(text) => Self::Text(format!("{note}\n\n{text}")),
+            Self::Content(mut parts) => {
+                parts.insert(
+                    0,
+                    InputContent::InputText(InputTextContent {
+                        text: note.to_owned(),
+                        prompt_cache_breakpoint: None,
+                    }),
+                );
+                Self::Content(parts)
+            }
+        }
+    }
+
     // what the ui and logs show; images and files appear as placeholders
     pub fn text(&self) -> String {
         match self {

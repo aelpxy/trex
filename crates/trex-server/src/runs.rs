@@ -15,11 +15,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use trex_harness::{
     agent::{Agent, Inbox, Journal, RunOutcome, Steering},
+    attachment,
     event::Event,
-    history,
-    sandbox::{LazySandbox, SandboxProvider},
+    files, history,
+    sandbox::{LazySandbox, Provided, SandboxProvider},
 };
-use trex_sandbox::{Sandbox, workspace_name};
+use trex_sandbox::{Sandbox, SandboxHealth, workspace_name};
 use trex_store::{
     Store,
     sessions::{Finish, Session, SessionStatus, UsageRecord},
@@ -600,16 +601,92 @@ impl SandboxProvider for SessionSandbox<'_> {
     fn provide<'a>(
         &'a self,
         events: &'a mpsc::Sender<Event>,
-    ) -> BoxFuture<'a, anyhow::Result<Sandbox>> {
+    ) -> BoxFuture<'a, anyhow::Result<Provided>> {
         Box::pin(async move {
             // the model only sees this as a tool error, so the operator needs it in the log
             let result = ensure_sandbox(self.state, self.workspace, self.session, events).await;
-            if let Err(error) = &result {
-                tracing::warn!(session = %self.session.id, error = format!("{error:#}"), "failed to provide sandbox");
+            match &result {
+                Ok(provided) => {
+                    sync_uploads(
+                        self.state,
+                        self.workspace,
+                        self.session.id,
+                        &provided.sandbox,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    tracing::warn!(session = %self.session.id, error = format!("{error:#}"), "failed to provide sandbox")
+                }
             }
             result
         })
     }
+}
+
+// the session's sandbox for the files api: started if it was stopped, created only when `create`
+// is set (writing a file), and none when there's nothing to show
+// copies the conversation's attachments into the sandbox; existing files are left alone, so the
+// agent's changes to an upload stay. best effort: a failure only means the tools can't see them
+async fn sync_uploads(state: &AppState, workspace: Uuid, session: Uuid, sandbox: &Sandbox) {
+    let result = async {
+        let items = state.store.session_items(workspace, session).await?;
+        let uploads = attachment::uploads(&items);
+        if uploads.is_empty() {
+            return anyhow::Ok(());
+        }
+        let present: Vec<String> = files::list(&state.openshell, sandbox)
+            .await?
+            .files
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        for upload in uploads
+            .iter()
+            .filter(|upload| !present.contains(&upload.path))
+        {
+            let bytes = state
+                .library
+                .get_attachment(workspace, &upload.hash)
+                .await?;
+            files::write(&state.openshell, sandbox, &upload.path, bytes)
+                .await
+                .map_err(|error| anyhow::anyhow!("failed to copy {}: {error}", upload.path))?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(%session, error = format!("{error:#}"), "failed to copy attachments into the sandbox");
+    }
+}
+
+pub async fn files_sandbox(
+    state: &AppState,
+    workspace: Uuid,
+    session: &Session,
+    create: bool,
+) -> anyhow::Result<Option<Sandbox>> {
+    state.store.touch_session(workspace, session.id).await?;
+    if session.sandbox.is_none() && !create {
+        return Ok(None);
+    }
+    // nobody watches these events; a sandbox replaced here starts empty without the model being told
+    let (events, _ignored) = mpsc::channel(16);
+    if let Some(name) = &session.sandbox {
+        let sandbox = Sandbox {
+            workspace: workspace_name(workspace),
+            name: name.clone(),
+        };
+        if state.openshell.health(&sandbox).await? != SandboxHealth::Usable && !create {
+            return Ok(None);
+        }
+    }
+    let sandbox = ensure_sandbox(state, workspace, session, &events)
+        .await?
+        .sandbox;
+    sync_uploads(state, workspace, session.id, &sandbox).await;
+    Ok(Some(sandbox))
 }
 
 // the sandbox is checked even when it isn't marked stopped, so one stopped by anything else recovers
@@ -618,34 +695,58 @@ async fn ensure_sandbox(
     workspace: Uuid,
     session: &Session,
     events: &mpsc::Sender<Event>,
-) -> anyhow::Result<Sandbox> {
-    if let Some(name) = &session.sandbox {
-        let sandbox = Sandbox {
-            workspace: workspace_name(workspace),
-            name: name.clone(),
-        };
-        if !state.openshell.usable(&sandbox).await? {
-            // its files are lost either way, and a new sandbox lets the chat keep working
-            tracing::warn!(session = %session.id, sandbox = sandbox.name, "replacing a broken sandbox");
+) -> anyhow::Result<Provided> {
+    let Some(name) = &session.sandbox else {
+        let sandbox = create_sandbox(state, workspace, session, events).await?;
+        return Ok(Provided {
+            sandbox,
+            replaced: false,
+        });
+    };
+    let sandbox = Sandbox {
+        workspace: workspace_name(workspace),
+        name: name.clone(),
+    };
+    let reason = match state.openshell.health(&sandbox).await? {
+        SandboxHealth::Usable => {
+            if session.sandbox_stopped {
+                send(events, Event::SandboxStarting).await?;
+            }
+            state.openshell.start(&sandbox).await?;
+            if session.sandbox_stopped {
+                state
+                    .store
+                    .mark_sandbox_started(workspace, session.id)
+                    .await?;
+                send(events, Event::SandboxReady).await?;
+            }
+            return Ok(Provided {
+                sandbox,
+                replaced: false,
+            });
+        }
+        SandboxHealth::Broken => {
             if let Err(error) = state.openshell.delete(&sandbox).await {
                 tracing::warn!(session = %session.id, error = format!("{error:#}"), "failed to delete the broken sandbox");
             }
-            return create_sandbox(state, workspace, session, events).await;
+            "The sandbox stopped working"
         }
-        if session.sandbox_stopped {
-            send(events, Event::SandboxStarting).await?;
-        }
-        state.openshell.start(&sandbox).await?;
-        if session.sandbox_stopped {
-            state
-                .store
-                .mark_sandbox_started(workspace, session.id)
-                .await?;
-            send(events, Event::SandboxReady).await?;
-        }
-        return Ok(sandbox);
-    }
-    create_sandbox(state, workspace, session, events).await
+        SandboxHealth::Missing => "The sandbox no longer exists",
+    };
+    // a new sandbox lets the chat keep working; the user and the model are both told what was lost
+    tracing::warn!(session = %session.id, sandbox = sandbox.name, reason, "replacing the session's sandbox");
+    send(
+        events,
+        Event::SandboxReplaced {
+            reason: reason.to_owned(),
+        },
+    )
+    .await?;
+    let sandbox = create_sandbox(state, workspace, session, events).await?;
+    Ok(Provided {
+        sandbox,
+        replaced: true,
+    })
 }
 
 async fn create_sandbox(

@@ -138,6 +138,115 @@ pub fn references(item: &Value) -> Vec<(&'static str, String, String, Option<Str
         .collect()
 }
 
+// attachments are copied into the sandbox under this folder of its home, so tools can use them
+pub const UPLOADS_DIR: &str = "uploads";
+// starts the hidden text part that tells the model where a message's attachments are
+const UPLOADS_NOTE_PREFIX: &str = "[Attached files, also saved in the sandbox: ";
+
+pub struct Upload {
+    // relative to the sandbox home
+    pub path: String,
+    pub hash: String,
+}
+
+pub fn is_uploads_note(text: &str) -> bool {
+    text.starts_with(UPLOADS_NOTE_PREFIX)
+}
+
+// the sandbox paths of every attachment in the conversation, in order; history is append-only, so
+// an attachment keeps its path, and a later file with a taken name gets its hash added
+pub fn uploads(items: &[Value]) -> Vec<Upload> {
+    let mut claimed = HashMap::new();
+    items
+        .iter()
+        .flat_map(|item| assign(&mut claimed, item))
+        .collect()
+}
+
+// the uploads a new message adds after `items`
+pub fn new_uploads(items: &[Value], message: &Value) -> Vec<Upload> {
+    let mut claimed = HashMap::new();
+    for item in items {
+        assign(&mut claimed, item);
+    }
+    assign(&mut claimed, message)
+}
+
+pub fn uploads_note(uploads: &[Upload]) -> Option<InputContent> {
+    if uploads.is_empty() {
+        return None;
+    }
+    let paths: Vec<String> = uploads
+        .iter()
+        .map(|upload| format!("/sandbox/{}", upload.path))
+        .collect();
+    Some(InputContent::InputText(InputTextContent {
+        text: format!("{UPLOADS_NOTE_PREFIX}{}]", paths.join(", ")),
+        prompt_cache_breakpoint: None,
+    }))
+}
+
+fn assign(claimed: &mut HashMap<String, String>, item: &Value) -> Vec<Upload> {
+    if item["role"] != "user" {
+        return Vec::new();
+    }
+    let mut uploads = Vec::new();
+    for (kind, hash, mime, filename) in references(item) {
+        let short = &hash[..hash.len().min(8)];
+        let extension = extension(&mime);
+        let name = match filename.as_deref().map(safe_name) {
+            Some(name) if kind == "file" && !name.is_empty() => name,
+            _ => format!(
+                "{}-{short}.{extension}",
+                if kind == "image" { "image" } else { "file" }
+            ),
+        };
+        let name = match claimed.get(&name) {
+            Some(owner) if *owner == hash => continue,
+            Some(_) => match name.rsplit_once('.') {
+                Some((stem, ext)) => format!("{stem}-{short}.{ext}"),
+                None => format!("{name}-{short}"),
+            },
+            None => name,
+        };
+        if claimed.get(&name).is_some_and(|owner| *owner == hash) {
+            continue;
+        }
+        claimed.insert(name.clone(), hash.clone());
+        uploads.push(Upload {
+            path: format!("{UPLOADS_DIR}/{name}"),
+            hash,
+        });
+    }
+    uploads
+}
+
+fn safe_name(filename: &str) -> String {
+    let base = filename.rsplit(['/', '\\']).next().unwrap_or_default();
+    let name: String = base
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || matches!(char, '.' | '-' | '_') {
+                char
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    name.trim_start_matches('.').to_owned()
+}
+
+fn extension(mime: &str) -> &'static str {
+    match mime.split(';').next().unwrap_or_default() {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        _ => "txt",
+    }
+}
+
 // swaps attachment references for data urls right before a request
 pub async fn resolve(
     library: &Library,
@@ -193,6 +302,49 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn names_uploads_stably_and_without_clashes() {
+        let image =
+            |hash: &str| json!({"type": "input_image", "image_url": reference(hash, "image/png")});
+        let file = |hash: &str, name: &str| json!({"type": "input_file", "file_data": reference(hash, "text/plain"), "filename": name});
+        let first = json!({"role": "user", "content": [image("aaaaaaaa11"), file("bbbbbbbb22", "../data set.csv")]});
+        let reply = json!({"role": "assistant", "content": [file("cccccccc33", "x.csv")]});
+        let second = json!({"role": "user", "content": [file("dddddddd44", "data_set.csv"), image("aaaaaaaa11")]});
+
+        let paths = |uploads: Vec<Upload>| {
+            uploads
+                .into_iter()
+                .map(|upload| upload.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths(uploads(&[first.clone(), reply.clone(), second.clone()])),
+            [
+                "uploads/image-aaaaaaaa.png",
+                "uploads/data_set.csv",
+                "uploads/data_set-dddddddd.csv"
+            ]
+        );
+        assert_eq!(
+            paths(new_uploads(&[first, reply], &second)),
+            ["uploads/data_set-dddddddd.csv"]
+        );
+
+        let note = serde_json::to_value(
+            uploads_note(&uploads(&[
+                json!({"role": "user", "content": [image("aaaaaaaa11")]}),
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let text = note["text"].as_str().unwrap();
+        assert!(is_uploads_note(text));
+        assert!(
+            text.contains("/sandbox/uploads/image-aaaaaaaa.png"),
+            "{text}"
+        );
+    }
 
     #[tokio::test]
     async fn inlines_attachments_into_requests() {

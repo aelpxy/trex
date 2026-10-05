@@ -165,12 +165,14 @@ fn transcript_entry(value: &Value) -> Option<String> {
     }
 }
 
+// what the user wrote, without the note on where attachments are in the sandbox
 pub fn message_text(value: &Value) -> String {
     match &value["content"] {
         Value::String(text) => text.clone(),
         Value::Array(parts) => parts
             .iter()
             .filter_map(|part| part["text"].as_str())
+            .filter(|text| !crate::attachment::is_uploads_note(text))
             .collect::<Vec<_>>()
             .join(""),
         _ => String::new(),

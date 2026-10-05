@@ -53,6 +53,10 @@ pub enum SessionEvent {
     SandboxStarting,
     #[serde(rename = "sandbox.ready")]
     SandboxReady,
+    /// The conversation's sandbox was lost and replaced with an empty one; files, installs and
+    /// processes from before are gone.
+    #[serde(rename = "sandbox.replaced")]
+    SandboxReplaced { reason: String },
     #[serde(rename = "text.delta")]
     TextDelta { delta: String },
     #[serde(rename = "reasoning.delta")]
@@ -206,6 +210,7 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
         Event::SandboxCreating => SessionEvent::SandboxCreating,
         Event::SandboxStarting => SessionEvent::SandboxStarting,
         Event::SandboxReady => SessionEvent::SandboxReady,
+        Event::SandboxReplaced { reason } => SessionEvent::SandboxReplaced { reason },
         Event::TextDelta { delta } => SessionEvent::TextDelta { delta },
         Event::ReasoningDelta { delta } => SessionEvent::ReasoningDelta { delta },
         Event::ToolCallStarted { call_id, name } => SessionEvent::ToolCallStarted { call_id, name },
