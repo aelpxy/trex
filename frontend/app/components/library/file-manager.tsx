@@ -11,6 +11,7 @@ import { EmptyState } from "~/components/ui/empty-state";
 import { FilterInput } from "~/components/ui/filter-input";
 import { SelectionBar } from "~/components/ui/selection-bar";
 import { menuItem, popup } from "~/components/ui/styles";
+import { NameDialog } from "~/components/ui/name-dialog";
 import { plural } from "~/lib/format";
 import { queries } from "~/lib/queries";
 import { useUrlFilter } from "~/lib/use-url-filter";
@@ -20,11 +21,12 @@ import { baseName, entriesOf, foldersOf, keyOf, parentOf, placeName, viewable, t
 import { entryColumns } from "./entry-columns";
 import { EntryMenuItems, type EntryActions } from "./entry-menu";
 import { MoveDialog } from "./move-dialog";
-import { NameDialog } from "./name-dialog";
 import { ReplaceDialog } from "./replace-dialog";
 import { useEntryDrag } from "./use-entry-drag";
 import { useFileDrop } from "./use-file-drop";
 import { useLibraryActions } from "./use-library-actions";
+
+const fileNameProblem = (name: string) => (/[/\\]/.test(name) ? "Names can't contain slashes." : name === "." || name === ".." ? "Pick another name." : null);
 
 // the dialog open, if any
 type Pending =
@@ -219,6 +221,7 @@ export function FileManager() {
       {pending?.action === "folder" && (
         <NameDialog
           title="New folder"
+          validate={fileNameProblem}
           description={`Inside ${placeName(folder)}. It opens so you can upload into it.`}
           action="Create"
           onClose={close}
@@ -231,6 +234,7 @@ export function FileManager() {
       {pending?.action === "rename" && (
         <NameDialog
           title={`Rename ${pending.entry.kind}`}
+          validate={fileNameProblem}
           description={pending.entry.kind === "folder" ? `Renames it for all ${plural(pending.entry.files, "file")} inside.` : "Nothing is replaced if the name is taken."}
           initial={baseName(pending.entry.path)}
           action="Rename"
