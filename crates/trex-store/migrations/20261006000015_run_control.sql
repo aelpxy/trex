@@ -1,0 +1,2 @@
+ALTER TABLE sessions ADD COLUMN run_started_at TIMESTAMPTZ;
+ALTER TABLE sessions ADD COLUMN run_cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;

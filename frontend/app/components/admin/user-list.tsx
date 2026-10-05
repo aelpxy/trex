@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Field } from "@base-ui/react/field";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
-import { LuTrash2 } from "react-icons/lu";
+import { LuTrash2, LuX } from "react-icons/lu";
 
 import { MIN_PASSWORD_LENGTH } from "~/components/account/password-form";
 import { SessionList } from "~/components/account/session-list";
@@ -15,6 +15,7 @@ import { Switch } from "~/components/ui/switch";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { formatUsd } from "~/lib/credits";
 import { ADMIN_PAGE_SIZE, queries } from "~/lib/queries";
+import { trackToast } from "~/lib/toasts";
 import type { ApiAdminUser } from "~/lib/trex";
 
 import { ActionStatus } from "./action-status";
@@ -206,36 +207,29 @@ function BulkDelete({ users, onClear }: { users: ApiAdminUser[]; onClear: () => 
   const shown = users.slice(0, 3).map((user) => user.email).join(", ");
   const names = users.length > 3 ? `${shown} and ${users.length - 3} more` : shown;
 
-  if (users.length === 0 && !remove.error) return null;
+  if (users.length === 0) return null;
   return (
-    <div className="ui-card mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2">
-      {users.length > 0 && (
-        <>
-          <p className="text-xs font-medium tabular-nums">{plural(users.length)} selected</p>
-          <Button variant="quiet" disabled={remove.isPending} onClick={onClear} className="h-8 px-3 text-xs">
-            Clear
-          </Button>
-        </>
-      )}
-      <div className="min-w-0 flex-1 text-right">
-        <ActionStatus error={remove.error} success={null} />
-      </div>
-      {users.length > 0 && (
-        <Button variant="subtleDanger" disabled={remove.isPending} onClick={() => setConfirming(true)} className="h-8 px-3 text-xs">
-          <LuTrash2 size={14} />
-          {remove.isPending ? "Deleting…" : `Delete ${plural(users.length)}`}
-        </Button>
-      )}
+    <div role="toolbar" aria-label="Selected users" className="ui-card mt-3 flex items-center gap-2 px-2 py-1.5">
+      <Button variant="quiet" onClick={onClear} aria-label="Clear selection" title="Clear selection" className="h-8 px-2">
+        <LuX size={14} />
+      </Button>
+      <p className="text-xs font-medium tabular-nums">{plural(users.length)} selected</p>
+      <span className="flex-1" />
+      <Button variant="subtleDanger" disabled={remove.isPending} onClick={() => setConfirming(true)} className="h-8 px-3 text-xs">
+        <LuTrash2 size={14} />
+        Delete {plural(users.length)}
+      </Button>
       <DeleteConfirmDialog
         target={confirming ? { kind: users.length === 1 ? "user" : "users", id: "", name: names } : null}
         consequence={users.length === 1 ? " with their workspace, chats, sandboxes, files, schedules and balance" : " with their workspaces, chats, sandboxes, files, schedules and balances"}
         onCancel={() => setConfirming(false)}
         onConfirm={() => {
           setConfirming(false);
-          remove.mutate(
-            users.map((user) => user.id),
-            { onSettled: onClear },
-          );
+          const what = plural(users.length);
+          trackToast(
+            remove.mutateAsync(users.map((user) => user.id)),
+            { loading: `Deleting ${what}…`, success: `Deleted ${what}`, error: `Couldn't delete every user` },
+          ).then(onClear, onClear);
         }}
       />
     </div>

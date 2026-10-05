@@ -126,6 +126,22 @@ export type ApiUsageReport = {
   models: ApiModelUsage[];
   accounts: { user: string; name: string; email: string; credits: number; tokens: number; responses: number }[];
 };
+export type ApiLiveRun = {
+  session: string;
+  title: string | null;
+  workspace: string;
+  workspace_name: string;
+  owner_email: string | null;
+  model: string;
+  reasoning_effort: string | null;
+  fast: boolean;
+  scheduled: boolean;
+  started_at: number | null;
+  heartbeat_at: number | null;
+  cancel_requested: boolean;
+  credits: number;
+  responses: number;
+};
 export type ApiLogLine = { seq: number; time: number; level: "error" | "warn" | "info" | "debug" | "trace"; target: string; message: string; fields: string };
 
 export type ApiPlan = { id: string; name: string; monthly_credits: number };
@@ -188,6 +204,8 @@ export const trex = {
     models: () => api<List<ApiModel>>("GET", "/admin/models").then((list) => list.data),
     overview: () => api<ApiOverview>("GET", "/admin/overview"),
     usage: (days: number) => api<ApiUsageReport>("GET", `/admin/usage?days=${days}`),
+    runs: () => api<List<ApiLiveRun>>("GET", "/admin/runs").then((list) => list.data),
+    cancelRun: (session: string) => api<void>("POST", `/admin/runs/${session}/cancel`),
     users: (page: number, perPage: number, search: string, sort = "") => api<Paged<ApiAdminUser>>("GET", `/admin/users?${pageQuery(page, perPage, search, sort)}`),
     updateUser: (user: string, changes: { role?: "user" | "admin"; suspended?: boolean }) => api<void>("PATCH", `/admin/users/${user}`, changes),
     setPassword: (user: string, password: string) => api<void>("POST", `/admin/users/${user}/password`, { password }),

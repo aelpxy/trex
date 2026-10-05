@@ -3,6 +3,7 @@ import { queryOptions } from "@tanstack/react-query";
 import { trex } from "./trex";
 
 const LOG_POLL_MS = 2000;
+const RUNS_POLL_MS = 5000;
 export const LEDGER_PAGE_SIZE = 10;
 export const ADMIN_PAGE_SIZE = 20;
 
@@ -31,6 +32,7 @@ export const queries = {
     models: () => queryOptions({ queryKey: ["admin", "models"], queryFn: trex.admin.models }),
     library: (workspace: string) => queryOptions({ queryKey: ["admin", "library", workspace], queryFn: () => trex.admin.library(workspace) }),
     usage: (days: number) => queryOptions({ queryKey: ["admin", "usage", days], queryFn: () => trex.admin.usage(days) }),
+    runs: () => queryOptions({ queryKey: ["admin", "runs"], queryFn: trex.admin.runs, refetchInterval: RUNS_POLL_MS, staleTime: 0 }),
     logs: () => queryOptions({ queryKey: ["admin", "logs"], queryFn: trex.admin.logs, refetchInterval: LOG_POLL_MS, staleTime: 0 }),
   },
 };

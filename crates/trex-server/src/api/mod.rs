@@ -121,25 +121,30 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(credits::get))
         .routes(routes!(credits::ledger))
         .routes(routes!(credits::usage))
-        .routes(routes!(admin::overview))
-        .routes(routes!(admin::usage))
-        .routes(routes!(admin::list_users))
-        .routes(routes!(admin::update_user, admin::delete_user))
-        .routes(routes!(admin::sign_out_user))
-        .routes(routes!(admin::set_user_password))
-        .routes(routes!(admin::user_sessions))
-        .routes(routes!(admin::delete_user_session))
-        .routes(routes!(admin::logs))
-        .routes(routes!(admin::all_models))
-        .routes(routes!(admin::list_workspaces))
-        .routes(routes!(admin::update_workspace))
-        .routes(routes!(admin::workspace_library))
+        .routes(routes!(admin::usage::overview))
+        .routes(routes!(admin::usage::usage))
+        .routes(routes!(admin::runs::list_runs))
+        .routes(routes!(admin::runs::cancel_run))
+        .routes(routes!(admin::users::list_users))
+        .routes(routes!(
+            admin::users::update_user,
+            admin::users::delete_user
+        ))
+        .routes(routes!(admin::users::sign_out_user))
+        .routes(routes!(admin::users::set_user_password))
+        .routes(routes!(admin::users::user_sessions))
+        .routes(routes!(admin::users::delete_user_session))
+        .routes(routes!(admin::logs::logs))
+        .routes(routes!(admin::workspaces::all_models))
+        .routes(routes!(admin::workspaces::list_workspaces))
+        .routes(routes!(admin::workspaces::update_workspace))
+        .routes(routes!(admin::library::workspace_library))
         .route(
             "/admin/workspaces/{id}/library/files/{*path}",
-            get(admin::workspace_file),
+            get(admin::library::workspace_file),
         )
-        .routes(routes!(admin::adjust_credits))
-        .routes(routes!(admin::set_plan))
+        .routes(routes!(admin::workspaces::adjust_credits))
+        .routes(routes!(admin::workspaces::set_plan))
         .routes(routes!(models))
         .routes(routes!(scheduled::create, scheduled::list))
         .routes(routes!(
@@ -152,25 +157,25 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(projects::get, projects::update, projects::delete))
         .routes(routes!(sessions::create, sessions::list))
         .routes(routes!(sessions::get, sessions::update, sessions::delete))
-        .routes(routes!(sessions::items))
-        .routes(routes!(sessions::usage))
+        .routes(routes!(sessions::items::items))
+        .routes(routes!(sessions::items::usage))
         .routes({
             // attachments arrive inline as base64, far beyond the default json limit
-            let (schemas, paths, method) = routes!(sessions::create_message);
+            let (schemas, paths, method) = routes!(sessions::messages::create_message);
             (
                 schemas,
                 paths,
                 method.layer(DefaultBodyLimit::max(MAX_MESSAGE_BYTES)),
             )
         })
-        .routes(routes!(sessions::create_answers))
-        .routes(routes!(sessions::cancel))
-        .routes(routes!(sessions::retry))
-        .routes(routes!(sessions::branch))
+        .routes(routes!(sessions::questions::create_answers))
+        .routes(routes!(sessions::messages::cancel))
+        .routes(routes!(sessions::messages::retry))
+        .routes(routes!(sessions::messages::branch))
         .routes(routes!(events::stream_events))
-        .routes(routes!(sessions::list_access))
-        .routes(routes!(sessions::approve_access))
-        .routes(routes!(sessions::reject_access))
+        .routes(routes!(sessions::access::list_access))
+        .routes(routes!(sessions::access::approve_access))
+        .routes(routes!(sessions::access::reject_access))
         .routes(routes!(previews::create))
         .routes(routes!(files::list))
         .routes(routes!(files::move_file))
@@ -223,7 +228,7 @@ struct LibraryFiles;
 struct SandboxFiles;
 
 #[derive(OpenApi)]
-#[openapi(paths(admin::workspace_file))]
+#[openapi(paths(admin::library::workspace_file))]
 struct AdminFiles;
 
 struct BearerToken;
@@ -420,6 +425,8 @@ mod tests {
                 "/v1/credits/usage",
                 "/v1/admin/overview",
                 "/v1/admin/usage",
+                "/v1/admin/runs",
+                "/v1/admin/runs/{id}/cancel",
                 "/v1/admin/users",
                 "/v1/admin/users/{id}",
                 "/v1/admin/users/{id}/sign_out",

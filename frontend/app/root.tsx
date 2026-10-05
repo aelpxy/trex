@@ -14,6 +14,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 import { APP_NAME, pageTitle } from "~/lib/meta";
 import { queryClient } from "~/lib/query-client";
+import { Toaster } from "~/components/ui/toaster";
 
 import "./app.css";
 
@@ -50,7 +51,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <Outlet />
+      <Toaster>
+        <Outlet />
+      </Toaster>
     </QueryClientProvider>
   );
 }

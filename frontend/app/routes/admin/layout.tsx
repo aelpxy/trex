@@ -21,6 +21,7 @@ const TABS = [
   { to: "/admin/users", label: "Users" },
   { to: "/admin/workspaces", label: "Workspaces" },
   { to: "/admin/library", label: "Library" },
+  { to: "/admin/runs", label: "Runs" },
   { to: "/admin/usage", label: "Usage" },
   { to: "/admin/logs", label: "Logs" },
 ];

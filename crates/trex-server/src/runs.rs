@@ -23,7 +23,7 @@ use trex_harness::{
 use trex_sandbox::{Sandbox, SandboxHealth, workspace_name};
 use trex_store::{
     Store,
-    sessions::{Finish, Session, SessionStatus, UsageRecord},
+    sessions::{Finish, Lease, Session, SessionStatus, UsageRecord},
 };
 use uuid::Uuid;
 
@@ -300,6 +300,19 @@ async fn claim(
     Ok(true)
 }
 
+// stops the session's run here at once, and on any other instance at its next heartbeat;
+// `workspace` is none for admins. false when nothing is running
+pub async fn cancel(
+    state: &AppState,
+    workspace: Option<Uuid>,
+    session: Uuid,
+) -> Result<bool, ApiError> {
+    let requested = state.store.request_cancel(workspace, session).await?;
+    let local = requested && state.runs.cancel(session);
+    tracing::debug!(session = %session, requested, local, "cancel requested");
+    Ok(requested)
+}
+
 // continues runs whose instance went away: after a restart, or when another instance crashed
 pub async fn resume_stale_runs(state: Arc<AppState>) {
     let mut ticks = interval(RESUME_CHECK_INTERVAL);
@@ -368,7 +381,7 @@ async fn run(
     publish(&state, session, started).await;
     let result = tokio::select! {
         result = drive(&state, workspace, session, run, &cancel, interrupts) => result,
-        _ = keep_lease(&state, session, run) => Ok(Finished::LostLease),
+        _ = keep_lease(&state, session, run, &cancel) => Ok(Finished::LostLease),
     };
 
     let event = match result {
@@ -422,15 +435,16 @@ async fn run(
     }
 }
 
-// returns once another instance owns the run; a failed renewal is retried, since the lease only
-// goes stale after several missed heartbeats
-async fn keep_lease(state: &AppState, session: Uuid, run: RunId) {
+// returns once another instance owns the run, and cancels it when a cancel was asked for on any
+// instance; a failed renewal is retried, since the lease only goes stale after several misses
+async fn keep_lease(state: &AppState, session: Uuid, run: RunId, cancel: &CancellationToken) {
     let mut ticks = interval(HEARTBEAT_INTERVAL);
     loop {
         ticks.tick().await;
         match state.store.heartbeat_run(session, run).await {
-            Ok(true) => {}
-            Ok(false) => return,
+            Ok(Lease::Held) => {}
+            Ok(Lease::CancelRequested) => cancel.cancel(),
+            Ok(Lease::Lost) => return,
             Err(error) => {
                 tracing::warn!(session = %session, error = format!("{error:#}"), "failed to renew run lease")
             }

@@ -107,6 +107,26 @@ pub struct UserSummary {
     pub suspended_at: Option<i64>,
 }
 
+// a chat whose agent is working right now, in any workspace
+pub struct LiveRun {
+    pub session: Uuid,
+    pub title: Option<String>,
+    pub workspace: Uuid,
+    pub workspace_name: String,
+    pub owner_email: Option<String>,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub fast: bool,
+    pub scheduled: bool,
+    // unix seconds; none for runs started before this was recorded
+    pub started_at: Option<i64>,
+    pub heartbeat_at: Option<i64>,
+    pub cancel_requested: bool,
+    // spent since the run started
+    pub credits: i64,
+    pub responses: i64,
+}
+
 pub struct DayUsage {
     // unix seconds at midnight utc
     pub day: i64,
@@ -323,6 +343,46 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    // oldest first, so the longest running are on top
+    pub async fn live_runs(&self) -> anyhow::Result<Vec<LiveRun>> {
+        let rows = sqlx::query(
+            "SELECT s.id, s.title, s.workspace_id, w.name AS workspace_name, s.model, s.reasoning_effort, s.fast, \
+             s.scheduled_task_id IS NOT NULL AS scheduled, s.run_cancel_requested, \
+             EXTRACT(EPOCH FROM s.run_started_at)::BIGINT AS started_at, \
+             EXTRACT(EPOCH FROM s.run_heartbeat_at)::BIGINT AS heartbeat_at, \
+             (SELECT u.email FROM workspace_members m JOIN users u ON u.id = m.user_id \
+              WHERE m.workspace_id = s.workspace_id ORDER BY m.role = 'owner' DESC, u.created_at LIMIT 1) AS owner_email, \
+             (SELECT COALESCE(SUM(r.credits), 0)::BIGINT FROM usage_records r \
+              WHERE r.session_id = s.id AND r.created_at >= s.run_started_at) AS credits, \
+             (SELECT COUNT(*) FROM usage_records r WHERE r.session_id = s.id AND r.created_at >= s.run_started_at) AS responses \
+             FROM sessions s JOIN workspaces w ON w.id = s.workspace_id \
+             WHERE s.status = 'running' ORDER BY s.run_started_at NULLS FIRST, s.id",
+        )
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to list live runs")?;
+        rows.iter()
+            .map(|row| {
+                Ok(LiveRun {
+                    session: row.try_get("id")?,
+                    title: row.try_get("title")?,
+                    workspace: row.try_get("workspace_id")?,
+                    workspace_name: row.try_get("workspace_name")?,
+                    owner_email: row.try_get("owner_email")?,
+                    model: row.try_get("model")?,
+                    reasoning_effort: row.try_get("reasoning_effort")?,
+                    fast: row.try_get("fast")?,
+                    scheduled: row.try_get("scheduled")?,
+                    started_at: row.try_get("started_at")?,
+                    heartbeat_at: row.try_get("heartbeat_at")?,
+                    cancel_requested: row.try_get("run_cancel_requested")?,
+                    credits: row.try_get("credits")?,
+                    responses: row.try_get("responses")?,
+                })
+            })
+            .collect()
+    }
+
     // false when there's no such user; suspending again keeps the first time
     pub async fn set_user_suspended(&self, id: Uuid, suspended: bool) -> anyhow::Result<bool> {
         let result = sqlx::query(
@@ -411,6 +471,7 @@ mod tests {
             "% is literal"
         );
 
+        store.live_runs().await.unwrap();
         let report = store.usage_report(30).await.unwrap();
         assert!(report.accounts.len() as i64 <= TOP_ACCOUNTS);
 

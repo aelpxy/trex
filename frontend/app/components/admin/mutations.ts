@@ -33,6 +33,8 @@ export const useSignOutUser = () => useAdminMutation((user: string) => trex.admi
 export const useEndUserSession = () =>
   useAdminMutation(({ user, session }: { user: string; session: string }) => trex.admin.endSignInSession(user, session));
 
+export const useCancelRun = () => useAdminMutation((session: string) => trex.admin.cancelRun(session));
+
 export const useDeleteUser = () => useAdminMutation((user: string) => trex.admin.deleteUser(user));
 
 // one at a time, since each tears down sandboxes and files; the list refreshes even when one fails part way

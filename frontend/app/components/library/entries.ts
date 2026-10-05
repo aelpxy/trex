@@ -30,6 +30,9 @@ export const entryIcon = (entry: Entry): IconType =>
   entry.kind === "folder" ? LuFolder : IMAGE.test(entry.name) ? LuFileImage : CODE.test(entry.name) ? LuFileCode : TEXT.test(entry.name) ? LuFileText : LuFile;
 
 export const baseName = (path: string) => path.replace(/\/$/, "").split("/").pop() ?? path;
+export const parentOf = (path: string) => path.slice(0, path.replace(/\/$/, "").lastIndexOf("/") + 1);
+export const placeName = (folder: string) => (folder ? baseName(folder) : "your library");
+export const plural = (count: number, noun: string) => `${count.toLocaleString()} ${noun}${count === 1 ? "" : "s"}`;
 
 // the folders and files one level under `folder`, or every file matching `search` anywhere
 export function entriesOf(files: ApiFile[], folder: string, search: string): Entry[] {
@@ -52,6 +55,29 @@ export function entriesOf(files: ApiFile[], folder: string, search: string): Ent
     folders.set(name, { ...existing, size: existing.size + file.size, modified: Math.max(existing.modified, file.modified_at), files: existing.files + 1 });
   }
   return [...[...folders.values()].sort((a, b) => a.name.localeCompare(b.name)), ...entries.sort((a, b) => a.name.localeCompare(b.name))];
+}
+
+export const keyOf = (entry: Entry) => `${entry.kind}:${entry.path}`;
+
+export type Move = { from: string; to: string };
+
+// where each file goes when `entry` moves to sit under `folder` as `name`; `paths` are its files
+export function movesOf(entry: Entry, paths: string[], folder: string, name = baseName(entry.path)): Move[] {
+  if (entry.kind === "file") return [{ from: entry.path, to: `${folder}${name}` }];
+  return paths.map((path) => ({ from: path, to: `${folder}${name}/${path.slice(entry.path.length)}` }));
+}
+
+// a folder can't go inside itself, and a move has to change where at least one thing is
+export const canDrop = (folder: string, targets: Entry[]) =>
+  !targets.some((entry) => entry.kind === "folder" && folder.startsWith(entry.path)) && targets.some((entry) => parentOf(entry.path) !== folder);
+
+// `name (1).ext`, `name (2).ext`, ... until nothing in `taken` has it
+export function freeName(folder: string, name: string, taken: Set<string>) {
+  const dot = name.lastIndexOf(".");
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  let candidate = name;
+  for (let n = 1; taken.has(`${folder}${candidate}`); n += 1) candidate = `${stem} (${n})${ext}`;
+  return candidate;
 }
 
 // every folder that holds a file, at any depth, as `a/` and `a/b/`

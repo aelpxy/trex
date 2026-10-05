@@ -4,7 +4,7 @@ import { upload } from "~/lib/api";
 import { queries } from "~/lib/queries";
 import { trex } from "~/lib/trex";
 
-export type Move = { from: string; to: string };
+import type { Move } from "./entries";
 
 // runs each step in turn so a failure says how far it got; the list refreshes either way
 function useSteps<T>(step: (item: T) => Promise<unknown>, verb: string) {
