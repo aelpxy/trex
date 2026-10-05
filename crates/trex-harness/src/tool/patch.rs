@@ -517,7 +517,7 @@ mod tests {
         let (events, mut rx) = mpsc::channel(64);
         let call = |patch: &str| {
             let ctx = ToolContext {
-                user,
+                workspace: user,
                 library: &library,
                 openshell: &openshell,
                 sandbox: &sandbox,

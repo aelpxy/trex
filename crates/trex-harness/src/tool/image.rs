@@ -65,7 +65,7 @@ impl Tool for ViewImage {
                 bail!("{} is not a PNG, JPEG, GIF or WebP image", args.path);
             };
             let size = bytes.len();
-            let hash = ctx.library.put_attachment(ctx.user, bytes).await?;
+            let hash = ctx.library.put_attachment(ctx.workspace, bytes).await?;
             Ok(ToolOutput::Content(vec![
                 InputContent::InputText(InputTextContent {
                     text: format!("{} ({mime}, {size} bytes):", args.path),

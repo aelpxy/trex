@@ -39,7 +39,7 @@ pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
 // from the bytes, since a client's claimed mime type can't be trusted
 pub async fn store(
     library: &Library,
-    user: Uuid,
+    workspace: Uuid,
     filename: Option<&str>,
     bytes: Vec<u8>,
 ) -> anyhow::Result<InputContent> {
@@ -51,7 +51,7 @@ pub async fn store(
     if mime == UNKNOWN_MIME {
         bail!("attachments can be PNG, JPEG, GIF or WebP images, PDFs, or text files");
     }
-    let hash = library.put_attachment(user, bytes).await?;
+    let hash = library.put_attachment(workspace, bytes).await?;
     let url = reference(&hash, mime);
     Ok(if image {
         InputContent::InputImage(InputImageContent {
@@ -135,7 +135,7 @@ pub fn references(item: &Value) -> Vec<(&'static str, String, String, Option<Str
 // swaps attachment references for data urls right before a request
 pub async fn resolve(
     library: &Library,
-    user: Uuid,
+    workspace: Uuid,
     items: Vec<InputItem>,
 ) -> anyhow::Result<Vec<InputItem>> {
     let mut value = serde_json::to_value(&items).context("failed to serialize the request")?;
@@ -153,7 +153,7 @@ pub async fn resolve(
         let (hash, mime) = reference[SCHEME.len()..]
             .split_once('#')
             .with_context(|| format!("invalid attachment reference {reference}"))?;
-        let bytes = library.get_attachment(user, hash).await?;
+        let bytes = library.get_attachment(workspace, hash).await?;
         let data_url = format!("data:{mime};base64,{}", STANDARD.encode(bytes));
         data_urls.insert(reference, data_url);
     }

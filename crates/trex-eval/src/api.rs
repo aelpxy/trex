@@ -10,7 +10,6 @@ use futures::{Stream, StreamExt};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{Value, json};
 use tokio::time::sleep;
-use uuid::Uuid;
 
 const RUN_ENDS: [&str; 4] = [
     "run.completed",
@@ -23,22 +22,78 @@ const RUN_ENDS: [&str; 4] = [
 pub struct Api {
     http: Client,
     base: String,
-    user: Uuid,
+    token: String,
 }
 
 impl Api {
-    pub fn new(base: String, user: Uuid) -> Self {
+    // logs in, signing the account up the first time, so eval runs reuse one workspace
+    pub async fn account(base: String, email: &str, password: &str) -> anyhow::Result<Self> {
+        let http = Client::new();
+        let body = json!({"email": email, "password": password, "name": "Eval"});
+        let mut response = http
+            .post(format!("{base}/v1/auth/login"))
+            .json(&body)
+            .send()
+            .await?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            response = http
+                .post(format!("{base}/v1/auth/signup"))
+                .json(&body)
+                .send()
+                .await?;
+        }
+        let status = response.status();
+        let token: Value = response.json().await?;
+        if !status.is_success() {
+            bail!("signing in {email} returned {status}: {token}");
+        }
+        let token = token["token"].as_str().context("no token")?.to_owned();
+        Ok(Self { http, base, token })
+    }
+
+    pub fn admin(base: String, token: String) -> Self {
         Self {
             http: Client::new(),
             base,
-            user,
+            token,
         }
     }
 
-    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+    pub fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
         self.http
             .request(method, format!("{}/v1{path}", self.base))
-            .header("x-trex-user", self.user.to_string())
+            .bearer_auth(&self.token)
+    }
+
+    pub async fn get(&self, path: &str) -> anyhow::Result<Value> {
+        self.call(Method::GET, path, None).await
+    }
+
+    pub async fn post(&self, path: &str, body: Value) -> anyhow::Result<Value> {
+        self.call(Method::POST, path, Some(body)).await
+    }
+
+    pub async fn patch(&self, path: &str, body: Value) -> anyhow::Result<Value> {
+        self.call(Method::PATCH, path, Some(body)).await
+    }
+
+    pub async fn delete(&self, path: &str) -> anyhow::Result<Value> {
+        self.call(Method::DELETE, path, None).await
+    }
+
+    // the status and body, for checking refusals
+    pub async fn try_send(
+        &self,
+        session: &str,
+        content: &str,
+    ) -> anyhow::Result<(StatusCode, Value)> {
+        let response = self
+            .request(Method::POST, &format!("/sessions/{session}/messages"))
+            .json(&json!({ "content": content }))
+            .send()
+            .await?;
+        let status = response.status();
+        Ok((status, response.json().await.unwrap_or(Value::Null)))
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {

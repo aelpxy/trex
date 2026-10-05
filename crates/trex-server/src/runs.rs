@@ -9,7 +9,7 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use tokio::{
     sync::{mpsc, watch},
-    time::interval,
+    time::{interval, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -31,6 +31,7 @@ use crate::api::{
     error::ApiError,
     events::{SessionEvent, to_api},
 };
+use crate::credits::{self, WorkspaceBudget};
 
 const MAX_TURNS: usize = 50;
 const SEND_ATTEMPTS: usize = 3;
@@ -39,6 +40,10 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const RUN_STALE_AFTER: Duration = Duration::from_secs(30);
 const RESUME_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const RESUME_BATCH: i64 = 20;
+const INSUFFICIENT_CREDITS: &str = "insufficient_credits";
+const TITLE_TIMEOUT: Duration = Duration::from_secs(30);
+const TITLE_ATTEMPTS: u32 = 2;
+const FALLBACK_TITLE_CHARS: usize = 60;
 const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 #[derive(Default)]
@@ -54,13 +59,13 @@ struct RunHandle {
 
 struct SessionInbox<'a> {
     store: &'a Store,
-    user: Uuid,
+    workspace: Uuid,
     session: Uuid,
 }
 
 struct SessionJournal<'a> {
     store: &'a Store,
-    user: Uuid,
+    workspace: Uuid,
     session: Uuid,
 }
 
@@ -68,7 +73,7 @@ impl Journal for SessionJournal<'_> {
     fn save(&self, first: usize, items: Vec<Value>) -> BoxFuture<'_, anyhow::Result<()>> {
         Box::pin(async move {
             self.store
-                .put_session_items(self.user, self.session, first, &items)
+                .put_session_items(self.workspace, self.session, first, &items)
                 .await
         })
     }
@@ -79,7 +84,7 @@ impl Inbox for SessionInbox<'_> {
         Box::pin(async move {
             let queued = self
                 .store
-                .take_queued_messages(self.user, self.session)
+                .take_queued_messages(self.workspace, self.session)
                 .await?;
             Ok(queued.into_iter().map(queued_item).collect())
         })
@@ -108,6 +113,7 @@ enum Finished {
     Completed,
     NeedsInput,
     Cancelled,
+    OutOfCredits,
     LostLease,
 }
 
@@ -159,11 +165,12 @@ impl Runs {
 // claims the session, saves the new input, and runs the agent in the background
 pub async fn start(
     state: &Arc<AppState>,
-    user: Uuid,
+    workspace: Uuid,
     session: &Session,
     input: Vec<Value>,
 ) -> Result<(), ApiError> {
-    if !claim(state, user, session, &input).await? {
+    credits::require(state, workspace).await?;
+    if !claim(state, workspace, session, &input).await? {
         return Err(ApiError::Conflict(
             "a run is already in progress for this session".into(),
         ));
@@ -174,20 +181,31 @@ pub async fn start(
 // starts a run with the message, or queues it for the running agent
 pub async fn send_message(
     state: &Arc<AppState>,
-    user: Uuid,
+    workspace: Uuid,
     session: &Session,
     message: Value,
     interrupt: bool,
 ) -> Result<Started, ApiError> {
+    credits::require(state, workspace).await?;
     let input = [message];
     // the run can end between the two attempts, so they are retried a few times
     for _ in 0..SEND_ATTEMPTS {
-        if claim(state, user, session, &input).await? {
+        if claim(state, workspace, session, &input).await? {
+            if session.title.is_none() {
+                let text = history::message_text(&input[0]);
+                tokio::spawn(name_session(
+                    state.clone(),
+                    workspace,
+                    session.id,
+                    session.model.clone(),
+                    text,
+                ));
+            }
             return Ok(Started::Run);
         }
         if state
             .store
-            .queue_message(user, session.id, &input[0])
+            .queue_message(workspace, session.id, &input[0])
             .await?
         {
             if interrupt {
@@ -201,21 +219,70 @@ pub async fn send_message(
     ))
 }
 
+// the model's title, retried once; when the model can't answer, the message's first line stands in
+// so the chat never stays untitled
+async fn name_session(
+    state: Arc<AppState>,
+    workspace: Uuid,
+    session: Uuid,
+    model: String,
+    text: String,
+) {
+    let mut title = None;
+    if let Some(model) = state.models.get(&model) {
+        for attempt in 1..=TITLE_ATTEMPTS {
+            match timeout(TITLE_TIMEOUT, model.title(&text)).await {
+                Ok(Ok(generated)) => {
+                    title = Some(generated);
+                    break;
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(session = %session, attempt, error = format!("{error:#}"), "failed to title session")
+                }
+                Err(_) => tracing::warn!(session = %session, attempt, "timed out titling session"),
+            }
+        }
+    }
+    let Some(title) = title.or_else(|| fallback_title(&text)) else {
+        return;
+    };
+    match state
+        .store
+        .set_title_if_missing(workspace, session, &title)
+        .await
+    {
+        Ok(true) => publish(&state, session, SessionEvent::SessionUpdated { title }).await,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(session = %session, error = format!("{error:#}"), "failed to save session title")
+        }
+    }
+}
+
+fn fallback_title(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let mut title: String = line.chars().take(FALLBACK_TITLE_CHARS).collect();
+    if line.chars().count() > FALLBACK_TITLE_CHARS {
+        title = format!("{}…", title.trim_end());
+    }
+    Some(title)
+}
+
 async fn claim(
     state: &Arc<AppState>,
-    user: Uuid,
+    workspace: Uuid,
     session: &Session,
     input: &[Value],
 ) -> Result<bool, ApiError> {
     let run_id = Uuid::now_v7();
-    if !state.store.start_run(user, session.id, run_id).await? {
+    if !state.store.start_run(workspace, session.id, run_id).await? {
         return Ok(false);
     }
     state
         .store
-        .append_session_items(user, session.id, input)
+        .append_session_items(workspace, session.id, input)
         .await?;
-    spawn(state, user, session.id, run_id, false);
+    spawn(state, workspace, session.id, run_id, false);
     Ok(true)
 }
 
@@ -232,7 +299,7 @@ pub async fn resume_stale_runs(state: Arc<AppState>) {
             Ok(stale) => {
                 for run in stale {
                     tracing::info!(session = %run.session, "resuming interrupted run");
-                    spawn(&state, run.user, run.session, run.run, true);
+                    spawn(&state, run.workspace, run.session, run.run, true);
                 }
             }
             Err(error) => {
@@ -245,12 +312,12 @@ pub async fn resume_stale_runs(state: Arc<AppState>) {
     }
 }
 
-fn spawn(state: &Arc<AppState>, user: Uuid, session: Uuid, run_id: RunId, resumed: bool) {
+fn spawn(state: &Arc<AppState>, workspace: Uuid, session: Uuid, run_id: RunId, resumed: bool) {
     let (cancel, interrupts) = state.runs.insert(session, run_id);
-    let span = tracing::info_span!("run", session = %session, user = %user);
+    let span = tracing::info_span!("run", session = %session, workspace = %workspace);
     let task = run(
         state.clone(),
-        user,
+        workspace,
         session,
         run_id,
         resumed,
@@ -263,21 +330,30 @@ fn spawn(state: &Arc<AppState>, user: Uuid, session: Uuid, run_id: RunId, resume
 #[allow(clippy::too_many_arguments)] // reason: the run's identity and its control channels, all distinct
 async fn run(
     state: Arc<AppState>,
-    user: Uuid,
+    workspace: Uuid,
     session: Uuid,
     run: RunId,
     resumed: bool,
     cancel: CancellationToken,
     interrupts: watch::Receiver<()>,
 ) {
+    // a client that reloads mid-run keeps the items saved before this and replays the rest
+    let items = state
+        .store
+        .count_session_items(workspace, session)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(session = %session, error = format!("{error:#}"), "failed to count session items");
+            0
+        });
     let started = if resumed {
-        SessionEvent::RunResumed
+        SessionEvent::RunResumed { items }
     } else {
-        SessionEvent::RunStarted
+        SessionEvent::RunStarted { items }
     };
     publish(&state, session, started).await;
     let result = tokio::select! {
-        result = drive(&state, user, session, run, &cancel, interrupts) => result,
+        result = drive(&state, workspace, session, run, &cancel, interrupts) => result,
         _ = keep_lease(&state, session, run) => Ok(Finished::LostLease),
     };
 
@@ -285,8 +361,24 @@ async fn run(
         Ok(Finished::Completed) => Some(SessionEvent::RunCompleted),
         Ok(Finished::NeedsInput) => Some(SessionEvent::RunNeedsInput),
         Ok(Finished::Cancelled) => {
-            stop(&state, user, session, run, SessionStatus::Idle, None).await;
+            stop(&state, workspace, session, run, SessionStatus::Idle, None).await;
             Some(SessionEvent::RunCancelled)
+        }
+        Ok(Finished::OutOfCredits) => {
+            let message = "out of credits: the run stopped after its last step".to_owned();
+            stop(
+                &state,
+                workspace,
+                session,
+                run,
+                SessionStatus::Failed,
+                Some(&message),
+            )
+            .await;
+            Some(SessionEvent::RunFailed {
+                error: message,
+                code: Some(INSUFFICIENT_CREDITS),
+            })
         }
         Ok(Finished::LostLease) => {
             tracing::warn!(session = %session, "another instance took over the run");
@@ -297,14 +389,17 @@ async fn run(
             tracing::warn!(session = %session, error = message, "run failed");
             stop(
                 &state,
-                user,
+                workspace,
                 session,
                 run,
                 SessionStatus::Failed,
                 Some(&message),
             )
             .await;
-            Some(SessionEvent::RunFailed { error: message })
+            Some(SessionEvent::RunFailed {
+                error: message,
+                code: None,
+            })
         }
     };
     state.runs.remove(session, run);
@@ -332,7 +427,7 @@ async fn keep_lease(state: &AppState, session: Uuid, run: RunId) {
 // messages queued for a run that won't read them are saved to history, so the next run sees them
 async fn stop(
     state: &AppState,
-    user: Uuid,
+    workspace: Uuid,
     session: Uuid,
     run: RunId,
     status: SessionStatus,
@@ -340,15 +435,15 @@ async fn stop(
 ) {
     let result: anyhow::Result<()> = async {
         loop {
-            let queued = state.store.take_queued_messages(user, session).await?;
+            let queued = state.store.take_queued_messages(workspace, session).await?;
             let items: Vec<_> = queued.into_iter().map(queued_item).collect();
             state
                 .store
-                .append_session_items(user, session, &items)
+                .append_session_items(workspace, session, &items)
                 .await?;
             match state
                 .store
-                .finish_run(user, session, run, status, None, error)
+                .finish_run(workspace, session, run, status, None, error)
                 .await?
             {
                 Finish::Finished | Finish::NotOwner => return Ok(()),
@@ -366,7 +461,7 @@ async fn stop(
 // ends must continue it instead
 async fn drive(
     state: &Arc<AppState>,
-    user: Uuid,
+    workspace: Uuid,
     id: Uuid,
     run: RunId,
     cancel: &CancellationToken,
@@ -374,13 +469,21 @@ async fn drive(
 ) -> anyhow::Result<Finished> {
     let session = state
         .store
-        .session(user, id)
+        .session(workspace, id)
         .await?
         .context("session no longer exists")?;
     let model = state
         .models
         .get(&session.model)
         .with_context(|| format!("model {} is no longer configured", session.model))?;
+    let project_instructions = match session.project_id {
+        Some(project) => state
+            .store
+            .project(workspace, project)
+            .await?
+            .and_then(|project| project.instructions),
+        None => None,
+    };
     let reasoning_effort = session
         .reasoning_effort
         .as_deref()
@@ -389,30 +492,35 @@ async fn drive(
 
     let provider = SessionSandbox {
         state,
-        user,
+        workspace,
         session: &session,
     };
     let sandbox = LazySandbox::new(&provider);
 
-    let mut history = history::from_json(state.store.session_items(user, id).await?)?;
+    let mut history = history::from_json(state.store.session_items(workspace, id).await?)?;
     let inbox = SessionInbox {
         store: &state.store,
-        user,
+        workspace,
         session: id,
+    };
+    let budget = WorkspaceBudget {
+        store: &state.store,
+        workspace,
+        enforced: state.plans.enforced(),
     };
     let journal = SessionJournal {
         store: &state.store,
-        user,
+        workspace,
         session: id,
     };
     let agent = Agent {
-        user,
+        workspace,
         library: &state.library,
         model,
         tools: &state.tools,
         openshell: &state.openshell,
         sandbox: &sandbox,
-        instructions: Some(instructions()),
+        instructions: Some(instructions(project_instructions.as_deref())),
         reasoning_effort,
         max_turns: MAX_TURNS,
         cache_key: Some(id.to_string()),
@@ -422,12 +530,13 @@ async fn drive(
         }),
         journal: Some(&journal),
         fast: session.fast,
+        budget: Some(&budget),
     };
 
     // the agent saves every item as it goes, so whatever happens the session can be continued
     loop {
         let (tx, rx) = mpsc::channel(256);
-        let forwarder = tokio::spawn(forward(state.clone(), user, id, rx));
+        let forwarder = tokio::spawn(forward(state.clone(), workspace, id, session.fast, rx));
         let result = tokio::select! {
             result = agent.run(&mut history, &tx) => Some(result),
             _ = cancel.cancelled() => None,
@@ -443,11 +552,12 @@ async fn drive(
                 Some(question.context("run needs input but asked no question")?),
                 Finished::NeedsInput,
             ),
+            Some(Ok(RunOutcome::OutOfCredits)) => return Ok(Finished::OutOfCredits),
             Some(Err(error)) => return Err(error),
         };
         match state
             .store
-            .finish_run(user, id, run, status, question.as_ref(), None)
+            .finish_run(workspace, id, run, status, question.as_ref(), None)
             .await?
         {
             Finish::Finished => return Ok(finished),
@@ -460,16 +570,19 @@ async fn drive(
 }
 
 // the date changes once a day, so it costs the prompt cache little
-fn instructions() -> String {
-    format!(
-        "{INSTRUCTIONS}\nToday's date is {}.",
-        chrono::Utc::now().format("%Y-%m-%d")
-    )
+fn instructions(project: Option<&str>) -> String {
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    match project {
+        Some(project) => format!(
+            "{INSTRUCTIONS}\nToday's date is {date}.\n\n# Project instructions\n\nThe user set these for every chat in this project:\n\n{project}"
+        ),
+        None => format!("{INSTRUCTIONS}\nToday's date is {date}."),
+    }
 }
 
 struct SessionSandbox<'a> {
     state: &'a AppState,
-    user: Uuid,
+    workspace: Uuid,
     session: &'a Session,
 }
 
@@ -478,46 +591,72 @@ impl SandboxProvider for SessionSandbox<'_> {
         &'a self,
         events: &'a mpsc::Sender<Event>,
     ) -> BoxFuture<'a, anyhow::Result<Sandbox>> {
-        Box::pin(ensure_sandbox(self.state, self.user, self.session, events))
+        Box::pin(async move {
+            // the model only sees this as a tool error, so the operator needs it in the log
+            let result = ensure_sandbox(self.state, self.workspace, self.session, events).await;
+            if let Err(error) = &result {
+                tracing::warn!(session = %self.session.id, error = format!("{error:#}"), "failed to provide sandbox");
+            }
+            result
+        })
     }
 }
 
 // the sandbox is checked even when it isn't marked stopped, so one stopped by anything else recovers
 async fn ensure_sandbox(
     state: &AppState,
-    user: Uuid,
+    workspace: Uuid,
     session: &Session,
     events: &mpsc::Sender<Event>,
 ) -> anyhow::Result<Sandbox> {
     if let Some(name) = &session.sandbox {
         let sandbox = Sandbox {
-            workspace: workspace_name(user),
+            workspace: workspace_name(workspace),
             name: name.clone(),
         };
+        if !state.openshell.usable(&sandbox).await? {
+            // its files are lost either way, and a new sandbox lets the chat keep working
+            tracing::warn!(session = %session.id, sandbox = sandbox.name, "replacing a broken sandbox");
+            if let Err(error) = state.openshell.delete(&sandbox).await {
+                tracing::warn!(session = %session.id, error = format!("{error:#}"), "failed to delete the broken sandbox");
+            }
+            return create_sandbox(state, workspace, session, events).await;
+        }
         if session.sandbox_stopped {
             send(events, Event::SandboxStarting).await?;
         }
         state.openshell.start(&sandbox).await?;
         if session.sandbox_stopped {
-            state.store.mark_sandbox_started(user, session.id).await?;
+            state
+                .store
+                .mark_sandbox_started(workspace, session.id)
+                .await?;
             send(events, Event::SandboxReady).await?;
         }
         return Ok(sandbox);
     }
+    create_sandbox(state, workspace, session, events).await
+}
 
+async fn create_sandbox(
+    state: &AppState,
+    workspace: Uuid,
+    session: &Session,
+    events: &mpsc::Sender<Event>,
+) -> anyhow::Result<Sandbox> {
     send(events, Event::SandboxCreating).await?;
-    let workspace = state.openshell.ensure_workspace(user).await?;
+    let openshell_workspace = state.openshell.ensure_workspace(workspace).await?;
     let sandbox = state
         .openshell
         .create(
-            &workspace,
+            &openshell_workspace,
             Some(state.sandbox_image.clone()),
             Some(&state.sandbox_policy),
         )
         .await?;
     state
         .store
-        .set_session_sandbox(user, session.id, &sandbox.name)
+        .set_session_sandbox(workspace, session.id, &sandbox.name)
         .await?;
     send(events, Event::SandboxReady).await?;
     Ok(sandbox)
@@ -530,16 +669,18 @@ async fn send(events: &mpsc::Sender<Event>, event: Event) -> anyhow::Result<()> 
 // returns the question the model asked, if any, so the session can wait for an answer
 async fn forward(
     state: Arc<AppState>,
-    user: Uuid,
+    workspace: Uuid,
     session: Uuid,
+    fast: bool,
     mut rx: mpsc::Receiver<Event>,
 ) -> Option<Value> {
     let mut question = None;
     while let Some(event) = rx.recv().await {
+        let mut charged = 0;
         match &event {
             Event::Usage(usage) => {
                 let record = UsageRecord {
-                    user_id: user,
+                    workspace_id: workspace,
                     session_id: session,
                     model: &usage.model,
                     input_tokens: usage.input_tokens,
@@ -547,9 +688,13 @@ async fn forward(
                     cache_write_tokens: usage.cache_write_tokens,
                     output_tokens: usage.output_tokens,
                     reasoning_tokens: usage.reasoning_tokens,
+                    duration_ms: usage.duration.as_millis() as u64,
                 };
-                if let Err(error) = state.store.record_usage(&record).await {
-                    tracing::error!(session = %session, error = format!("{error:#}"), "failed to record usage");
+                match credits::charge(&state, &record, fast).await {
+                    Ok(credits) => charged = credits,
+                    Err(error) => {
+                        tracing::error!(session = %session, error = format!("{error:#}"), "failed to charge usage")
+                    }
                 }
             }
             Event::Question { call_id, questions } => {
@@ -557,7 +702,10 @@ async fn forward(
             }
             _ => {}
         }
-        if let Some(event) = to_api(event) {
+        if let Some(mut event) = to_api(event) {
+            if let SessionEvent::Usage { credits, .. } = &mut event {
+                *credits = charged;
+            }
             publish(&state, session, event).await;
         }
     }
@@ -572,5 +720,21 @@ async fn publish(state: &AppState, session: Uuid, event: SessionEvent) {
     };
     if let Err(error) = result {
         tracing::warn!(session = %session, error = format!("{error:#}"), "failed to publish event");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn falls_back_to_the_first_line() {
+        assert_eq!(
+            fallback_title("\n  Fix the login bug\nmore detail").as_deref(),
+            Some("Fix the login bug")
+        );
+        let long = "a".repeat(80);
+        assert_eq!(fallback_title(&long).map(|t| t.chars().count()), Some(61));
+        assert_eq!(fallback_title("   \n "), None);
     }
 }

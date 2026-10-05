@@ -24,7 +24,7 @@ pub struct LibraryFile {
     pub modified_at: i64,
 }
 
-// each user's files live under users/{id}/library/ in one bucket or directory
+// each workspace's files live under workspaces/{id}/library/ in one bucket or directory
 pub struct Library {
     store: Arc<dyn ObjectStore>,
 }
@@ -63,8 +63,8 @@ impl Library {
         }
     }
 
-    pub async fn put(&self, user: Uuid, path: &str, content: Vec<u8>) -> anyhow::Result<()> {
-        let key = key(user, path)?;
+    pub async fn put(&self, workspace: Uuid, path: &str, content: Vec<u8>) -> anyhow::Result<()> {
+        let key = key(workspace, path)?;
         self.store
             .put(&key, content.into())
             .await
@@ -72,8 +72,8 @@ impl Library {
         Ok(())
     }
 
-    pub async fn get(&self, user: Uuid, path: &str) -> anyhow::Result<Vec<u8>> {
-        let key = key(user, path)?;
+    pub async fn get(&self, workspace: Uuid, path: &str) -> anyhow::Result<Vec<u8>> {
+        let key = key(workspace, path)?;
         let object = self
             .store
             .get(&key)
@@ -86,31 +86,51 @@ impl Library {
         Ok(bytes.to_vec())
     }
 
-    pub async fn delete(&self, user: Uuid, path: &str) -> anyhow::Result<()> {
-        let key = key(user, path)?;
+    pub async fn delete(&self, workspace: Uuid, path: &str) -> anyhow::Result<()> {
+        let key = key(workspace, path)?;
         self.store
             .delete(&key)
             .await
             .with_context(|| format!("failed to delete {path}"))
     }
 
+    // false when something already exists at `to`; s3 has no atomic rename-if-absent, so a
+    // concurrent write to `to` can still be overwritten
+    pub async fn rename(&self, workspace: Uuid, from: &str, to: &str) -> anyhow::Result<bool> {
+        let (source, target) = (key(workspace, from)?, key(workspace, to)?);
+        match self.store.head(&target).await {
+            Ok(_) => return Ok(false),
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(error) => return Err(error).with_context(|| format!("failed to check {to}")),
+        }
+        self.store
+            .rename(&source, &target)
+            .await
+            .with_context(|| format!("failed to move {from} to {to}"))?;
+        Ok(true)
+    }
+
     // attachments are content-addressed and kept apart from the files the user browses
-    pub async fn put_attachment(&self, user: Uuid, content: Vec<u8>) -> anyhow::Result<String> {
+    pub async fn put_attachment(
+        &self,
+        workspace: Uuid,
+        content: Vec<u8>,
+    ) -> anyhow::Result<String> {
         let mut hash = String::with_capacity(64);
         for byte in Sha256::digest(&content) {
             write!(hash, "{byte:02x}").expect("writing to a string cannot fail");
         }
         self.store
-            .put(&attachment_key(user, &hash)?, content.into())
+            .put(&attachment_key(workspace, &hash)?, content.into())
             .await
             .context("failed to store attachment")?;
         Ok(hash)
     }
 
-    pub async fn get_attachment(&self, user: Uuid, hash: &str) -> anyhow::Result<Vec<u8>> {
+    pub async fn get_attachment(&self, workspace: Uuid, hash: &str) -> anyhow::Result<Vec<u8>> {
         let object = self
             .store
-            .get(&attachment_key(user, hash)?)
+            .get(&attachment_key(workspace, hash)?)
             .await
             .with_context(|| format!("failed to read attachment {hash}"))?;
         let bytes = object
@@ -120,8 +140,8 @@ impl Library {
         Ok(bytes.to_vec())
     }
 
-    pub async fn list(&self, user: Uuid) -> anyhow::Result<Vec<LibraryFile>> {
-        let root = root(user);
+    pub async fn list(&self, workspace: Uuid) -> anyhow::Result<Vec<LibraryFile>> {
+        let root = root(workspace);
         let prefix = format!("{root}/");
         let mut files: Vec<LibraryFile> = self
             .store
@@ -168,24 +188,24 @@ pub fn is_not_found(error: &anyhow::Error) -> bool {
     })
 }
 
-fn attachment_key(user: Uuid, hash: &str) -> anyhow::Result<Path> {
+fn attachment_key(workspace: Uuid, hash: &str) -> anyhow::Result<Path> {
     if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(InvalidPath(format!("invalid attachment {hash:?}")).into());
     }
     Ok(Path::from_iter([
-        "users",
-        &user.to_string(),
+        "workspaces",
+        &workspace.to_string(),
         "attachments",
         hash,
     ]))
 }
 
-fn root(user: Uuid) -> Path {
-    Path::from_iter(["users", &user.to_string(), "library"])
+fn root(workspace: Uuid) -> Path {
+    Path::from_iter(["workspaces", &workspace.to_string(), "library"])
 }
 
 // library paths come from users and models, so anything that could escape the user's prefix is rejected
-fn key(user: Uuid, path: &str) -> anyhow::Result<Path> {
+fn key(workspace: Uuid, path: &str) -> anyhow::Result<Path> {
     if path.is_empty() || path.len() > 1024 {
         return Err(InvalidPath("library path must be 1 to 1024 bytes".into()).into());
     }
@@ -196,7 +216,7 @@ fn key(user: Uuid, path: &str) -> anyhow::Result<Path> {
         }
         segments.push(segment);
     }
-    let mut key = root(user);
+    let mut key = root(workspace);
     for segment in segments {
         key = key.join(segment);
     }
@@ -206,6 +226,43 @@ fn key(user: Uuid, path: &str) -> anyhow::Result<Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn renames_without_overwriting() {
+        let library = Library::in_memory();
+        let workspace = Uuid::now_v7();
+        library
+            .put(workspace, "a.txt", b"a".to_vec())
+            .await
+            .unwrap();
+        library
+            .put(workspace, "b.txt", b"b".to_vec())
+            .await
+            .unwrap();
+        assert!(!library.rename(workspace, "a.txt", "b.txt").await.unwrap());
+        assert!(
+            library
+                .rename(workspace, "a.txt", "docs/a.txt")
+                .await
+                .unwrap()
+        );
+        let paths: Vec<_> = library
+            .list(workspace)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        assert_eq!(paths, ["b.txt", "docs/a.txt"]);
+        assert_eq!(library.get(workspace, "b.txt").await.unwrap(), b"b");
+        assert!(
+            library
+                .rename(workspace, "missing.txt", "x.txt")
+                .await
+                .is_err()
+        );
+        assert!(library.rename(workspace, "b.txt", "../x").await.is_err());
+    }
 
     #[tokio::test]
     async fn stores_attachments_by_content() {
@@ -237,7 +294,7 @@ mod tests {
 
     #[test]
     fn rejects_escaping_paths() {
-        let user = Uuid::now_v7();
+        let workspace = Uuid::now_v7();
         for path in [
             "",
             "/etc/passwd",
@@ -248,11 +305,11 @@ mod tests {
             "a\\b",
             "a/",
         ] {
-            assert!(key(user, path).is_err(), "{path:?} should be rejected");
+            assert!(key(workspace, path).is_err(), "{path:?} should be rejected");
         }
         assert_eq!(
-            key(user, "notes/todo.md").unwrap().as_ref(),
-            format!("users/{user}/library/notes/todo.md")
+            key(workspace, "notes/todo.md").unwrap().as_ref(),
+            format!("workspaces/{workspace}/library/notes/todo.md")
         );
     }
 
@@ -260,15 +317,15 @@ mod tests {
     async fn local_library_round_trips() {
         let dir = std::env::temp_dir().join(format!("trex-library-{}", Uuid::now_v7()));
         let library = Library::local(&dir).unwrap();
-        let user = Uuid::now_v7();
+        let workspace = Uuid::now_v7();
 
         library
-            .put(user, "docs/a.md", b"hello".to_vec())
+            .put(workspace, "docs/a.md", b"hello".to_vec())
             .await
             .unwrap();
-        let listed = library.list(user).await.unwrap();
-        let content = library.get(user, "docs/a.md").await.unwrap();
-        let on_disk = std::fs::read(dir.join(format!("users/{user}/library/docs/a.md")));
+        let listed = library.list(workspace).await.unwrap();
+        let content = library.get(workspace, "docs/a.md").await.unwrap();
+        let on_disk = std::fs::read(dir.join(format!("workspaces/{workspace}/library/docs/a.md")));
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(listed.len(), 1);
@@ -278,7 +335,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stores_files_per_user() {
+    async fn stores_files_per_workspace() {
         let library = Library::in_memory();
         let (alice, bob) = (Uuid::now_v7(), Uuid::now_v7());
 

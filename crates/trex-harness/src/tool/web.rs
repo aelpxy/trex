@@ -395,7 +395,7 @@ mod tests {
         let tools = Tools::standard().unwrap();
         let call = |args: Value| {
             let ctx = ToolContext {
-                user,
+                workspace: user,
                 library: &library,
                 openshell: &openshell,
                 sandbox: &sandbox,

@@ -25,7 +25,7 @@ pub async fn stop_idle_sandboxes(state: Arc<AppState>, idle: Duration) {
 async fn stop_batch(state: &AppState, idle: Duration) -> anyhow::Result<()> {
     while let Some(session) = state.store.next_idle_sandbox(idle).await? {
         let sandbox = Sandbox {
-            workspace: workspace_name(session.user),
+            workspace: workspace_name(session.workspace),
             name: session.sandbox.clone(),
         };
         // marked stopped even when stopping failed, so a broken sandbox isn't retried forever;

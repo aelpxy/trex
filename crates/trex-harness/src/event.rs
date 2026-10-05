@@ -45,11 +45,15 @@ pub enum Event {
     },
     Compacting,
     Compacted,
-    // a tool created, changed or removed a file in the sandbox; `diff` is a unified diff
+    // a tool created, changed or removed a file in the sandbox; `diff` is a unified diff, and
+    // `before`/`after` hold the whole file when it is small enough to show
     FileChanged {
+        call_id: String,
         path: String,
         change: FileChange,
         diff: String,
+        before: Option<String>,
+        after: Option<String>,
     },
     PlanUpdated {
         explanation: Option<String>,

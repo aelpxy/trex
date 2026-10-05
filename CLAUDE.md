@@ -11,10 +11,12 @@ Backend and agent harness for a web UI. trex owns sessions, the model catalog th
 ## Workspace
 
 - `crates/trex-harness`: the brain. Agent loop, runs, events, tools, model catalog (`model::Models`). Current focus.
-- `crates/trex-sandbox`: OpenShell client (`OpenShell`). One OpenShell workspace per trex user (`workspace_name(uuid)` = `u-` + 17 hex chars of sha256, labelled `trex-user=<uuid>` and verified on every `ensure_workspace`). Every call takes a `Sandbox { workspace, name }` handle. trex's mTLS identity is a gateway platform admin, so trex is what enforces tenancy: never build a `Sandbox` for a user from anything but their own workspace. Exec uses the streaming RPC: stdin is chunked under the 1 MiB gRPC limit and dropping the stream kills the process.
+- `crates/trex-sandbox`: OpenShell client (`OpenShell`). One OpenShell workspace per trex workspace (`workspace_name(uuid)` = `u-` + 17 hex chars of sha256, labelled `trex-workspace=<uuid>`, or the legacy `trex-user=<uuid>`, and verified on every `ensure_workspace`). Every call takes a `Sandbox { workspace, name }` handle. trex's mTLS identity is a gateway platform admin, so trex is what enforces tenancy: never build a `Sandbox` for a request from anything but its own workspace. Exec uses the streaming RPC: stdin is chunked under the 1 MiB gRPC limit and dropping the stream kills the process.
 - Sandbox image: `images/sandbox/Dockerfile` (Ubuntu 24.04 + Python/uv, Node, Go, Rust, micromamba, build tools). Build it with the gateway's engine on the gateway host: `podman build -t localhost/trex-sandbox:latest images/sandbox`. OpenShell forces `no_new_privs` and a non-root user, so apt never works inside a sandbox; the agent installs software via pip/uv, npm, go, cargo, or micromamba (conda-forge) into `HOME=/sandbox`. TLS is intercepted with a per-sandbox CA exported via `SSL_CERT_FILE` at a driver-specific path; tools that ignore it need a wrapper (see micromamba).
 - Sandbox network policy: `sandbox-policy.yaml` (committed, OpenShell's own format, parsed with the `openshell-policy` crate) is the default for session sandboxes. Unlisted egress is denied; OpenShell turns denials into pending access requests (`pending_access`, polled during runs and emitted as `Event::AccessRequest`) that the user approves or rejects (`approve_access` / `reject_access`). Gotchas: an empty `binaries` list matches nothing at enforcement time (use `path: "/**"`), and L7 endpoints default to audit-only unless `enforcement: enforce`.
-- `crates/trex-store`: Postgres (sqlx, migrations in `crates/trex-store/migrations`, applied on startup), Redis (connection manager), and the per-user file library (`object_store`, any S3-compatible provider, keyed `users/{uuid}/library/...`). Users, sessions and the credit ledger will live here.
+- `crates/trex-store`: Postgres (sqlx, migrations in `crates/trex-store/migrations`, applied on startup), Redis (connection manager), and the per-workspace file library (`object_store`, any S3-compatible provider, keyed `workspaces/{uuid}/library/...`; attachments under `workspaces/{uuid}/attachments/`). Modules: `accounts` (users, workspaces, members, auth tokens), `projects`, `sessions`, `credits` (balance on `workspaces.credits`, the `credit_ledger`), `events`, `library`.
+
+Tenancy: the workspace is the tenant. Sessions, projects, the library, sandboxes, usage and credits belong to a workspace; users are members of workspaces (`workspace_members`, one personal workspace each for now, teams later). Every store function on tenant data takes the workspace id and filters by it.
 - `crates/trex-server`: the `trex` binary. Config loading, logging, axum API. Stays thin; logic belongs in the harness.
 - `crates/trex-eval`: end-to-end eval suite. Builds and starts its own trex (random port, `target/eval/trex.toml` = `trex.toml` plus `eval-small-context`, a tiny-window copy of the model for compaction, and a 15s sandbox idle timeout), runs scripted scenarios against the HTTP API as one fixed eval user, and checks outcomes, verifying files the agent saved locally with python3 where it can. Scenarios live in `scenarios.rs` (`scenarios![...]`; `: exclusive` ones restart the server and run alone at the end).
 
@@ -34,7 +36,7 @@ The HTTP API takes the best of OpenAI, Anthropic and Stripe:
 
 ## Commands
 
-- `cargo build` / `cargo run` (binary `trex`, run from the workspace root)
+- `cargo build` / `cargo run` (binary `trex`, run from the workspace root; the server is the workspace's only default member, so other crates need `--workspace` or `-p`)
 - `cargo clippy --workspace --all-targets` must be warning-free
 - `cargo fmt` before committing
 - `cargo run -p trex-eval -- [--repeat N] [--concurrency N] [--effort LEVEL] [SCENARIO...]` runs the eval suite (needs everything the live tests need); it prints a table and writes `target/eval/last-run.json`. Run it before and after agent or prompt changes
@@ -59,6 +61,11 @@ upstream = "..."        # optional, model name sent upstream, defaults to id
 context_window = 400000 # optional, tokens, defaults to 128000; compaction starts at 80%
 reasoning_efforts = ["low", "medium", "high"] # optional, levels sessions may pick; any when omitted
 fast = true             # optional, sessions may use the priority service tier (service_tier: priority)
+price = { input = 1000, cached_input = 100, output = 4000 } # optional, credits per million tokens; fast_multiplier defaults to 2; unpriced models are free
+
+[plans.free]            # optional; with no plans, credits are tracked but never enforced
+name = "Free"
+monthly_credits = 100000 # the balance is topped up to this once a month
 ```
 
 Env vars:
@@ -71,24 +78,28 @@ Env vars:
 - `TREX_DATABASE_URL`, `TREX_REDIS_URL` (required; contain credentials, so never log them or put them in `trex.toml`)
 - `TREX_OPENSHELL_ENDPOINT` (default `https://127.0.0.1:17670`)
 - `TREX_OPENSHELL_TLS_DIR` (default `certs/openshell`, relative to the working dir, containing `ca.crt`, `tls.crt`, `tls.key`; `certs/` is gitignored)
+- `TREX_ADMIN_TOKEN` (optional secret; enables `/v1/admin`, never log it)
 
 Dev setup: the gateway on `fedora-server` only listens on loopback; tunnel with `ssh -fN -L 17670:127.0.0.1:17670 fedora-server`.
 
 ## HTTP API (v1)
 
-Auth is temporary: every `/v1` request names its user in `X-Trex-User: <uuid>` until registration and api keys exist.
+Auth: email + password (argon2id, hashed on a blocking thread). `POST /v1/auth/signup|login` return an opaque bearer token (`trex_` + 64 hex, 30 days; only its sha256 is stored in `auth_tokens`). Requests send `Authorization: Bearer <token>`; `api::auth::Auth` resolves the user and their workspace (the `Trex-Workspace: ws_...` header, or their first workspace) and every handler uses `Auth.workspace` as the tenant. `api::auth::Account` is for account endpoints that aren't workspace scoped. Email verification and password reset come later (`users.email_verified_at` exists for it). The web frontend proxies to trex, so it should keep the token in an httpOnly cookie and add the header.
 
 Docs: `GET /docs` (Scalar, loaded from its CDN by `api/docs.html`) renders `GET /openapi.json`, which utoipa generates from the handlers. Every handler has a `#[utoipa::path]` (summary line, `operation_id`, tag, params, responses with `ErrorResponse` for errors) and is registered with `routes!` in `api::routes()`, so the router and the spec can't drift; `spec_documents_every_route` lists the expected paths. Request and response bodies are typed structs deriving `ToSchema`, never `json!`.
 
 - `GET /v1/models`: `{id, name, context_window, reasoning_efforts, fast}` in `trex.toml` order; `POST /v1/sessions` rejects an effort the model doesn't list
-- `POST /v1/sessions` `{model, reasoning_effort?, fast?}`, `GET /v1/sessions?limit&starting_after`, `GET|DELETE /v1/sessions/{id}`
+- `POST /v1/auth/signup` `{email, name, password}`, `POST /v1/auth/login` `{email, password}`, `POST /v1/auth/logout`, `GET|PATCH /v1/me`, `POST /v1/me/password` `{current_password, new_password}` (revokes the other tokens)
+- `POST /v1/sessions` `{model, reasoning_effort?, fast?, project_id?}`, `GET /v1/sessions?limit&starting_after&project_id` (`project_id=none` lists chats outside projects, the UI's Recents), `GET|PATCH|DELETE /v1/sessions/{id}` (`PATCH {title?, project_id?}`, `project_id: null` moves a chat out of its project). Sessions get a generated `title` after their first message (`session.updated` event).
+- `POST|GET /v1/projects`, `GET|PATCH|DELETE /v1/projects/{id}`: projects group chats and carry optional `instructions` that every chat in them follows; deleting a project keeps its chats
+- `GET /v1/credits` (balance, plan, enforced), `GET /v1/credits/ledger`; admin (with `TREX_ADMIN_TOKEN`): `POST /v1/admin/workspaces/{id}/credits` `{amount, description}`, `POST /v1/admin/workspaces/{id}/plan` `{plan}`
 - `GET /v1/sessions/{id}/items`: the conversation as trex items (`message`, `tool_call`, `tool_result`, `reasoning`, `compaction`)
 - `POST /v1/sessions/{id}/messages` `{content, interrupt?, attachments?: [{data (base64 data url) | library_path, filename?}]}` starts a run (202); while one is running the message is queued (`queued: true`) and `interrupt` stops the agent's current step to read it
 - `POST /v1/sessions/{id}/answers` `{answers: [{selected, text}]}` resumes a `needs_input` session (202); 409 otherwise
 - `POST /v1/sessions/{id}/cancel`
 - `GET /v1/sessions/{id}/access_requests`, `POST .../access_requests/{request_id}/approve|reject`
 - `GET /v1/sessions/{id}/events`: SSE; resumes from `Last-Event-ID`, `?from=start` replays retained events, otherwise starts at the live tail
-- `GET /v1/library`, `GET|PUT|DELETE /v1/library/files/{path}`
+- `GET /v1/library?prefix`, `GET|PUT|DELETE /v1/library/files/{path}` (downloads carry the sniffed content type), `POST /v1/library/move` `{from, to}` (never overwrites)
 - `GET /v1/attachments/{id}`: a message attachment (ids come from `message` items' `attachments`)
 
 Events (`event:` equals the payload `type`): `run.started`, `run.resumed`, `sandbox.creating`, `sandbox.starting`, `sandbox.ready`, `text.delta`, `reasoning.delta`, `tool.call`, `tool.output`, `tool.result`, `usage`, `access.requested`, `question`, `model.retrying`, `context.compacting`, `context.compacted`, `message.received`, `run.interrupted`, `plan.updated`, `file.changed`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
@@ -102,6 +113,8 @@ Agent loop robustness (`crates/trex-harness/src/agent.rs`):
 - Background processes: `bash` with `background: true` starts the command under a `setsid` wrapper and returns a process id; output, exit code and control files live in `/tmp/.processes/<id>/`, so they survive trex restarts and any later run can read them (`process_output`, which can wait up to 60s, and lists processes without an id). OpenShell sandboxes each exec so one can't signal another's processes: `stop_process` drops a `stop` file and the wrapper kills its own process group. Processes die when the sandbox idles out.
 - Attachments (`crates/trex-harness/src/attachment.rs`): images (PNG/JPEG/GIF/WebP), PDFs and text files, typed by their bytes, never the client's mime type. They're stored content-addressed at `users/{uuid}/attachments/{sha256}` (outside the library listing) and history items refer to them as `attachment://{sha256}#{mime}` in `input_image.image_url` / `input_file.file_data`; `attachment::resolve` swaps in data urls right before each model request, so history stays small. User messages carry them as content parts; `view_image` returns a sandbox image to the model the same way (tools return `ToolOutput::Content` via `Tool::call_content`).
 - Plans: `update_plan` keeps a checklist (`plan.updated`). If the model tries to finish while its latest plan has unfinished steps, a `[plan reminder]` developer message is appended once per plan and the run continues. Developer messages are hidden from the items API except checkpoints.
+
+Credits (`crates/trex-server/src/credits.rs`): every model response is charged `ceil((uncached × input + cached × cached_input + output × output) × fast_multiplier? / 1M)` credits from the model's `price`, recorded and debited in one transaction (`Store::charge_usage`) with a ledger entry. When plans are configured, `credits::require` refills the month's allowance (top up to `monthly_credits`, once per calendar month) and refuses new messages at zero with a 402 `insufficient_credits_error`; a running agent checks `agent::Budget` before each model request after its first and stops with `run.failed` `code: insufficient_credits`, so the balance can dip slightly below zero. Title generation is not charged.
 
 Steering: messages sent during a run are queued in `sessions.queued_messages`; the agent takes them before every step (`agent::Inbox`) and when it would finish. A run only finishes while the queue is empty (conditional update), so a message sent as it ends continues it; cancelled and failed runs save leftover messages to history. An interrupt (`agent::Steering::interrupts`, in-memory per instance) drops the current step: partial output is discarded, unfinished tool calls are closed as interrupted (tool outputs are saved as each one finishes).
 

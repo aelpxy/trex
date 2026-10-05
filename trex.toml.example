@@ -13,3 +13,9 @@ provider = "local"
 # context_window = 400000  # tokens, defaults to 128000; compaction starts at 80%
 # reasoning_efforts = ["low", "medium", "high"]  # levels sessions may pick; any when omitted
 # fast = true              # sessions may use the priority service tier (faster, more credits)
+# price = { input = 1000, cached_input = 100, output = 4000 }  # credits per million tokens; fast_multiplier defaults to 2
+
+# billing plans; without any, credits are tracked but never enforced
+# [plans.free]
+# name = "Free"
+# monthly_credits = 100000   # the balance is topped up to this once a month

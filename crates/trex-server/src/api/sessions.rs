@@ -12,20 +12,21 @@ use trex_harness::{
     question::{self, Answer},
 };
 use trex_sandbox::{Sandbox, workspace_name};
-use trex_store::sessions::{self as store, SessionStatus};
+use trex_store::sessions::{self as store, SessionFilter, SessionStatus};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::{
     AppState, List,
-    auth::CurrentUser,
+    auth::Auth,
     error::{ApiError, ErrorResponse},
-    ids::{self, SESSION},
+    ids::{self, PROJECT, SESSION},
 };
 use crate::runs;
 
 const DEFAULT_LIMIT: i64 = 20;
 const MAX_ATTACHMENTS: usize = 10;
+const MAX_TITLE_CHARS: usize = 120;
 pub const ATTACHMENT_PREFIX: &str = "att_";
 const MAX_LIMIT: i64 = 100;
 
@@ -41,6 +42,9 @@ pub struct CreateSession {
     /// Faster responses at a higher cost, on models whose `fast` is true.
     #[serde(default)]
     fast: bool,
+    /// Start the chat inside this project; it then follows the project's instructions.
+    #[schema(example = "proj_0199b3c1d6a07c3e8b1f2a4d5e6f7a8b")]
+    project_id: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -51,6 +55,26 @@ pub struct ListQuery {
     limit: Option<i64>,
     /// A session id; returns the sessions created before it.
     starting_after: Option<String>,
+    /// A project id for that project's chats, or `none` for chats outside any project.
+    #[param(example = "none")]
+    project_id: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct UpdateSession {
+    #[schema(example = "Fix SSE reconnect on resume")]
+    title: Option<String>,
+    /// Move the chat into a project, or out of its project with null.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<String>)]
+    project_id: Option<Option<String>>,
+}
+
+// tells an explicit null (Some(None)) apart from a missing field (None)
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -122,6 +146,11 @@ pub struct Session {
     id: String,
     #[schema(example = "session")]
     object: &'static str,
+    /// Generated from the first message unless set with `PATCH`; null until then.
+    #[schema(example = "Fix SSE reconnect on resume")]
+    title: Option<String>,
+    /// The project the chat belongs to; null for chats outside any project.
+    project_id: Option<String>,
     model: String,
     reasoning_effort: Option<String>,
     /// Faster responses at a higher cost.
@@ -211,6 +240,31 @@ pub enum Item {
     },
 }
 
+/// An item with when it was saved.
+#[derive(Serialize, ToSchema)]
+pub struct TimedItem {
+    #[serde(flatten)]
+    item: Item,
+    /// The item's position in the conversation, counting from 1; see `run.started`'s `items`.
+    seq: i64,
+    /// Unix milliseconds.
+    created_at: i64,
+}
+
+/// One model response.
+#[derive(Serialize, ToSchema)]
+pub struct UsageEntry {
+    /// Unix milliseconds, when the response finished.
+    created_at: i64,
+    model: String,
+    input_tokens: i64,
+    cached_input_tokens: i64,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+    credits: i64,
+    duration_ms: i64,
+}
+
 /// Outbound network access the sandbox was denied; approving it lets the agent retry.
 #[derive(Serialize, ToSchema)]
 pub struct AccessRequest {
@@ -248,7 +302,7 @@ pub enum AccessStatus {
 )]
 pub async fn create(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Json(body): Json<CreateSession>,
 ) -> Result<(StatusCode, Json<Session>), ApiError> {
     let Some(model) = state.models.get(&body.model) else {
@@ -268,13 +322,18 @@ pub async fn create(
             .check_effort(effort)
             .map_err(|error| ApiError::invalid(format!("{error:#}"), "reasoning_effort"))?;
     }
+    let project = match body.project_id.as_deref() {
+        Some(id) => Some(find_project_id(&state, workspace, id).await?),
+        None => None,
+    };
     let session = state
         .store
         .create_session(
-            user,
+            workspace,
             &body.model,
             body.reasoning_effort.as_deref(),
             body.fast,
+            project,
         )
         .await?;
     Ok((StatusCode::CREATED, Json(session_object(&session))))
@@ -296,7 +355,7 @@ pub async fn create(
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<List<Session>>, ApiError> {
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
@@ -313,8 +372,19 @@ pub async fn list(
         ),
         None => None,
     };
+    let filter = match query.project_id.as_deref() {
+        None => SessionFilter::All,
+        Some("none") => SessionFilter::NoProject,
+        Some(id) => SessionFilter::Project(
+            ids::decode(PROJECT, id)
+                .ok_or_else(|| ApiError::invalid("invalid project id", "project_id"))?,
+        ),
+    };
     // one extra row tells whether another page exists
-    let mut sessions = state.store.sessions(user, limit + 1, before).await?;
+    let mut sessions = state
+        .store
+        .sessions(workspace, limit + 1, before, filter)
+        .await?;
     let has_more = sessions.len() as i64 > limit;
     sessions.truncate(limit as usize);
     Ok(Json(List::new(
@@ -337,10 +407,53 @@ pub async fn list(
 )]
 pub async fn get(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path(id): Path<String>,
 ) -> Result<Json<Session>, ApiError> {
-    let session = find_session(&state, user, &id).await?;
+    let session = find_session(&state, workspace, &id).await?;
+    Ok(Json(session_object(&session)))
+}
+
+/// Update a session
+///
+/// Renames the chat or moves it into or out of a project.
+#[utoipa::path(
+    patch,
+    operation_id = "update_session",
+    path = "/sessions/{id}",
+    tag = "sessions",
+    params(("id" = String, Path, description = "Session id")),
+    request_body = UpdateSession,
+    responses(
+        (status = 200, body = Session),
+        (status = 400, response = ErrorResponse),
+        (status = 404, response = ErrorResponse),
+    ),
+)]
+pub async fn update(
+    State(state): State<Arc<AppState>>,
+    Auth { workspace, .. }: Auth,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateSession>,
+) -> Result<Json<Session>, ApiError> {
+    let session = find_session(&state, workspace, &id).await?;
+    let title = body.title.as_deref().map(str::trim);
+    if title.is_some_and(|title| title.is_empty() || title.chars().count() > MAX_TITLE_CHARS) {
+        return Err(ApiError::invalid(
+            format!("title must be 1 to {MAX_TITLE_CHARS} characters"),
+            "title",
+        ));
+    }
+    let project = match body.project_id {
+        Some(Some(id)) => Some(Some(find_project_id(&state, workspace, &id).await?)),
+        Some(None) => Some(None),
+        None => None,
+    };
+    let session = state
+        .store
+        .update_session(workspace, session.id, title, project)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("no session {id}")))?;
     Ok(Json(session_object(&session)))
 }
 
@@ -360,15 +473,15 @@ pub async fn get(
 )]
 pub async fn delete(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path(id): Path<String>,
 ) -> Result<Json<DeletedSession>, ApiError> {
-    let session = find_session(&state, user, &id).await?;
+    let session = find_session(&state, workspace, &id).await?;
     state.runs.cancel(session.id);
-    if let Some(sandbox) = sandbox_of(user, &session) {
+    if let Some(sandbox) = sandbox_of(workspace, &session) {
         state.openshell.delete(&sandbox).await?;
     }
-    state.store.delete_session(user, session.id).await?;
+    state.store.delete_session(workspace, session.id).await?;
     state.store.delete_events(session.id).await?;
     Ok(Json(DeletedSession {
         id: ids::encode(SESSION, session.id),
@@ -387,21 +500,69 @@ pub async fn delete(
     tag = "sessions",
     params(("id" = String, Path, description = "Session id")),
     responses(
-        (status = 200, body = List<Item>),
+        (status = 200, body = List<TimedItem>),
         (status = 404, response = ErrorResponse),
     ),
 )]
 pub async fn items(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path(id): Path<String>,
-) -> Result<Json<List<Item>>, ApiError> {
-    let session = find_session(&state, user, &id).await?;
-    let items = state.store.session_items(user, session.id).await?;
-    Ok(Json(List::new(
-        items.iter().filter_map(item).collect(),
-        false,
-    )))
+) -> Result<Json<List<TimedItem>>, ApiError> {
+    let session = find_session(&state, workspace, &id).await?;
+    let items = state
+        .store
+        .session_items_timed(workspace, session.id)
+        .await?;
+    let data = items
+        .iter()
+        .filter_map(|(value, seq, created_at)| {
+            item(value).map(|item| TimedItem {
+                item,
+                seq: *seq,
+                created_at: *created_at,
+            })
+        })
+        .collect();
+    Ok(Json(List::new(data, false)))
+}
+
+/// List usage
+///
+/// Every model response of the session with its tokens, credits and duration, oldest first. Match
+/// them to turns by `created_at` against the items'.
+#[utoipa::path(
+    get,
+    operation_id = "list_session_usage",
+    path = "/sessions/{id}/usage",
+    tag = "sessions",
+    params(("id" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, body = List<UsageEntry>),
+        (status = 404, response = ErrorResponse),
+    ),
+)]
+pub async fn usage(
+    State(state): State<Arc<AppState>>,
+    Auth { workspace, .. }: Auth,
+    Path(id): Path<String>,
+) -> Result<Json<List<UsageEntry>>, ApiError> {
+    let session = find_session(&state, workspace, &id).await?;
+    let entries = state.store.session_usage(workspace, session.id).await?;
+    let data = entries
+        .into_iter()
+        .map(|entry| UsageEntry {
+            created_at: entry.created_at_ms,
+            model: entry.model,
+            input_tokens: entry.input_tokens,
+            cached_input_tokens: entry.cached_input_tokens,
+            output_tokens: entry.output_tokens,
+            reasoning_tokens: entry.reasoning_tokens,
+            credits: entry.credits,
+            duration_ms: entry.duration_ms,
+        })
+        .collect();
+    Ok(Json(List::new(data, false)))
 }
 
 /// Send a message
@@ -424,7 +585,7 @@ pub async fn items(
 )]
 pub async fn create_message(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path(id): Path<String>,
     Json(body): Json<CreateMessage>,
 ) -> Result<(StatusCode, Json<Run>), ApiError> {
@@ -437,13 +598,13 @@ pub async fn create_message(
             "attachments",
         ));
     }
-    let session = find_session(&state, user, &id).await?;
+    let session = find_session(&state, workspace, &id).await?;
     let mut parts = Vec::new();
     for input in body.attachments {
         let bytes = match (input.data, input.library_path) {
             (Some(data), None) => attachment::decode_data_url(&data)
                 .map_err(|error| ApiError::invalid(format!("{error:#}"), "attachments"))?,
-            (None, Some(path)) => state.library.get(user, &path).await.map_err(|error| {
+            (None, Some(path)) => state.library.get(workspace, &path).await.map_err(|error| {
                 ApiError::invalid(format!("cannot attach {path}: {error:#}"), "attachments")
             })?,
             _ => {
@@ -453,7 +614,7 @@ pub async fn create_message(
                 ));
             }
         };
-        let part = attachment::store(&state.library, user, input.filename.as_deref(), bytes)
+        let part = attachment::store(&state.library, workspace, input.filename.as_deref(), bytes)
             .await
             .map_err(|error| ApiError::invalid(format!("{error:#}"), "attachments"))?;
         parts.push(part);
@@ -461,7 +622,7 @@ pub async fn create_message(
     let message = history::to_json(&[attachment::user_message(&body.content, parts)])?
         .pop()
         .expect("one item was serialized");
-    let started = runs::send_message(&state, user, &session, message, body.interrupt).await?;
+    let started = runs::send_message(&state, workspace, &session, message, body.interrupt).await?;
     let queued = matches!(started, runs::Started::Queued);
     Ok((StatusCode::ACCEPTED, Json(run_object(&session, queued))))
 }
@@ -485,11 +646,11 @@ pub async fn create_message(
 )]
 pub async fn create_answers(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path(id): Path<String>,
     Json(body): Json<CreateAnswers>,
 ) -> Result<(StatusCode, Json<Run>), ApiError> {
-    let session = find_session(&state, user, &id).await?;
+    let session = find_session(&state, workspace, &id).await?;
     let pending = match (&session.status, &session.pending_question) {
         (SessionStatus::NeedsInput, Some(pending)) => {
             serde_json::from_value::<PendingQuestion>(pending.clone())
@@ -504,7 +665,7 @@ pub async fn create_answers(
     let answers = validate_answers(&pending.questions, body.answers)?;
     let item = question::answer_item(&pending.call_id, &pending.questions, &answers);
     let input = history::to_json(&[item])?;
-    runs::start(&state, user, &session, input).await?;
+    runs::start(&state, workspace, &session, input).await?;
     Ok((StatusCode::ACCEPTED, Json(run_object(&session, false))))
 }
 
@@ -525,10 +686,10 @@ pub async fn create_answers(
 )]
 pub async fn cancel(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Session>), ApiError> {
-    let session = find_session(&state, user, &id).await?;
+    let session = find_session(&state, workspace, &id).await?;
     if !state.runs.cancel(session.id) {
         return Err(ApiError::Conflict("no run is in progress".into()));
     }
@@ -551,11 +712,11 @@ pub async fn cancel(
 )]
 pub async fn list_access(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path(id): Path<String>,
 ) -> Result<Json<List<AccessRequest>>, ApiError> {
-    let session = find_session(&state, user, &id).await?;
-    let requests = match sandbox_of(user, &session) {
+    let session = find_session(&state, workspace, &id).await?;
+    let requests = match sandbox_of(workspace, &session) {
         Some(sandbox) => state.openshell.pending_access(&sandbox).await?,
         None => Vec::new(),
     };
@@ -587,11 +748,11 @@ pub async fn list_access(
 )]
 pub async fn approve_access(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path((id, request_id)): Path<(String, String)>,
 ) -> Result<Json<AccessRequest>, ApiError> {
-    let session = find_session(&state, user, &id).await?;
-    let (sandbox, request) = find_access_request(&state, user, &session, &request_id).await?;
+    let session = find_session(&state, workspace, &id).await?;
+    let (sandbox, request) = find_access_request(&state, workspace, &session, &request_id).await?;
     state.openshell.approve_access(&sandbox, &request).await?;
     Ok(Json(access_request(request, AccessStatus::Approved)))
 }
@@ -614,12 +775,12 @@ pub async fn approve_access(
 )]
 pub async fn reject_access(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path((id, request_id)): Path<(String, String)>,
     body: Option<Json<RejectAccess>>,
 ) -> Result<Json<AccessRequest>, ApiError> {
-    let session = find_session(&state, user, &id).await?;
-    let (sandbox, request) = find_access_request(&state, user, &session, &request_id).await?;
+    let session = find_session(&state, workspace, &id).await?;
+    let (sandbox, request) = find_access_request(&state, workspace, &session, &request_id).await?;
     let reason = body
         .and_then(|Json(body)| body.reason)
         .unwrap_or_else(|| "rejected by the user".into());
@@ -630,24 +791,39 @@ pub async fn reject_access(
     Ok(Json(access_request(request, AccessStatus::Rejected)))
 }
 
+async fn find_project_id(state: &AppState, workspace: Uuid, id: &str) -> Result<Uuid, ApiError> {
+    let invalid = || ApiError::invalid(format!("no project {id}"), "project_id");
+    let uuid = ids::decode(PROJECT, id).ok_or_else(invalid)?;
+    let project = state
+        .store
+        .project(workspace, uuid)
+        .await?
+        .ok_or_else(invalid)?;
+    Ok(project.id)
+}
+
 pub async fn find_session(
     state: &AppState,
-    user: Uuid,
+    workspace: Uuid,
     id: &str,
 ) -> Result<store::Session, ApiError> {
     let not_found = || ApiError::NotFound(format!("no session {id}"));
     let uuid = ids::decode(SESSION, id).ok_or_else(not_found)?;
-    state.store.session(user, uuid).await?.ok_or_else(not_found)
+    state
+        .store
+        .session(workspace, uuid)
+        .await?
+        .ok_or_else(not_found)
 }
 
 async fn find_access_request(
     state: &AppState,
-    user: Uuid,
+    workspace: Uuid,
     session: &store::Session,
     request_id: &str,
 ) -> Result<(Sandbox, trex_sandbox::AccessRequest), ApiError> {
     let not_found = || ApiError::NotFound(format!("no pending access request {request_id}"));
-    let sandbox = sandbox_of(user, session).ok_or_else(not_found)?;
+    let sandbox = sandbox_of(workspace, session).ok_or_else(not_found)?;
     let request = state
         .openshell
         .pending_access(&sandbox)
@@ -659,9 +835,9 @@ async fn find_access_request(
 }
 
 // a session's sandbox always lives in its owner's workspace
-fn sandbox_of(user: Uuid, session: &store::Session) -> Option<Sandbox> {
+fn sandbox_of(workspace: Uuid, session: &store::Session) -> Option<Sandbox> {
     session.sandbox.as_ref().map(|name| Sandbox {
-        workspace: workspace_name(user),
+        workspace: workspace_name(workspace),
         name: name.clone(),
     })
 }
@@ -711,6 +887,8 @@ fn session_object(session: &store::Session) -> Session {
     Session {
         id: ids::encode(SESSION, session.id),
         object: "session",
+        title: session.title.clone(),
+        project_id: session.project_id.map(|id| ids::encode(PROJECT, id)),
         model: session.model.clone(),
         reasoning_effort: session.reasoning_effort.clone(),
         fast: session.fast,

@@ -21,7 +21,10 @@ use uuid::Uuid;
 
 // the gateway rejects grpc messages over 1 MiB, so stdin is streamed in smaller chunks
 const STDIN_CHUNK_BYTES: usize = 256 * 1024;
-const USER_LABEL: &str = "trex-user";
+// the trex workspace that owns an openshell workspace; older ones carry the label they had when
+// trex was keyed by user, with the same uuid
+const OWNER_LABEL: &str = "trex-workspace";
+const LEGACY_OWNER_LABEL: &str = "trex-user";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
 const PHASE_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -29,8 +32,8 @@ const POLICY_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const DEV_IMAGE: &str = "localhost/trex-sandbox:latest";
 
-// openshell trusts trex's mtls identity as platform admin, so trex is what keeps users apart:
-// every sandbox handle carries the workspace of the user it was created for
+// openshell trusts trex's mtls identity as platform admin, so trex is what keeps tenants apart:
+// every sandbox handle carries the openshell workspace of the trex workspace it was created for
 pub struct Sandbox {
     pub workspace: String,
     pub name: String,
@@ -106,12 +109,12 @@ impl OpenShell {
         Ok(self.client.health().await?.version)
     }
 
-    pub async fn ensure_workspace(&self, user: Uuid) -> anyhow::Result<String> {
-        let name = workspace_name(user);
+    pub async fn ensure_workspace(&self, owner: Uuid) -> anyhow::Result<String> {
+        let name = workspace_name(owner);
         let workspace = match self.client.get_workspace(&name).await {
             Ok(workspace) => workspace,
             Err(SdkError::NotFound { .. }) => {
-                let labels = HashMap::from([(USER_LABEL.to_owned(), user.to_string())]);
+                let labels = HashMap::from([(OWNER_LABEL.to_owned(), owner.to_string())]);
                 match self.client.create_workspace(&name, labels).await {
                     Ok(workspace) => workspace,
                     Err(SdkError::AlreadyExists { .. }) => self.client.get_workspace(&name).await?,
@@ -121,16 +124,20 @@ impl OpenShell {
             Err(error) => return Err(error).context("failed to get workspace"),
         };
 
-        // names are a truncated hash, so a collision must never hand one user another's workspace
-        if workspace.labels.get(USER_LABEL) != Some(&user.to_string()) {
-            bail!("workspace {name} does not belong to user {user}");
+        // names are a truncated hash, so a collision must never hand one tenant another's workspace
+        let labelled = workspace
+            .labels
+            .get(OWNER_LABEL)
+            .or_else(|| workspace.labels.get(LEGACY_OWNER_LABEL));
+        if labelled != Some(&owner.to_string()) {
+            bail!("openshell workspace {name} does not belong to workspace {owner}");
         }
         Ok(name)
     }
 
     // openshell refuses to delete a workspace that still contains sandboxes
-    pub async fn delete_workspace(&self, user: Uuid) -> anyhow::Result<()> {
-        let name = workspace_name(user);
+    pub async fn delete_workspace(&self, owner: Uuid) -> anyhow::Result<()> {
+        let name = workspace_name(owner);
         let scoped = self.client.workspace(&name);
         let sandboxes = match scoped.list_all_sandboxes(ListOptions::default()).await {
             Ok(sandboxes) => sandboxes,
@@ -413,6 +420,20 @@ impl OpenShell {
         Ok(())
     }
 
+    // false when the sandbox is gone or in the error phase, which starting can't recover from
+    pub async fn usable(&self, sandbox: &Sandbox) -> anyhow::Result<bool> {
+        match self
+            .client
+            .workspace(&sandbox.workspace)
+            .get_sandbox(&sandbox.name)
+            .await
+        {
+            Ok(found) => Ok(found.phase != SandboxPhase::Error),
+            Err(SdkError::NotFound { .. }) => Ok(false),
+            Err(error) => Err(error).context("failed to look up sandbox"),
+        }
+    }
+
     // brings a stopped sandbox back and waits until it runs commands; a running one is left alone
     pub async fn start(&self, sandbox: &Sandbox) -> anyhow::Result<()> {
         let client = self.client.workspace(&sandbox.workspace);
@@ -480,8 +501,8 @@ fn endpoint_ports(endpoint: &proto::NetworkEndpoint) -> String {
 }
 
 // workspace names are dns labels of at most 19 chars, too short for a uuid, so use 68 bits of its hash
-pub fn workspace_name(user: Uuid) -> String {
-    let digest = Sha256::digest(user.as_bytes());
+pub fn workspace_name(owner: Uuid) -> String {
+    let digest = Sha256::digest(owner.as_bytes());
     let mut name = String::from("u-");
     for byte in &digest[..9] {
         write!(name, "{byte:02x}").expect("writing to a string cannot fail");
@@ -755,8 +776,14 @@ mod tests {
             .await
             .unwrap();
         eprintln!("start took {start_time:?}");
+        let usable_while_running = openshell.usable(&sandbox).await.unwrap();
 
         openshell.delete_workspace(user).await.unwrap();
+        assert!(usable_while_running);
+        assert!(
+            !openshell.usable(&sandbox).await.unwrap(),
+            "a deleted sandbox is not usable"
+        );
 
         assert_eq!(String::from_utf8_lossy(&written.stdout).trim(), "ok");
         assert_eq!(String::from_utf8_lossy(&while_stopped.stdout), "up\n");

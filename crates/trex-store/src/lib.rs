@@ -1,5 +1,8 @@
+pub mod accounts;
+pub mod credits;
 pub mod events;
 pub mod library;
+pub mod projects;
 pub mod sessions;
 
 use std::time::Duration;

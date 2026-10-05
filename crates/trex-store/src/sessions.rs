@@ -10,9 +10,16 @@ use crate::Store;
 // sqlx only accepts static sql, so the shared column list is spliced in at compile time
 macro_rules! columns {
     () => {
-        "id, user_id, model, reasoning_effort, fast, sandbox, sandbox_stopped, status, pending_question, last_error, \
+        "id, workspace_id, project_id, title, model, reasoning_effort, fast, sandbox, sandbox_stopped, status, pending_question, last_error, \
          EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at, EXTRACT(EPOCH FROM updated_at)::BIGINT AS updated_at"
     };
+}
+
+#[derive(Clone, Copy)]
+pub enum SessionFilter {
+    All,
+    NoProject,
+    Project(Uuid),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,7 +32,9 @@ pub enum SessionStatus {
 
 pub struct Session {
     pub id: Uuid,
-    pub user_id: Uuid,
+    pub workspace_id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub title: Option<String>,
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub fast: bool,
@@ -41,7 +50,7 @@ pub struct Session {
 // holds the session's row lock, so no run can start until the sandbox is marked stopped
 pub struct IdleSandbox {
     pub session: Uuid,
-    pub user: Uuid,
+    pub workspace: Uuid,
     pub sandbox: String,
     tx: Transaction<'static, Postgres>,
 }
@@ -62,7 +71,7 @@ impl IdleSandbox {
 
 pub struct StaleRun {
     pub session: Uuid,
-    pub user: Uuid,
+    pub workspace: Uuid,
     pub run: Uuid,
 }
 
@@ -76,7 +85,7 @@ pub enum Finish {
 }
 
 pub struct UsageRecord<'a> {
-    pub user_id: Uuid,
+    pub workspace_id: Uuid,
     pub session_id: Uuid,
     pub model: &'a str,
     pub input_tokens: u64,
@@ -84,6 +93,19 @@ pub struct UsageRecord<'a> {
     pub cache_write_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
+    pub duration_ms: u64,
+}
+
+// one model response's usage, for showing what each turn of a chat cost
+pub struct UsageEntry {
+    pub created_at_ms: i64,
+    pub model: String,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub credits: i64,
+    pub duration_ms: i64,
 }
 
 impl SessionStatus {
@@ -112,7 +134,9 @@ impl FromRow<'_, PgRow> for Session {
         let status: String = row.try_get("status")?;
         Ok(Self {
             id: row.try_get("id")?,
-            user_id: row.try_get("user_id")?,
+            workspace_id: row.try_get("workspace_id")?,
+            project_id: row.try_get("project_id")?,
+            title: row.try_get("title")?,
             model: row.try_get("model")?,
             reasoning_effort: row.try_get("reasoning_effort")?,
             fast: row.try_get("fast")?,
@@ -131,35 +155,40 @@ impl FromRow<'_, PgRow> for Session {
 impl Store {
     pub async fn create_session(
         &self,
-        user: Uuid,
+        workspace: Uuid,
         model: &str,
         reasoning_effort: Option<&str>,
         fast: bool,
+        project: Option<Uuid>,
     ) -> anyhow::Result<Session> {
         let sql = concat!(
-            "INSERT INTO sessions (id, user_id, model, reasoning_effort, fast) VALUES ($1, $2, $3, $4, $5) RETURNING ",
+            "INSERT INTO sessions (id, workspace_id, model, reasoning_effort, fast, project_id) ",
+            "SELECT $1, $2, $3, $4, $5, $6 ",
+            "WHERE $6::UUID IS NULL OR EXISTS (SELECT 1 FROM projects WHERE id = $6 AND workspace_id = $2) RETURNING ",
             columns!()
         );
         sqlx::query_as(sql)
             .bind(Uuid::now_v7())
-            .bind(user)
+            .bind(workspace)
             .bind(model)
             .bind(reasoning_effort)
             .bind(fast)
-            .fetch_one(&self.pg)
+            .bind(project)
+            .fetch_optional(&self.pg)
             .await
-            .context("failed to create session")
+            .context("failed to create session")?
+            .context("the project does not exist")
     }
 
-    pub async fn session(&self, user: Uuid, id: Uuid) -> anyhow::Result<Option<Session>> {
+    pub async fn session(&self, workspace: Uuid, id: Uuid) -> anyhow::Result<Option<Session>> {
         let sql = concat!(
             "SELECT ",
             columns!(),
-            " FROM sessions WHERE id = $1 AND user_id = $2"
+            " FROM sessions WHERE id = $1 AND workspace_id = $2"
         );
         sqlx::query_as(sql)
             .bind(id)
-            .bind(user)
+            .bind(workspace)
             .fetch_optional(&self.pg)
             .await
             .context("failed to load session")
@@ -168,32 +197,90 @@ impl Store {
     // uuid v7 ids sort by creation time, so they double as the pagination cursor
     pub async fn sessions(
         &self,
-        user: Uuid,
+        workspace: Uuid,
         limit: i64,
         before: Option<Uuid>,
+        filter: SessionFilter,
     ) -> anyhow::Result<Vec<Session>> {
         let sql = concat!(
             "SELECT ",
             columns!(),
-            " FROM sessions WHERE user_id = $1 AND ($2::UUID IS NULL OR id < $2) ORDER BY id DESC LIMIT $3"
+            " FROM sessions WHERE workspace_id = $1 AND ($2::UUID IS NULL OR id < $2) ",
+            "AND ($4 = 'all' OR ($4 = 'none' AND project_id IS NULL) OR project_id = $5) ORDER BY id DESC LIMIT $3"
         );
+        let (kind, project) = match filter {
+            SessionFilter::All => ("all", None),
+            SessionFilter::NoProject => ("none", None),
+            SessionFilter::Project(project) => ("project", Some(project)),
+        };
         sqlx::query_as(sql)
-            .bind(user)
+            .bind(workspace)
             .bind(before)
             .bind(limit)
+            .bind(kind)
+            .bind(project)
             .fetch_all(&self.pg)
             .await
             .context("failed to list sessions")
     }
 
-    pub async fn delete_session(&self, user: Uuid, id: Uuid) -> anyhow::Result<Option<Session>> {
+    // `project` of Some(None) moves the session out of its project; none if either doesn't exist
+    pub async fn update_session(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        title: Option<&str>,
+        project: Option<Option<Uuid>>,
+    ) -> anyhow::Result<Option<Session>> {
         let sql = concat!(
-            "DELETE FROM sessions WHERE id = $1 AND user_id = $2 RETURNING ",
+            "UPDATE sessions SET title = COALESCE($3, title), ",
+            "project_id = CASE WHEN $4 THEN $5 ELSE project_id END, updated_at = NOW() ",
+            "WHERE id = $1 AND workspace_id = $2 ",
+            "AND ($5::UUID IS NULL OR EXISTS (SELECT 1 FROM projects WHERE id = $5 AND workspace_id = $2)) RETURNING ",
             columns!()
         );
         sqlx::query_as(sql)
             .bind(id)
-            .bind(user)
+            .bind(workspace)
+            .bind(title)
+            .bind(project.is_some())
+            .bind(project.flatten())
+            .fetch_optional(&self.pg)
+            .await
+            .context("failed to update session")
+    }
+
+    // a generated title never replaces one the user set meanwhile
+    pub async fn set_title_if_missing(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        title: &str,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE sessions SET title = $3 WHERE id = $1 AND workspace_id = $2 AND title IS NULL",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(title)
+        .execute(&self.pg)
+        .await
+        .context("failed to set session title")?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn delete_session(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+    ) -> anyhow::Result<Option<Session>> {
+        let sql = concat!(
+            "DELETE FROM sessions WHERE id = $1 AND workspace_id = $2 RETURNING ",
+            columns!()
+        );
+        sqlx::query_as(sql)
+            .bind(id)
+            .bind(workspace)
             .fetch_optional(&self.pg)
             .await
             .context("failed to delete session")
@@ -201,15 +288,15 @@ impl Store {
 
     pub async fn set_session_sandbox(
         &self,
-        user: Uuid,
+        workspace: Uuid,
         id: Uuid,
         sandbox: &str,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            "UPDATE sessions SET sandbox = $3, updated_at = NOW() WHERE id = $1 AND user_id = $2",
+            "UPDATE sessions SET sandbox = $3, sandbox_stopped = FALSE, updated_at = NOW() WHERE id = $1 AND workspace_id = $2",
         )
         .bind(id)
-        .bind(user)
+        .bind(workspace)
         .bind(sandbox)
         .execute(&self.pg)
         .await
@@ -225,7 +312,7 @@ impl Store {
             .await
             .context("failed to find idle sandboxes")?;
         let row = sqlx::query(
-            "SELECT id, user_id, sandbox FROM sessions \
+            "SELECT id, workspace_id, sandbox FROM sessions \
              WHERE sandbox IS NOT NULL AND NOT sandbox_stopped AND status <> 'running' \
              AND updated_at < NOW() - MAKE_INTERVAL(secs => $1) \
              ORDER BY updated_at LIMIT 1 FOR UPDATE SKIP LOCKED",
@@ -239,32 +326,34 @@ impl Store {
         };
         Ok(Some(IdleSandbox {
             session: row.try_get("id")?,
-            user: row.try_get("user_id")?,
+            workspace: row.try_get("workspace_id")?,
             sandbox: row.try_get("sandbox")?,
             tx,
         }))
     }
 
-    pub async fn mark_sandbox_started(&self, user: Uuid, id: Uuid) -> anyhow::Result<()> {
-        sqlx::query("UPDATE sessions SET sandbox_stopped = FALSE WHERE id = $1 AND user_id = $2")
-            .bind(id)
-            .bind(user)
-            .execute(&self.pg)
-            .await
-            .context("failed to mark sandbox started")?;
+    pub async fn mark_sandbox_started(&self, workspace: Uuid, id: Uuid) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET sandbox_stopped = FALSE WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace)
+        .execute(&self.pg)
+        .await
+        .context("failed to mark sandbox started")?;
         Ok(())
     }
 
     // the conditional update is what guarantees one run per session, even across trex instances;
     // `run` owns the session until it finishes or its heartbeat goes stale
-    pub async fn start_run(&self, user: Uuid, id: Uuid, run: Uuid) -> anyhow::Result<bool> {
+    pub async fn start_run(&self, workspace: Uuid, id: Uuid, run: Uuid) -> anyhow::Result<bool> {
         let result = sqlx::query(
             "UPDATE sessions SET status = 'running', pending_question = NULL, last_error = NULL, \
              run_id = $3, run_heartbeat_at = NOW(), updated_at = NOW() \
-             WHERE id = $1 AND user_id = $2 AND status <> 'running'",
+             WHERE id = $1 AND workspace_id = $2 AND status <> 'running'",
         )
         .bind(id)
-        .bind(user)
+        .bind(workspace)
         .bind(run)
         .execute(&self.pg)
         .await
@@ -296,7 +385,7 @@ impl Store {
              WHERE id IN (SELECT id FROM sessions WHERE status = 'running' \
              AND (run_heartbeat_at IS NULL OR run_heartbeat_at < NOW() - MAKE_INTERVAL(secs => $1)) \
              ORDER BY run_heartbeat_at NULLS FIRST LIMIT $2 FOR UPDATE SKIP LOCKED) \
-             RETURNING id, user_id, run_id",
+             RETURNING id, workspace_id, run_id",
         )
         .bind(stale_after.as_secs_f64())
         .bind(limit)
@@ -307,7 +396,7 @@ impl Store {
             .map(|row| {
                 Ok(StaleRun {
                     session: row.try_get("id")?,
-                    user: row.try_get("user_id")?,
+                    workspace: row.try_get("workspace_id")?,
                     run: row.try_get("run_id")?,
                 })
             })
@@ -316,7 +405,7 @@ impl Store {
 
     pub async fn finish_run(
         &self,
-        user: Uuid,
+        workspace: Uuid,
         id: Uuid,
         run: Uuid,
         status: SessionStatus,
@@ -326,11 +415,11 @@ impl Store {
         let result = sqlx::query(
             "UPDATE sessions SET status = $4, pending_question = $5, last_error = $6, run_id = NULL, \
              run_heartbeat_at = NULL, updated_at = NOW() \
-             WHERE id = $1 AND user_id = $2 AND run_id = $3 AND status = 'running' \
+             WHERE id = $1 AND workspace_id = $2 AND run_id = $3 AND status = 'running' \
              AND queued_messages = '[]'::JSONB",
         )
         .bind(id)
-        .bind(user)
+        .bind(workspace)
         .bind(run)
         .bind(status.as_str())
         .bind(pending_question)
@@ -342,10 +431,10 @@ impl Store {
             return Ok(Finish::Finished);
         }
         let owned: Option<bool> = sqlx::query_scalar(
-            "SELECT run_id = $3 AND status = 'running' FROM sessions WHERE id = $1 AND user_id = $2",
+            "SELECT run_id = $3 AND status = 'running' FROM sessions WHERE id = $1 AND workspace_id = $2",
         )
         .bind(id)
-        .bind(user)
+        .bind(workspace)
         .bind(run)
         .fetch_optional(&self.pg)
         .await
@@ -359,13 +448,18 @@ impl Store {
     }
 
     // only a running session takes messages into its queue; otherwise the caller starts a run
-    pub async fn queue_message(&self, user: Uuid, id: Uuid, item: &Value) -> anyhow::Result<bool> {
+    pub async fn queue_message(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        item: &Value,
+    ) -> anyhow::Result<bool> {
         let result = sqlx::query(
             "UPDATE sessions SET queued_messages = queued_messages || JSONB_BUILD_ARRAY($3::JSONB), updated_at = NOW() \
-             WHERE id = $1 AND user_id = $2 AND status = 'running'",
+             WHERE id = $1 AND workspace_id = $2 AND status = 'running'",
         )
         .bind(id)
-        .bind(user)
+        .bind(workspace)
         .bind(item)
         .execute(&self.pg)
         .await
@@ -373,14 +467,18 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn take_queued_messages(&self, user: Uuid, id: Uuid) -> anyhow::Result<Vec<Value>> {
+    pub async fn take_queued_messages(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+    ) -> anyhow::Result<Vec<Value>> {
         let queued: Option<Value> = sqlx::query_scalar(
             "UPDATE sessions s SET queued_messages = '[]'::JSONB \
-             FROM (SELECT id, queued_messages FROM sessions WHERE id = $1 AND user_id = $2 FOR UPDATE) old \
+             FROM (SELECT id, queued_messages FROM sessions WHERE id = $1 AND workspace_id = $2 FOR UPDATE) old \
              WHERE s.id = old.id RETURNING old.queued_messages",
         )
         .bind(id)
-        .bind(user)
+        .bind(workspace)
         .fetch_optional(&self.pg)
         .await
         .context("failed to take queued messages")?;
@@ -391,13 +489,13 @@ impl Store {
             .map(Option::unwrap_or_default)
     }
 
-    pub async fn session_items(&self, user: Uuid, id: Uuid) -> anyhow::Result<Vec<Value>> {
+    pub async fn session_items(&self, workspace: Uuid, id: Uuid) -> anyhow::Result<Vec<Value>> {
         let rows = sqlx::query(
             "SELECT i.item FROM session_items i JOIN sessions s ON s.id = i.session_id \
-             WHERE i.session_id = $1 AND s.user_id = $2 ORDER BY i.seq",
+             WHERE i.session_id = $1 AND s.workspace_id = $2 ORDER BY i.seq",
         )
         .bind(id)
-        .bind(user)
+        .bind(workspace)
         .fetch_all(&self.pg)
         .await
         .context("failed to load session items")?;
@@ -406,9 +504,79 @@ impl Store {
             .collect()
     }
 
+    // with when each item was saved, in unix milliseconds
+    pub async fn session_items_timed(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+    ) -> anyhow::Result<Vec<(Value, i64, i64)>> {
+        let rows = sqlx::query(
+            "SELECT i.item, i.seq, (EXTRACT(EPOCH FROM i.created_at) * 1000)::BIGINT AS created_at_ms \
+             FROM session_items i JOIN sessions s ON s.id = i.session_id \
+             WHERE i.session_id = $1 AND s.workspace_id = $2 ORDER BY i.seq",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to load session items")?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    row.try_get("item")?,
+                    row.try_get("seq")?,
+                    row.try_get("created_at_ms")?,
+                ))
+            })
+            .collect()
+    }
+
+    pub async fn count_session_items(&self, workspace: Uuid, id: Uuid) -> anyhow::Result<i64> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM session_items i JOIN sessions s ON s.id = i.session_id \
+             WHERE i.session_id = $1 AND s.workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_one(&self.pg)
+        .await
+        .context("failed to count session items")
+    }
+
+    pub async fn session_usage(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+    ) -> anyhow::Result<Vec<UsageEntry>> {
+        let rows = sqlx::query(
+            "SELECT (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS created_at_ms, model, input_tokens, \
+             cached_input_tokens, output_tokens, reasoning_tokens, credits, duration_ms \
+             FROM usage_records WHERE session_id = $1 AND workspace_id = $2 ORDER BY created_at",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to load session usage")?;
+        rows.iter()
+            .map(|row| {
+                Ok(UsageEntry {
+                    created_at_ms: row.try_get("created_at_ms")?,
+                    model: row.try_get("model")?,
+                    input_tokens: row.try_get("input_tokens")?,
+                    cached_input_tokens: row.try_get("cached_input_tokens")?,
+                    output_tokens: row.try_get("output_tokens")?,
+                    reasoning_tokens: row.try_get("reasoning_tokens")?,
+                    credits: row.try_get("credits")?,
+                    duration_ms: row.try_get("duration_ms")?,
+                })
+            })
+            .collect()
+    }
+
     pub async fn append_session_items(
         &self,
-        user: Uuid,
+        workspace: Uuid,
         id: Uuid,
         items: &[Value],
     ) -> anyhow::Result<()> {
@@ -419,10 +587,10 @@ impl Store {
             "INSERT INTO session_items (session_id, seq, item) \
              SELECT s.id, (SELECT COALESCE(MAX(seq), 0) FROM session_items WHERE session_id = s.id) + t.ord, t.item \
              FROM sessions s, UNNEST($3::JSONB[]) WITH ORDINALITY AS t (item, ord) \
-             WHERE s.id = $1 AND s.user_id = $2",
+             WHERE s.id = $1 AND s.workspace_id = $2",
         )
         .bind(id)
-        .bind(user)
+        .bind(workspace)
         .bind(items)
         .execute(&self.pg)
         .await
@@ -433,7 +601,7 @@ impl Store {
     // items are keyed by their position in history, so saving the same items again is a no-op
     pub async fn put_session_items(
         &self,
-        user: Uuid,
+        workspace: Uuid,
         id: Uuid,
         first: usize,
         items: &[Value],
@@ -445,36 +613,16 @@ impl Store {
             "INSERT INTO session_items (session_id, seq, item) \
              SELECT s.id, $3 + t.ord, t.item \
              FROM sessions s, UNNEST($4::JSONB[]) WITH ORDINALITY AS t (item, ord) \
-             WHERE s.id = $1 AND s.user_id = $2 \
+             WHERE s.id = $1 AND s.workspace_id = $2 \
              ON CONFLICT (session_id, seq) DO NOTHING",
         )
         .bind(id)
-        .bind(user)
+        .bind(workspace)
         .bind(first as i64)
         .bind(items)
         .execute(&self.pg)
         .await
         .context("failed to save session items")?;
-        Ok(())
-    }
-
-    pub async fn record_usage(&self, usage: &UsageRecord<'_>) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO usage_records (id, user_id, session_id, model, input_tokens, cached_input_tokens, \
-             cache_write_tokens, output_tokens, reasoning_tokens) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        )
-        .bind(Uuid::now_v7())
-        .bind(usage.user_id)
-        .bind(usage.session_id)
-        .bind(usage.model)
-        .bind(usage.input_tokens as i64)
-        .bind(usage.cached_input_tokens as i64)
-        .bind(usage.cache_write_tokens as i64)
-        .bind(usage.output_tokens as i64)
-        .bind(usage.reasoning_tokens as i64)
-        .execute(&self.pg)
-        .await
-        .context("failed to record usage")?;
         Ok(())
     }
 }
@@ -498,10 +646,35 @@ mod tests {
         )
         .await
         .unwrap();
-        let (alice, mallory) = (Uuid::now_v7(), Uuid::now_v7());
+        let workspace = |name: &'static str| {
+            let store = &store;
+            async move {
+                let email = format!("{name}-{}@test.trex", Uuid::now_v7());
+                let (_, workspace) = store
+                    .create_user(&email, name, "hash")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                workspace.id
+            }
+        };
+        let (alice, mallory) = (workspace("alice").await, workspace("mallory").await);
+
+        let project = store.create_project(alice, "Backend", None).await.unwrap();
+        assert!(
+            store
+                .create_session(mallory, "gpt-6.1-sol", None, false, Some(project.id))
+                .await
+                .is_err(),
+            "no sessions in another workspace's project"
+        );
+        let in_project = store
+            .create_session(alice, "gpt-6.1-sol", None, false, Some(project.id))
+            .await
+            .unwrap();
 
         let session = store
-            .create_session(alice, "gpt-6.1-sol", Some("low"), true)
+            .create_session(alice, "gpt-6.1-sol", Some("low"), true, None)
             .await
             .unwrap();
         assert_eq!(session.status, SessionStatus::Idle);
@@ -514,10 +687,77 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(store.sessions(alice, 10, None).await.unwrap().len(), 1);
+        let ids = |sessions: Vec<Session>| sessions.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store
+                .sessions(alice, 10, None, SessionFilter::All)
+                .await
+                .unwrap()),
+            [session.id, in_project.id]
+        );
+        assert_eq!(
+            ids(store
+                .sessions(alice, 10, None, SessionFilter::NoProject)
+                .await
+                .unwrap()),
+            [session.id]
+        );
+        assert_eq!(
+            ids(store
+                .sessions(alice, 10, None, SessionFilter::Project(project.id))
+                .await
+                .unwrap()),
+            [in_project.id]
+        );
+
         assert!(
             store
-                .sessions(alice, 10, Some(session.id))
+                .set_title_if_missing(alice, session.id, "Generated")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_title_if_missing(alice, session.id, "Again")
+                .await
+                .unwrap()
+        );
+        let renamed = store
+            .update_session(alice, session.id, Some("Renamed"), Some(Some(project.id)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (renamed.title.as_deref(), renamed.project_id),
+            (Some("Renamed"), Some(project.id))
+        );
+        let other = store.create_project(mallory, "Theirs", None).await.unwrap();
+        assert!(
+            store
+                .update_session(alice, session.id, None, Some(Some(other.id)))
+                .await
+                .unwrap()
+                .is_none(),
+            "can't move a chat into another workspace's project"
+        );
+        assert!(
+            store
+                .update_session(mallory, session.id, Some("x"), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        store.delete_project(alice, project.id).await.unwrap();
+        let kept = store.session(alice, in_project.id).await.unwrap().unwrap();
+        assert_eq!(kept.project_id, None, "deleting a project keeps its chats");
+        let moved_back = store.session(alice, session.id).await.unwrap().unwrap();
+        assert_eq!(
+            (moved_back.title.as_deref(), moved_back.project_id),
+            (Some("Renamed"), None)
+        );
+        assert!(
+            store
+                .sessions(alice, 10, Some(in_project.id), SessionFilter::All)
                 .await
                 .unwrap()
                 .is_empty()
@@ -623,7 +863,7 @@ mod tests {
             .iter()
             .find(|stale| stale.session == session.id)
             .expect("the stale run is claimed");
-        assert_eq!(resumed.user, alice);
+        assert_eq!(resumed.workspace, alice);
         assert_ne!(resumed.run, run);
         assert!(
             !store.heartbeat_run(session.id, run).await.unwrap(),
@@ -673,18 +913,43 @@ mod tests {
         assert_eq!(reloaded.pending_question, Some(question));
 
         store
-            .record_usage(&UsageRecord {
-                user_id: alice,
-                session_id: session.id,
-                model: "gpt-6.1-sol",
-                input_tokens: 10,
-                cached_input_tokens: 2,
-                cache_write_tokens: 0,
-                output_tokens: 5,
-                reasoning_tokens: 1,
-            })
+            .charge_usage(
+                &UsageRecord {
+                    workspace_id: alice,
+                    session_id: session.id,
+                    model: "gpt-6.1-sol",
+                    input_tokens: 10,
+                    cached_input_tokens: 2,
+                    cache_write_tokens: 0,
+                    output_tokens: 5,
+                    reasoning_tokens: 1,
+                    duration_ms: 1500,
+                },
+                7,
+            )
             .await
             .unwrap();
+        let usage = store.session_usage(alice, session.id).await.unwrap();
+        assert_eq!(
+            usage
+                .iter()
+                .map(|entry| (entry.input_tokens, entry.credits, entry.duration_ms))
+                .collect::<Vec<_>>(),
+            [(10, 7, 1500)]
+        );
+        assert!(
+            store
+                .session_usage(mallory, session.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let timed = store.session_items_timed(alice, session.id).await.unwrap();
+        assert!(!timed.is_empty() && timed.iter().all(|(_, _, at)| *at > 1_700_000_000_000));
+        assert_eq!(
+            store.count_session_items(alice, session.id).await.unwrap(),
+            timed.len() as i64
+        );
 
         let first = store
             .publish_event(session.id, &json!({"type": "a"}))
@@ -735,5 +1000,15 @@ mod tests {
                 .unwrap();
         assert_eq!(usage_left, 0);
         assert!(store.last_event_id(session.id).await.unwrap().is_none());
+        sqlx::query("DELETE FROM users WHERE id IN (SELECT user_id FROM workspace_members WHERE workspace_id = ANY($1))")
+            .bind([alice, mallory])
+            .execute(&store.pg)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM workspaces WHERE id = ANY($1)")
+            .bind([alice, mallory])
+            .execute(&store.pg)
+            .await
+            .unwrap();
     }
 }

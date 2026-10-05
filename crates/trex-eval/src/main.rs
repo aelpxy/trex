@@ -22,8 +22,9 @@ use crate::{
 
 const USAGE: &str = "usage: cargo run -p trex-eval -- [--repeat N] [--concurrency N] [--effort LEVEL] [SCENARIO...]";
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(600);
-// one fixed user, so eval runs reuse a single openshell workspace instead of leaving one behind each
-const EVAL_USER: Uuid = Uuid::from_u128(0x0000_0000_0000_7000_8000_0000_0000_e7a1);
+// fixed accounts, so eval runs reuse their workspaces instead of leaving new ones behind
+pub const EVAL_EMAIL: &str = "eval@trex.local";
+pub const EVAL_PASSWORD: &str = "eval-password-not-secret";
 
 struct Options {
     repeat: usize,
@@ -76,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         options.repeat
     );
     let server = Arc::new(Server::start(&root).await?);
-    let api = Api::new(server.url(), EVAL_USER);
+    let api = Api::account(server.url(), EVAL_EMAIL, EVAL_PASSWORD).await?;
     clear_library(&api).await?;
 
     let started = Instant::now();

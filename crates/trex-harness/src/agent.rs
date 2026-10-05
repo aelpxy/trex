@@ -70,15 +70,22 @@ pub struct Steering<'a> {
     pub interrupts: watch::Receiver<()>,
 }
 
+// whether the run may make another model request
+pub trait Budget: Send + Sync {
+    fn exhausted(&self) -> BoxFuture<'_, anyhow::Result<bool>>;
+}
+
 #[derive(Debug, PartialEq)]
 pub enum RunOutcome {
     Completed,
+    // the budget ran out; the step in progress was finished first
+    OutOfCredits,
     // the model asked the user something; push question::answer_item and run again to continue
     NeedsInput,
 }
 
 pub struct Agent<'a> {
-    pub user: Uuid,
+    pub workspace: Uuid,
     pub library: &'a Library,
     pub model: &'a Model,
     pub tools: &'a Tools,
@@ -92,6 +99,7 @@ pub struct Agent<'a> {
     pub steering: Option<Steering<'a>>,
     pub journal: Option<&'a dyn Journal>,
     pub fast: bool,
+    pub budget: Option<&'a dyn Budget>,
 }
 
 #[derive(Clone, Copy)]
@@ -176,6 +184,14 @@ impl Agent<'_> {
             if turn == 0 && history::ends_with_reply(history) {
                 send(events, Event::Done).await?;
                 return Ok(RunOutcome::Completed);
+            }
+            // the first request is allowed, since the run was only started with credits left
+            if turn > 0
+                && let Some(budget) = self.budget
+                && budget.exhausted().await?
+            {
+                tracing::info!(turn, "stopping run, out of credits");
+                return Ok(RunOutcome::OutOfCredits);
             }
 
             // an interrupt sent before the messages were taken is already answered by them
@@ -411,7 +427,7 @@ impl Agent<'_> {
         mode: Mode,
         events: &mpsc::Sender<Event>,
     ) -> Result<Sampled, Failure> {
-        let input = attachment::resolve(self.library, self.user, input).await?;
+        let input = attachment::resolve(self.library, self.workspace, input).await?;
         let mut attempt = 1;
         loop {
             match self.stream_turn(input.clone(), mode, events).await {
@@ -650,7 +666,7 @@ impl Agent<'_> {
         events: &mpsc::Sender<Event>,
     ) -> anyhow::Result<ToolOutput> {
         let ctx = ToolContext {
-            user: self.user,
+            workspace: self.workspace,
             library: self.library,
             openshell: self.openshell,
             sandbox: self.sandbox,
@@ -929,7 +945,7 @@ mod tests {
         let library = Library::in_memory();
         let tools = Tools::standard().unwrap();
         let agent = Agent {
-            user,
+            workspace: user,
             library: &library,
             model: &model,
             tools: &tools,
@@ -942,6 +958,7 @@ mod tests {
             steering: None,
             journal: None,
             fast: false,
+            budget: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -989,7 +1006,7 @@ mod tests {
         let library = Library::in_memory();
         let tools = Tools::standard().unwrap();
         let agent = Agent {
-            user,
+            workspace: user,
             library: &library,
             model: &model,
             tools: &tools,
@@ -1002,6 +1019,7 @@ mod tests {
             steering: None,
             journal: None,
             fast: false,
+            budget: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1063,7 +1081,7 @@ mod tests {
         ));
         let (_interrupt, interrupts) = watch::channel(());
         let agent = Agent {
-            user,
+            workspace: user,
             library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
@@ -1079,6 +1097,7 @@ mod tests {
             }),
             journal: None,
             fast: false,
+            budget: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message("Reply with only the word one.")];
@@ -1119,7 +1138,7 @@ mod tests {
         let inbox = ScriptedInbox(Mutex::new(VecDeque::new()));
         let (interrupt, interrupts) = watch::channel(());
         let agent = Agent {
-            user,
+            workspace: user,
             library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
@@ -1135,6 +1154,7 @@ mod tests {
             }),
             journal: None,
             fast: false,
+            budget: None,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message(
@@ -1208,7 +1228,7 @@ mod tests {
 
         let library = Library::in_memory();
         let agent = Agent {
-            user,
+            workspace: user,
             library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
@@ -1221,6 +1241,7 @@ mod tests {
             steering: None,
             journal: None,
             fast: false,
+            budget: None,
         };
 
         let mut history = vec![
@@ -1281,7 +1302,7 @@ mod tests {
 
         let library = Library::in_memory();
         let agent = Agent {
-            user,
+            workspace: user,
             library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
@@ -1294,6 +1315,7 @@ mod tests {
             steering: None,
             journal: None,
             fast: false,
+            budget: None,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1339,7 +1361,7 @@ mod tests {
         let tools = Tools::standard().unwrap();
         let library = Library::in_memory();
         let agent = Agent {
-            user,
+            workspace: user,
             library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
@@ -1352,6 +1374,7 @@ mod tests {
             steering: None,
             journal: None,
             fast: false,
+            budget: None,
         };
 
         let script = "timeout 15 bash -c 'exec 3<>/dev/tcp/example.com/443'";
@@ -1410,7 +1433,7 @@ mod tests {
         let library = Library::in_memory();
         let tools = Tools::standard().unwrap();
         let agent = Agent {
-            user,
+            workspace: user,
             library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
@@ -1423,6 +1446,7 @@ mod tests {
             steering: None,
             journal: None,
             fast: false,
+            budget: None,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1473,7 +1497,7 @@ mod tests {
         let library = Library::in_memory();
         let tools = Tools::standard().unwrap();
         let agent = Agent {
-            user,
+            workspace: user,
             library: &library,
             model: models.get(TEST_MODEL).unwrap(),
             tools: &tools,
@@ -1486,6 +1510,7 @@ mod tests {
             steering: None,
             journal: None,
             fast: false,
+            budget: None,
         };
         let mut history = vec![
             EasyInputMessage::from(

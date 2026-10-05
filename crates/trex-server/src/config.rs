@@ -3,6 +3,8 @@ use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 use anyhow::{Context, bail};
 use trex_harness::model::Models;
 use trex_sandbox::Policy;
+
+use crate::credits::Plans;
 use trex_store::library::{Library, S3Config};
 
 // restarting a stopped sandbox takes about a second, so idle ones are stopped early
@@ -16,6 +18,9 @@ pub struct Config {
     pub database_url: String,
     pub redis_url: String,
     pub models: Models,
+    pub plans: Plans,
+    // enables the /v1/admin endpoints; a secret, so it is never logged
+    pub admin_token: Option<String>,
     pub sandbox_image: String,
     pub sandbox_policy: Policy,
     pub sandbox_idle_timeout: Duration,
@@ -80,6 +85,10 @@ impl Config {
         let path = env::var("TREX_CONFIG").unwrap_or_else(|_| "trex.toml".into());
         let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {path}"))?;
         let models = Models::from_toml(&raw).with_context(|| format!("invalid {path}"))?;
+        let plans = Plans::from_toml(&raw).with_context(|| format!("invalid plans in {path}"))?;
+        let admin_token = env::var("TREX_ADMIN_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty());
 
         Ok(Self {
             addr,
@@ -89,6 +98,8 @@ impl Config {
             database_url,
             redis_url,
             models,
+            plans,
+            admin_token,
             sandbox_image,
             sandbox_policy,
             sandbox_idle_timeout,

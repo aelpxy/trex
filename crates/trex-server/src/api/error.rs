@@ -13,6 +13,8 @@ pub enum ApiError {
         param: Option<&'static str>,
     },
     Authentication(String),
+    Permission(String),
+    InsufficientCredits(String),
     NotFound(String),
     Conflict(String),
     Internal(anyhow::Error),
@@ -39,6 +41,10 @@ pub enum ErrorType {
     InvalidRequest,
     #[serde(rename = "authentication_error")]
     Authentication,
+    #[serde(rename = "permission_error")]
+    Permission,
+    #[serde(rename = "insufficient_credits_error")]
+    InsufficientCredits,
     #[serde(rename = "not_found_error")]
     NotFound,
     #[serde(rename = "conflict_error")]
@@ -74,6 +80,15 @@ impl IntoResponse for ApiError {
             Self::Authentication(message) => (
                 StatusCode::UNAUTHORIZED,
                 ErrorType::Authentication,
+                message,
+                None,
+            ),
+            Self::Permission(message) => {
+                (StatusCode::FORBIDDEN, ErrorType::Permission, message, None)
+            }
+            Self::InsufficientCredits(message) => (
+                StatusCode::PAYMENT_REQUIRED,
+                ErrorType::InsufficientCredits,
                 message,
                 None,
             ),

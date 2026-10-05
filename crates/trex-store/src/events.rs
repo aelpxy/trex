@@ -24,6 +24,21 @@ fn key(session: Uuid) -> String {
     format!("trex:session:{session}:events")
 }
 
+// reads are exclusive of the id they start after, so this is the id just before `id`
+fn before(id: &str) -> String {
+    let Some((ms, seq)) = id
+        .split_once('-')
+        .and_then(|(ms, seq)| Some((ms.parse::<u64>().ok()?, seq.parse::<u64>().ok()?)))
+    else {
+        return "0".to_owned();
+    };
+    match (ms, seq) {
+        (0, 0) => "0".to_owned(),
+        (ms, 0) => format!("{}-{}", ms - 1, u64::MAX),
+        (ms, seq) => format!("{ms}-{}", seq - 1),
+    }
+}
+
 // session events go through a redis stream so sse clients on any instance can resume by event id
 impl Store {
     pub async fn publish_event(&self, session: Uuid, event: &Value) -> anyhow::Result<String> {
@@ -94,6 +109,33 @@ impl Store {
         Ok(reply.ids.into_iter().next().map(|entry| entry.id))
     }
 
+    // where the latest run began, as an id to read after; none if no run start is retained
+    pub async fn run_start(
+        &self,
+        session: Uuid,
+        starts: &[&str],
+    ) -> anyhow::Result<Option<String>> {
+        let mut redis = self.redis.clone();
+        let mut end = "+".to_owned();
+        loop {
+            let reply: redis::streams::StreamRangeReply = redis
+                .xrevrange_count(key(session), &end, "-", READ_BATCH)
+                .await
+                .context("failed to scan events")?;
+            for entry in &reply.ids {
+                let data: String = entry.get("data").context("event without data")?;
+                let event: Value = serde_json::from_str(&data).context("invalid event data")?;
+                if starts.iter().any(|start| event["type"] == *start) {
+                    return Ok(Some(before(&entry.id)));
+                }
+            }
+            match reply.ids.last() {
+                Some(oldest) if reply.ids.len() == READ_BATCH => end = format!("({}", oldest.id),
+                _ => return Ok(None),
+            }
+        }
+    }
+
     pub async fn delete_events(&self, session: Uuid) -> anyhow::Result<()> {
         let _: () = self
             .redis
@@ -102,5 +144,21 @@ impl Store {
             .await
             .context("failed to delete events")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steps_back_one_stream_id() {
+        assert_eq!(before("1700000000000-3"), "1700000000000-2");
+        assert_eq!(
+            before("1700000000000-0"),
+            format!("1699999999999-{}", u64::MAX)
+        );
+        assert_eq!(before("0-0"), "0");
+        assert_eq!(before("junk"), "0");
     }
 }

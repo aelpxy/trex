@@ -1,9 +1,13 @@
+mod account;
+mod admin;
 mod attachments;
 mod auth;
+mod credits;
 pub mod error;
 pub mod events;
 mod ids;
 mod library;
+mod projects;
 mod sessions;
 
 use std::sync::Arc;
@@ -27,11 +31,11 @@ use trex_sandbox::{OpenShell, Policy};
 use trex_store::{Store, library::Library};
 use utoipa::{
     Modify, OpenApi, ToSchema,
-    openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
+    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::runs::Runs;
+use crate::{credits::Plans, runs::Runs};
 
 const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -41,6 +45,8 @@ pub struct AppState {
     pub store: Store,
     pub openshell: OpenShell,
     pub models: Models,
+    pub plans: Plans,
+    pub admin_token: Option<String>,
     pub tools: Tools,
     pub library: Library,
     pub sandbox_image: String,
@@ -86,10 +92,22 @@ pub fn router(state: Arc<AppState>) -> Router {
 // the api routes and the openapi spec describing them, built from the same handler list
 fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
     let v1 = OpenApiRouter::new()
+        .routes(routes!(account::signup))
+        .routes(routes!(account::login))
+        .routes(routes!(account::logout))
+        .routes(routes!(account::me, account::update_me))
+        .routes(routes!(account::change_password))
+        .routes(routes!(credits::get))
+        .routes(routes!(credits::ledger))
+        .routes(routes!(admin::adjust_credits))
+        .routes(routes!(admin::set_plan))
         .routes(routes!(models))
+        .routes(routes!(projects::create, projects::list))
+        .routes(routes!(projects::get, projects::update, projects::delete))
         .routes(routes!(sessions::create, sessions::list))
-        .routes(routes!(sessions::get, sessions::delete))
+        .routes(routes!(sessions::get, sessions::update, sessions::delete))
         .routes(routes!(sessions::items))
+        .routes(routes!(sessions::usage))
         .routes({
             // attachments arrive inline as base64, far beyond the default json limit
             let (schemas, paths, method) = routes!(sessions::create_message);
@@ -106,6 +124,7 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(sessions::approve_access))
         .routes(routes!(sessions::reject_access))
         .routes(routes!(library::list))
+        .routes(routes!(library::move_file))
         .routes(routes!(attachments::download))
         .route(
             "/library/files/{*path}",
@@ -127,11 +146,11 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
 #[openapi(
     info(
         title = "trex",
-        description = "Sessions, agent runs and sandboxes for the trex web UI. Errors always have the shape `{\"error\": {\"type\", \"message\", \"param\"}}`; every response carries an `x-request-id` header.",
+        description = "Sessions, agent runs and sandboxes for the trex web UI. Sign up or log in for a bearer token and send it as `Authorization: Bearer <token>`; requests act in the workspace named by the `Trex-Workspace` header, or the user's first workspace. Errors always have the shape `{\"error\": {\"type\", \"message\", \"param\"}}`; every response carries an `x-request-id` header.",
     ),
     components(schemas(error::ErrorType)),
-    modifiers(&UserHeader),
-    security(("user" = [])),
+    modifiers(&BearerToken),
+    security(("token" = [])),
 )]
 struct ApiDoc;
 
@@ -139,16 +158,18 @@ struct ApiDoc;
 #[openapi(paths(library::download, library::upload, library::delete))]
 struct LibraryFiles;
 
-struct UserHeader;
+struct BearerToken;
 
-impl Modify for UserHeader {
+impl Modify for BearerToken {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         let components = openapi.components.get_or_insert_default();
-        let scheme = ApiKey::Header(ApiKeyValue::with_description(
-            "X-Trex-User",
-            "Temporary: the user's uuid, until registration and api keys exist.",
-        ));
-        components.add_security_scheme("user", SecurityScheme::ApiKey(scheme));
+        let scheme = HttpBuilder::new()
+            .scheme(HttpAuthScheme::Bearer)
+            .description(Some(
+                "A token from POST /v1/auth/signup or /v1/auth/login, or TREX_ADMIN_TOKEN for /v1/admin.",
+            ))
+            .build();
+        components.add_security_scheme("token", SecurityScheme::Http(scheme));
     }
 }
 
@@ -186,6 +207,18 @@ struct Model {
     reasoning_efforts: Option<Vec<String>>,
     /// Whether sessions can turn on fast mode.
     fast: bool,
+    price: Price,
+}
+
+/// Credits per million tokens.
+#[derive(Serialize, ToSchema)]
+struct Price {
+    input: u64,
+    cached_input: u64,
+    output: u64,
+    /// Fast mode multiplies the price by this.
+    #[schema(example = 2.0)]
+    fast_multiplier: f64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -216,6 +249,15 @@ async fn models(State(state): State<Arc<AppState>>) -> Json<List<Model>> {
             context_window: model.context_window(),
             reasoning_efforts: model.reasoning_efforts().map(<[String]>::to_vec),
             fast: model.supports_fast(),
+            price: {
+                let price = model.price();
+                Price {
+                    input: price.input,
+                    cached_input: price.cached_input,
+                    output: price.output,
+                    fast_multiplier: price.fast_multiplier,
+                }
+            },
         })
         .collect();
     Json(List::new(data, false))
@@ -262,10 +304,22 @@ mod tests {
             paths,
             [
                 "/health",
+                "/v1/auth/signup",
+                "/v1/auth/login",
+                "/v1/auth/logout",
+                "/v1/me",
+                "/v1/me/password",
+                "/v1/credits",
+                "/v1/credits/ledger",
+                "/v1/admin/workspaces/{id}/credits",
+                "/v1/admin/workspaces/{id}/plan",
                 "/v1/models",
+                "/v1/projects",
+                "/v1/projects/{id}",
                 "/v1/sessions",
                 "/v1/sessions/{id}",
                 "/v1/sessions/{id}/items",
+                "/v1/sessions/{id}/usage",
                 "/v1/sessions/{id}/messages",
                 "/v1/sessions/{id}/answers",
                 "/v1/sessions/{id}/cancel",
@@ -274,14 +328,15 @@ mod tests {
                 "/v1/sessions/{id}/access_requests/{request_id}/approve",
                 "/v1/sessions/{id}/access_requests/{request_id}/reject",
                 "/v1/library",
+                "/v1/library/move",
                 "/v1/attachments/{id}",
                 "/v1/library/files/{path}",
             ]
         );
         let json = serde_json::to_value(&spec).unwrap();
         assert_eq!(
-            json["components"]["securitySchemes"]["user"]["name"],
-            "X-Trex-User"
+            json["components"]["securitySchemes"]["token"]["scheme"],
+            "bearer"
         );
         assert!(json["components"]["schemas"]["SessionEvent"]["oneOf"].is_array());
     }

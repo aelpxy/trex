@@ -39,7 +39,7 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 32 * 1024;
 
 // a tool only ever reaches the sandbox and library of the user the run belongs to
 pub struct ToolContext<'a> {
-    pub user: Uuid,
+    pub workspace: Uuid,
     pub library: &'a Library,
     pub openshell: &'a OpenShell,
     pub sandbox: &'a LazySandbox<'a>,
@@ -205,7 +205,7 @@ mod tests {
         let tools = Tools::standard().unwrap();
         let call = |name: &'static str, args: Value| {
             let ctx = ToolContext {
-                user,
+                workspace: user,
                 library: &library,
                 openshell: &openshell,
                 sandbox: &sandbox,

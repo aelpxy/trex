@@ -52,7 +52,7 @@ impl Tool for LibraryList {
         _args: Value,
     ) -> BoxFuture<'a, anyhow::Result<String>> {
         Box::pin(async move {
-            let files = ctx.library.list(ctx.user).await?;
+            let files = ctx.library.list(ctx.workspace).await?;
             if files.is_empty() {
                 return Ok("the library is empty".into());
             }
@@ -94,7 +94,7 @@ impl Tool for LibraryLoad {
     ) -> BoxFuture<'a, anyhow::Result<String>> {
         Box::pin(async move {
             let args: LoadArgs = serde_json::from_value(args)?;
-            let content = ctx.library.get(ctx.user, &args.library_path).await?;
+            let content = ctx.library.get(ctx.workspace, &args.library_path).await?;
             let dest = args
                 .sandbox_path
                 .unwrap_or_else(|| format!("/sandbox/library/{}", args.library_path));
@@ -148,7 +148,7 @@ impl Tool for LibrarySave {
             }
             let size = content.len();
             ctx.library
-                .put(ctx.user, &args.library_path, content)
+                .put(ctx.workspace, &args.library_path, content)
                 .await?;
             Ok(format!(
                 "saved {} ({size} bytes) to the library as {}",

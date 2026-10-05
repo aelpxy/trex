@@ -6,15 +6,21 @@ use async_openai::{
     config::OpenAIConfig,
     error::OpenAIError,
     types::responses::{
-        CreateResponse, IncludeEnum, InputItem, InputParam, Reasoning, ReasoningEffort,
-        ReasoningSummary, ResponseStream, ServiceTierResponses, Tool, ToolChoiceOptions,
-        ToolChoiceParam,
+        CreateResponse, EasyInputMessage, IncludeEnum, InputItem, InputParam, Reasoning,
+        ReasoningEffort, ReasoningSummary, ResponseStream, ResponseStreamEvent,
+        ServiceTierResponses, Tool, ToolChoiceOptions, ToolChoiceParam,
     },
 };
+use futures::StreamExt;
 use serde::Deserialize;
 
 // conservative for models whose catalog entry doesn't say; a low guess only compacts early
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+const TITLE_PROMPT: &str = "Write a title of 2 to 6 words for a chat that starts with the user's message below, \
+in the language of the message. Reply with only the title: no quotes, no punctuation at the end.";
+const TITLE_INPUT_CHARS: usize = 2_000;
+const DEFAULT_FAST_MULTIPLIER: f64 = 2.0;
+const TITLE_MAX_CHARS: usize = 80;
 
 pub struct Model {
     id: String,
@@ -25,7 +31,23 @@ pub struct Model {
     reasoning_efforts: Option<Vec<String>>,
     // whether the provider offers the priority service tier for this model
     fast: bool,
+    price: Price,
     client: Client<OpenAIConfig>,
+}
+
+// credits per million tokens; a model without a price in the catalog is free
+#[derive(Clone, Copy, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    pub input: u64,
+    pub cached_input: u64,
+    pub output: u64,
+    #[serde(default = "default_fast_multiplier")]
+    pub fast_multiplier: f64,
+}
+
+fn default_fast_multiplier() -> f64 {
+    DEFAULT_FAST_MULTIPLIER
 }
 
 pub struct Models {
@@ -52,6 +74,10 @@ struct Catalog {
     providers: HashMap<String, ProviderEntry>,
     #[serde(default)]
     models: Vec<ModelEntry>,
+    // billing plans live in the same file but are read by the server
+    #[serde(default)]
+    #[allow(dead_code, reason = "parsed by the server's plan config")]
+    plans: toml::Table,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +98,7 @@ struct ModelEntry {
     reasoning_efforts: Option<Vec<String>>,
     #[serde(default)]
     fast: bool,
+    price: Option<Price>,
 }
 
 // accepts the effort names the responses api uses, e.g. low, medium, high
@@ -116,6 +143,12 @@ impl Models {
             );
             model.reasoning_efforts = entry.reasoning_efforts;
             model.fast = entry.fast;
+            if let Some(price) = entry.price {
+                if !(price.fast_multiplier >= 1.0 && price.fast_multiplier.is_finite()) {
+                    bail!("model {}: fast_multiplier must be at least 1", entry.id);
+                }
+                model.price = price;
+            }
             order.push(entry.id.clone());
             models.insert(entry.id, model);
         }
@@ -161,6 +194,7 @@ impl Model {
             context_window,
             reasoning_efforts: None,
             fast: false,
+            price: Price::default(),
             client: Client::with_config(openai),
         }
     }
@@ -175,6 +209,70 @@ impl Model {
 
     pub fn context_window(&self) -> u64 {
         self.context_window
+    }
+
+    // the cheapest level the model accepts, for small side tasks like titles
+    pub fn lowest_effort(&self) -> Option<ReasoningEffort> {
+        let efforts = self.reasoning_efforts.as_ref()?;
+        efforts.first().and_then(|effort| parse_effort(effort).ok())
+    }
+
+    // a short title for a conversation, from its first message
+    pub async fn title(&self, message: &str) -> anyhow::Result<String> {
+        let message: String = message.chars().take(TITLE_INPUT_CHARS).collect();
+        let turn = Turn {
+            instructions: Some(TITLE_PROMPT.into()),
+            input: vec![EasyInputMessage::from(message).into()],
+            tools: Vec::new(),
+            reasoning_effort: self.lowest_effort(),
+            allow_tools: true,
+            cache_key: None,
+            fast: false,
+        };
+        let mut stream = self.stream(turn).await?;
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            match event? {
+                ResponseStreamEvent::ResponseOutputTextDelta(delta) => text.push_str(&delta.delta),
+                ResponseStreamEvent::ResponseCompleted(_) => break,
+                ResponseStreamEvent::ResponseFailed(_)
+                | ResponseStreamEvent::ResponseIncomplete(_) => {
+                    bail!("the title request did not complete")
+                }
+                _ => {}
+            }
+        }
+        let title = text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or_default()
+            .trim()
+            .trim_matches(|c| matches!(c, '"' | '\'' | '*' | '#' | '`'))
+            .trim_end_matches('.')
+            .trim();
+        if title.is_empty() {
+            bail!("the model returned an empty title");
+        }
+        Ok(title.chars().take(TITLE_MAX_CHARS).collect())
+    }
+
+    pub fn price(&self) -> Price {
+        self.price
+    }
+
+    // what one model response costs, rounded up so even a tiny response is charged
+    pub fn credits(&self, input: u64, cached_input: u64, output: u64, fast: bool) -> i64 {
+        let uncached = input.saturating_sub(cached_input);
+        let micro = u128::from(uncached) * u128::from(self.price.input)
+            + u128::from(cached_input.min(input)) * u128::from(self.price.cached_input)
+            + u128::from(output) * u128::from(self.price.output);
+        let multiplier = if fast {
+            self.price.fast_multiplier
+        } else {
+            1.0
+        };
+        let credits = (micro as f64 * multiplier / 1_000_000.0).ceil();
+        credits.min(i64::MAX as f64) as i64
     }
 
     pub fn supports_fast(&self) -> bool {
@@ -275,10 +373,7 @@ pub(crate) fn test_model_via(base_url: &str, context_window: u64) -> Model {
 
 #[cfg(test)]
 mod tests {
-    use async_openai::types::responses::{
-        EasyInputMessage, FunctionTool, OutputItem, ResponseStreamEvent,
-    };
-    use futures::StreamExt;
+    use async_openai::types::responses::{FunctionTool, OutputItem};
     use serde_json::json;
 
     use super::*;
@@ -326,6 +421,7 @@ mod tests {
             context_window = 400000
             reasoning_efforts = ["low", "high", "max"]
             fast = true
+            price = { input = 100, cached_input = 10, output = 400 }
 
             [[models]]
             id = "plain"
@@ -353,6 +449,16 @@ mod tests {
         let plain = models.get("plain").unwrap();
         assert_eq!(plain.reasoning_efforts(), None);
         assert!(fast.supports_fast() && !plain.supports_fast());
+        // 9000 uncached at 100 + 1000 cached at 10 + 500 out at 400 = 1.11 credits, rounded up
+        assert_eq!(fast.credits(10_000, 1_000, 500, false), 2);
+        assert_eq!(fast.credits(10_000, 1_000, 500, true), 3);
+        assert_eq!(fast.credits(1_000_000, 0, 0, false), 100);
+        assert_eq!(fast.credits(0, 0, 0, true), 0);
+        assert_eq!(
+            plain.credits(1_000_000, 0, 1_000_000, false),
+            0,
+            "unpriced models are free"
+        );
         assert_eq!(
             plain.check_effort("minimal").unwrap(),
             ReasoningEffort::Minimal
@@ -360,6 +466,21 @@ mod tests {
 
         let invalid = raw.replace(r#"["low", "high", "max"]"#, r#"["low", "warp"]"#);
         assert!(Models::from_toml(&invalid).is_err());
+    }
+
+    // needs the responses api configured in trex.toml: cargo test -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn writes_short_titles() {
+        let models = test_models();
+        let model = models.get(TEST_MODEL).unwrap();
+        let title = model
+            .title("my sse stream drops events when the client reconnects after a server restart, can you fix the resume logic?")
+            .await
+            .unwrap();
+        let words = title.split_whitespace().count();
+        assert!((2..=8).contains(&words), "{title}");
+        assert!(!title.ends_with('.') && !title.starts_with('"'), "{title}");
     }
 
     // needs the responses api configured in trex.toml: cargo test -- --ignored

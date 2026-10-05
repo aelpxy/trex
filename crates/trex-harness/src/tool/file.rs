@@ -263,11 +263,19 @@ pub(super) async fn file_changed(
         _ => path,
     };
     let diff = unified_diff(from, path, old.unwrap_or(""), new.unwrap_or(""));
+    let whole = |content: Option<&str>| {
+        content
+            .filter(|c| c.len() <= MAX_DIFF_BYTES)
+            .map(str::to_owned)
+    };
     ctx.events
         .send(Event::FileChanged {
+            call_id: ctx.call_id.to_owned(),
             path: path.to_owned(),
             change,
             diff,
+            before: whole(old),
+            after: whole(new),
         })
         .await
         .context("event receiver dropped")
@@ -363,7 +371,7 @@ mod tests {
         let tools = Tools::standard().unwrap();
         let library = Library::in_memory();
         let ctx = || ToolContext {
-            user,
+            workspace: user,
             library: &library,
             openshell: &openshell,
             sandbox: &sandbox,

@@ -9,7 +9,9 @@ use std::{
 use anyhow::{Context, bail};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
+
+const CREDITS_EMAIL: &str = "eval-credits@trex.local";
 
 use crate::{
     api::{Api, Watch},
@@ -157,6 +159,8 @@ macro_rules! scenarios {
 
 scenarios![
     chat_without_tools,
+    projects_and_titles,
+    stops_when_out_of_credits,
     current_time,
     run_a_script,
     read_a_web_page,
@@ -860,6 +864,180 @@ async fn resume_after_crash(cx: Arc<Ctx>) -> anyhow::Result<()> {
         reply.to_lowercase().contains("finished"),
         excerpt(&reply),
     );
+    Ok(())
+}
+
+async fn projects_and_titles(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let project = cx
+        .api
+        .post(
+            "/projects",
+            json!({"name": format!("Eval {}", cx.prefix), "instructions": "End every reply with the word OKAPI in capitals."}),
+        )
+        .await?;
+    let project_id = project["id"]
+        .as_str()
+        .context("project has no id")?
+        .to_owned();
+    let created = cx
+        .api
+        .post(
+            "/sessions",
+            json!({"model": MODEL, "reasoning_effort": cx.effort, "project_id": project_id}),
+        )
+        .await?;
+    let session = created["id"]
+        .as_str()
+        .context("session has no id")?
+        .to_owned();
+    cx.sessions
+        .lock()
+        .expect("sessions lock poisoned")
+        .push(session.clone());
+    cx.check(
+        "started in the project",
+        created["project_id"] == project_id.as_str(),
+        &created["project_id"],
+    );
+
+    let mut watch = cx.watch(&session);
+    cx.api
+        .send(&session, "Suggest one name for a pet turtle.", false)
+        .await?;
+    let end = watch.until_end().await?;
+    cx.check_completed(&end);
+    let reply = cx.reply(&session).await?;
+    cx.check(
+        "followed the project instructions",
+        reply.contains("OKAPI"),
+        excerpt(&reply),
+    );
+
+    let titled = timeout(Duration::from_secs(30), async {
+        loop {
+            if watch
+                .seen
+                .iter()
+                .any(|event| event["type"] == "session.updated")
+            {
+                break;
+            }
+            watch.next().await?;
+        }
+        anyhow::Ok(())
+    })
+    .await;
+    let title = cx.api.session(&session).await?["title"].clone();
+    cx.check(
+        "titled the chat",
+        titled.is_ok()
+            && title
+                .as_str()
+                .is_some_and(|t| !t.is_empty() && t.len() < 80),
+        &title,
+    );
+
+    let listed = |filter: &str| {
+        let api = cx.api.clone();
+        let filter = filter.to_owned();
+        async move {
+            let page = api
+                .get(&format!("/sessions?project_id={filter}&limit=100"))
+                .await?;
+            anyhow::Ok(
+                page["data"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|s| s["id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    let in_project = listed(&project_id).await?;
+    let recents = listed("none").await?;
+    cx.check(
+        "listed under the project, not in recents",
+        in_project == [session.clone()] && !recents.contains(&session),
+        format!("{in_project:?}"),
+    );
+
+    let moved = cx
+        .api
+        .patch(
+            &format!("/sessions/{session}"),
+            json!({"title": "Turtle names", "project_id": null}),
+        )
+        .await?;
+    let recents = listed("none").await?;
+    cx.check(
+        "renamed and moved to recents",
+        moved["title"] == "Turtle names"
+            && moved["project_id"].is_null()
+            && recents.contains(&session),
+        &moved,
+    );
+    cx.api.delete(&format!("/projects/{project_id}")).await?;
+    Ok(())
+}
+
+async fn stops_when_out_of_credits(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let api = Api::account(cx.server.url(), CREDITS_EMAIL, crate::EVAL_PASSWORD).await?;
+    let admin = Api::admin(cx.server.url(), cx.server.admin_token.clone());
+    let me = api.get("/me").await?;
+    let workspace = me["workspaces"][0]["id"]
+        .as_str()
+        .context("no workspace")?
+        .to_owned();
+    let balance = api.get("/credits").await?["balance"]
+        .as_i64()
+        .context("no balance")?;
+    admin
+        .post(
+            &format!("/admin/workspaces/{workspace}/credits"),
+            json!({"amount": 1 - balance, "description": "eval: one credit left"}),
+        )
+        .await?;
+
+    let session = api.create_session(MODEL, cx.effort.as_deref()).await?;
+    let mut watch = api.watch(&session, cx.events.clone());
+    api.send(
+        &session,
+        "Use bash to run `echo one`. After that, use bash to run `echo two`. Then reply with only the word done.",
+        false,
+    )
+    .await?;
+    let end = watch.until_end().await?;
+    cx.check(
+        "stopped for lack of credits",
+        end["type"] == "run.failed" && end["code"] == "insufficient_credits",
+        &end,
+    );
+    let responses = watch
+        .seen
+        .iter()
+        .filter(|event| event["type"] == "usage")
+        .count();
+    cx.check(
+        "finished only the step it had started",
+        responses == 1,
+        format!("{responses} responses"),
+    );
+    let (status, body) = api.try_send(&session, "Are you still there?").await?;
+    cx.check(
+        "refused the next message",
+        status.as_u16() == 402 && body["error"]["type"] == "insufficient_credits_error",
+        format!("{status} {body}"),
+    );
+    let ledger = api.get("/credits/ledger?limit=5").await?;
+    let charged = ledger["data"][0]["kind"] == "usage"
+        && ledger["data"][0]["amount"].as_i64().is_some_and(|a| a < 0);
+    cx.check(
+        "charged the response in the ledger",
+        charged,
+        &ledger["data"][0],
+    );
+    api.delete_session(&session).await?;
     Ok(())
 }
 

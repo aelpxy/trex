@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod credits;
 mod idle;
 mod logging;
 mod runs;
@@ -31,11 +32,18 @@ async fn main() -> anyhow::Result<()> {
 
     let models = config.models;
     tracing::info!(models = ?models.ids().collect::<Vec<_>>(), "loaded models");
+    if config.plans.enforced() {
+        tracing::info!(plans = ?config.plans.ids().collect::<Vec<_>>(), "enforcing credits");
+    } else {
+        tracing::warn!("no plans configured, so credits are tracked but not enforced");
+    }
 
     let state = Arc::new(AppState {
         store,
         openshell,
         models,
+        plans: config.plans,
+        admin_token: config.admin_token,
         tools: Tools::standard()?,
         library: config.library,
         sandbox_image: config.sandbox_image,

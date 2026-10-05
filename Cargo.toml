@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# plain `cargo run` and `cargo build` target the server; use --workspace or -p for the rest
+default-members = ["crates/trex-server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +15,7 @@ trex-sandbox = { path = "crates/trex-sandbox" }
 trex-store = { path = "crates/trex-store" }
 
 anyhow = "1.0.104"
+argon2 = "0.6.0"
 async-openai = { version = "0.42.1", default-features = false }
 axum = "0.8.9"
 base64 = "0.22.1"
@@ -21,6 +24,7 @@ chrono-tz = "0.10.4"
 dotenvy = "0.15.7"
 eventsource-stream = "0.2.3"
 futures = "0.3"
+getrandom = "0.4.3"
 htmd = "0.5.5"
 object_store = { version = "0.14.2", default-features = false }
 pdf-extract = "0.12.1"

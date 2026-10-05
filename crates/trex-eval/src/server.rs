@@ -12,6 +12,7 @@ use tokio::{
     sync::Mutex,
     time::{Instant, sleep},
 };
+use uuid::Uuid;
 
 pub const MODEL: &str = "gpt-6.1-sol";
 // the same model with a tiny window, so a short task has to compact its context
@@ -19,6 +20,20 @@ pub const SMALL_CONTEXT_MODEL: &str = "eval-small-context";
 const SMALL_CONTEXT_WINDOW: i64 = 8_000;
 // short, so the idle-stop scenario doesn't take long
 const SANDBOX_IDLE_SECS: &str = "15";
+const EVAL_MONTHLY_CREDITS: i64 = 100_000_000;
+
+#[derive(serde::Serialize)]
+struct EvalPrice {
+    input: u64,
+    cached_input: u64,
+    output: u64,
+}
+
+const EVAL_PRICE: EvalPrice = EvalPrice {
+    input: 1_000,
+    cached_input: 100,
+    output: 4_000,
+};
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 // a trex instance owned by the eval, so scenarios can crash and restart it
@@ -26,6 +41,7 @@ pub struct Server {
     root: PathBuf,
     dir: PathBuf,
     port: u16,
+    pub admin_token: String,
     child: Mutex<Option<Child>>,
 }
 
@@ -50,6 +66,7 @@ impl Server {
             root: root.to_owned(),
             dir,
             port,
+            admin_token: format!("eval-admin-{}", Uuid::now_v7().simple()),
             child: Mutex::new(None),
         };
         server.restart().await?;
@@ -89,6 +106,7 @@ impl Server {
             .env("TREX_SANDBOX_IDLE_SECS", SANDBOX_IDLE_SECS)
             .env("TREX_LOG_FORMAT", "text")
             .env("RUST_LOG", "info")
+            .env("TREX_ADMIN_TOKEN", &self.admin_token)
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log))
             .kill_on_drop(true)
@@ -140,7 +158,19 @@ fn write_config(root: &Path, dir: &Path) -> anyhow::Result<()> {
     small_table.insert("name".into(), "Eval small context".into());
     small_table.insert("upstream".into(), upstream);
     small_table.insert("context_window".into(), SMALL_CONTEXT_WINDOW.into());
+    // charging needs prices, and a generous plan keeps long eval runs going
+    for model in models.iter_mut().filter_map(|model| model.as_table_mut()) {
+        model.entry("price").or_insert_with(|| {
+            toml::Value::try_from(EVAL_PRICE).expect("the eval price is valid toml")
+        });
+    }
     models.push(small);
+    let mut free = toml::Table::new();
+    free.insert("name".into(), "Free".into());
+    free.insert("monthly_credits".into(), EVAL_MONTHLY_CREDITS.into());
+    let mut plans = toml::Table::new();
+    plans.insert("free".into(), free.into());
+    config.insert("plans".into(), plans.into());
     // the copy holds provider api keys, which is fine under the gitignored target directory
     fs::write(dir.join("trex.toml"), toml::to_string(&config)?)
         .context("failed to write the eval config")

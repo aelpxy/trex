@@ -233,7 +233,7 @@ mod tests {
         let (events, _rx) = mpsc::channel(64);
         let call = |name: &'static str, args: Value| {
             let ctx = ToolContext {
-                user,
+                workspace: user,
                 library: &library,
                 openshell: &openshell,
                 sandbox: &sandbox,
@@ -287,7 +287,7 @@ mod tests {
         let missing = tools
             .call(
                 ToolContext {
-                    user,
+                    workspace: user,
                     library: &library,
                     openshell: &openshell,
                     sandbox: &sandbox,

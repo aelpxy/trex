@@ -1,0 +1,1 @@
+ALTER TABLE usage_records ADD COLUMN duration_ms BIGINT NOT NULL DEFAULT 0;

@@ -13,7 +13,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use super::{
     AppState,
-    auth::CurrentUser,
+    auth::Auth,
     error::{ApiError, ErrorResponse},
     sessions::{Question, find_session},
 };
@@ -24,7 +24,8 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct EventsQuery {
-    /// `start` replays every retained event; otherwise the stream starts at the live tail.
+    /// `start` replays every retained event, `run` replays from the latest run's start; otherwise
+    /// the stream starts at the live tail.
     #[param(example = "start")]
     from: Option<String>,
 }
@@ -33,13 +34,18 @@ pub struct EventsQuery {
 #[derive(Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum SessionEvent {
+    /// `items` is how many conversation items (by `seq`) existed when the run started; a client that
+    /// reloads mid-run keeps those and rebuilds the rest from this run's events (`?from=run`).
     #[serde(rename = "run.started")]
-    RunStarted,
+    RunStarted { items: i64 },
+    /// The chat was given a title, generated from its first message.
+    #[serde(rename = "session.updated")]
+    SessionUpdated { title: String },
     /// trex restarted while the run was in progress and has picked it up again. Discard the text,
     /// reasoning and tool calls streamed since the last `tool.result`; tool calls without a result
     /// were stopped. Follows the run's `run.started` in place of its end.
     #[serde(rename = "run.resumed")]
-    RunResumed,
+    RunResumed { items: i64 },
     #[serde(rename = "sandbox.creating")]
     SandboxCreating,
     /// The conversation's stopped sandbox is starting again, with its files intact.
@@ -84,6 +90,8 @@ pub enum SessionEvent {
         duration_ms: u64,
         /// Until the first streamed text, reasoning or tool arguments.
         time_to_first_token_ms: Option<u64>,
+        /// What the response cost.
+        credits: i64,
     },
     /// The sandbox was denied network access; see the access request endpoints.
     #[serde(rename = "access.requested")]
@@ -110,10 +118,16 @@ pub enum SessionEvent {
     /// of the file (cut short when huge); for a move, `from` is the old path.
     #[serde(rename = "file.changed")]
     FileChanged {
+        /// The tool call that changed the file.
+        call_id: String,
         path: String,
         change: FileChangeKind,
         from: Option<String>,
         diff: String,
+        /// The whole file before the change, when it existed and is at most 64 KiB.
+        before: Option<String>,
+        /// The whole file after the change, unless it was deleted or is over 64 KiB.
+        after: Option<String>,
     },
     /// The agent's plan for the task, replacing any earlier one. Render it as a checklist.
     #[serde(rename = "plan.updated")]
@@ -142,8 +156,12 @@ pub enum SessionEvent {
     RunNeedsInput,
     #[serde(rename = "run.cancelled")]
     RunCancelled,
+    /// `code` is `insufficient_credits` when the workspace ran out of credits.
     #[serde(rename = "run.failed")]
-    RunFailed { error: String },
+    RunFailed {
+        error: String,
+        code: Option<&'static str>,
+    },
 }
 
 #[derive(Serialize, ToSchema)]
@@ -225,6 +243,7 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
             time_to_first_token_ms: usage
                 .time_to_first_token
                 .map(|elapsed| elapsed.as_millis() as u64),
+            credits: 0,
         },
         Event::AccessRequest(request) => SessionEvent::AccessRequested {
             id: request.id,
@@ -247,7 +266,14 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
             delay_ms: delay.as_millis() as u64,
             reason,
         },
-        Event::FileChanged { path, change, diff } => {
+        Event::FileChanged {
+            call_id,
+            path,
+            change,
+            diff,
+            before,
+            after,
+        } => {
             let (change, from) = match change {
                 FileChange::Added => (FileChangeKind::Added, None),
                 FileChange::Updated => (FileChangeKind::Updated, None),
@@ -255,10 +281,13 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
                 FileChange::Moved { from } => (FileChangeKind::Moved, Some(from)),
             };
             SessionEvent::FileChanged {
+                call_id,
                 path,
                 change,
                 from,
                 diff,
+                before,
+                after,
             }
         }
         Event::PlanUpdated { explanation, steps } => SessionEvent::PlanUpdated {
@@ -305,12 +334,12 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
 )]
 pub async fn stream_events(
     State(state): State<Arc<AppState>>,
-    CurrentUser(user): CurrentUser,
+    Auth { workspace, .. }: Auth,
     Path(id): Path<String>,
     Query(query): Query<EventsQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    let session = find_session(&state, user, &id).await?;
+    let session = find_session(&state, workspace, &id).await?;
     let resume = headers
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
@@ -318,6 +347,18 @@ pub async fn stream_events(
     let mut after = match (resume, query.from.as_deref()) {
         (Some(id), _) => id,
         (None, Some("start")) => "0".to_owned(),
+        (None, Some("run")) => match state
+            .store
+            .run_start(session.id, &["run.started", "run.resumed"])
+            .await?
+        {
+            Some(id) => id,
+            None => state
+                .store
+                .last_event_id(session.id)
+                .await?
+                .unwrap_or_else(|| "0".to_owned()),
+        },
         (None, _) => state
             .store
             .last_event_id(session.id)
