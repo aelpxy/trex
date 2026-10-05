@@ -46,9 +46,10 @@ export const contextWindowOf = (model: string) => API_MODELS.get(model)?.context
 
 export const supportsFast = (model: string) => API_MODELS.get(model)?.fast === true;
 
-export type ChatSettings = { model: string; effort: Effort; fast: boolean };
+// autoApprove approves the sandbox's network access requests without asking
+export type ChatSettings = { model: string; effort: Effort; fast: boolean; autoApprove: boolean };
 
-export const DEFAULT_CHAT_SETTINGS: ChatSettings = { model: "", effort: "medium", fast: false };
+export const DEFAULT_CHAT_SETTINGS: ChatSettings = { model: "", effort: "medium", fast: false, autoApprove: false };
 
 function describe(model: ApiModel) {
   const window = model.context_window >= 1_000_000 ? `${(model.context_window / 1_000_000).toFixed(1).replace(/\.0$/, "")}M` : `${Math.round(model.context_window / 1000)}k`;
@@ -71,5 +72,6 @@ export function sessionSettings(settings: ChatSettings) {
     model: model?.id ?? settings.model,
     reasoning_effort: !efforts || efforts.includes(settings.effort) ? settings.effort : null,
     fast: settings.fast && model?.fast === true,
+    auto_approve: settings.autoApprove,
   };
 }

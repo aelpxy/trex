@@ -77,6 +77,14 @@ export function useChatCommands({ chatId, project, messages, running, settings, 
         toasts.add({ title: settings.fast ? "Fast mode off" : "Fast mode on", type: "success" });
       },
     },
+    {
+      name: "autoapprove",
+      description: settings.autoApprove ? "Ask before allowing network access again" : "Approve network access without asking",
+      run: () => {
+        update({ autoApprove: !settings.autoApprove });
+        toasts.add({ title: settings.autoApprove ? "Auto-approve off" : "Auto-approve on", type: "success" });
+      },
+    },
     Boolean(chatId) && {
       name: "rename",
       description: "Rename this chat",

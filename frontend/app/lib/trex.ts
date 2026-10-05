@@ -64,6 +64,7 @@ export type ApiSession = {
   model: string;
   reasoning_effort: string | null;
   fast: boolean;
+  auto_approve: boolean;
   status: "idle" | "running" | "needs_input" | "failed";
   pending_questions: ApiQuestion[] | null;
   last_error: string | null;
@@ -249,8 +250,8 @@ export const trex = {
     runs: (id: string) => all<ApiSession>(`/sessions?scheduled_task_id=${id}`),
   },
   session: (id: string) => api<ApiSession>("GET", `/sessions/${id}`),
-  createSession: (body: { model: string; reasoning_effort: string | null; fast: boolean; project_id?: string | null }) => api<ApiSession>("POST", "/sessions", body),
-  updateSession: (id: string, body: { title?: string; project_id?: string | null; model?: string; reasoning_effort?: string | null; fast?: boolean }) => api<ApiSession>("PATCH", `/sessions/${id}`, body),
+  createSession: (body: { model: string; reasoning_effort: string | null; fast: boolean; auto_approve?: boolean; project_id?: string | null }) => api<ApiSession>("POST", "/sessions", body),
+  updateSession: (id: string, body: { title?: string; project_id?: string | null; model?: string; reasoning_effort?: string | null; fast?: boolean; auto_approve?: boolean }) => api<ApiSession>("PATCH", `/sessions/${id}`, body),
   deleteSession: (id: string) => api<unknown>("DELETE", `/sessions/${id}`),
   items: (id: string) => api<List<ApiItem>>("GET", `/sessions/${id}/items`).then((list) => list.data),
   usage: (id: string) => api<List<ApiUsage>>("GET", `/sessions/${id}/usage`).then((list) => list.data),

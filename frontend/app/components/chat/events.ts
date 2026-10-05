@@ -55,7 +55,7 @@ function reduce(message: AssistantMessage, event: ChatEvent, now: number): Assis
     case "access.requested":
       return { ...message, state: "needs_input", parts: [...parts, { type: "access", id: event.id, host: event.host, binary: event.binary, state: "pending" }] };
     case "access.resolved":
-      return { ...message, state: "running", parts: updatePart(parts, isAccess(event.id), (access) => ({ ...access, state: event.approved ? "approved" : "rejected" })) };
+      return { ...message, state: "running", parts: updatePart(parts, isAccess(event.id), (access) => ({ ...access, state: event.approved ? "approved" : "rejected", automatic: event.automatic })) };
     case "question":
       return { ...message, state: "needs_input", parts: [...parts, { type: "question", id: event.id, question: event.question, options: event.options }] };
     case "question.answered":

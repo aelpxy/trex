@@ -635,6 +635,7 @@ async fn drive(
         unattended,
         // a scheduled run can't schedule more tasks, so they can't multiply
         scheduler: (!unattended).then_some(&scheduler as &dyn TaskScheduler),
+        auto_approve: session.auto_approve,
     };
 
     // the agent saves every item as it goes, so whatever happens the session can be continued

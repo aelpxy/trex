@@ -22,7 +22,7 @@ use trex_store::library::Library;
 use uuid::Uuid;
 
 use crate::{
-    access::{AccessGate, looks_blocked},
+    access::{self, AccessGate, looks_blocked},
     attachment,
     event::{Event, Usage},
     history,
@@ -111,6 +111,8 @@ pub struct Agent<'a> {
     pub unattended: bool,
     // creates scheduled tasks for schedule_task; without it the tool isn't offered
     pub scheduler: Option<&'a dyn TaskScheduler>,
+    // the sandbox's network access requests are approved without asking
+    pub auto_approve: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -545,9 +547,17 @@ impl Agent<'_> {
                 }
             };
             for request in requests {
-                if seen.insert(request.id.clone())
-                    && let Err(error) = send(events, Event::AccessRequest(request)).await
-                {
+                if !seen.insert(request.id.clone()) {
+                    continue;
+                }
+                let shown = if self.auto_approve {
+                    access::approve_automatically(self.openshell, sandbox, &request, events)
+                        .await
+                        .map(|_| ())
+                } else {
+                    send(events, Event::AccessRequest(request)).await
+                };
+                if let Err(error) = shown {
                     return error;
                 }
             }
@@ -755,6 +765,7 @@ impl Agent<'_> {
                 openshell: self.openshell,
                 sandbox: self.sandbox,
                 unattended: self.unattended,
+                auto_approve: self.auto_approve,
             });
         let before = match &gate {
             Some(gate) => gate.pending().await,
@@ -1083,6 +1094,7 @@ mod tests {
             reasoning_from: 0,
             unattended: false,
             scheduler: None,
+            auto_approve: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1147,6 +1159,7 @@ mod tests {
             reasoning_from: 0,
             unattended: false,
             scheduler: None,
+            auto_approve: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1228,6 +1241,7 @@ mod tests {
             reasoning_from: 0,
             unattended: false,
             scheduler: None,
+            auto_approve: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message("Reply with only the word one.")];
@@ -1288,6 +1302,7 @@ mod tests {
             reasoning_from: 0,
             unattended: false,
             scheduler: None,
+            auto_approve: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message(
@@ -1378,6 +1393,7 @@ mod tests {
             reasoning_from: 0,
             unattended: false,
             scheduler: None,
+            auto_approve: false,
         };
 
         let mut history = vec![
@@ -1455,6 +1471,7 @@ mod tests {
             reasoning_from: 0,
             unattended: false,
             scheduler: None,
+            auto_approve: false,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1517,6 +1534,7 @@ mod tests {
             reasoning_from: 0,
             unattended: false,
             scheduler: None,
+            auto_approve: false,
         };
 
         let script = "timeout 15 bash -c 'exec 3<>/dev/tcp/example.com/443'";
@@ -1592,6 +1610,7 @@ mod tests {
             reasoning_from: 0,
             unattended: false,
             scheduler: None,
+            auto_approve: false,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1659,6 +1678,7 @@ mod tests {
             reasoning_from: 0,
             unattended: false,
             scheduler: None,
+            auto_approve: false,
         };
         let mut history = vec![
             EasyInputMessage::from(

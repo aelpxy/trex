@@ -49,6 +49,9 @@ pub struct CreateSession {
     /// Faster responses at a higher cost, on models whose `fast` is true.
     #[serde(default)]
     fast: bool,
+    /// Approve the sandbox's network access requests without asking.
+    #[serde(default)]
+    auto_approve: bool,
     /// Start the chat inside this project; it then follows the project's instructions.
     #[schema(example = "proj_0199b3c1d6a07c3e8b1f2a4d5e6f7a8b")]
     project_id: Option<String>,
@@ -84,6 +87,7 @@ pub struct UpdateSession {
     #[schema(value_type = Option<String>)]
     reasoning_effort: Option<Option<String>>,
     fast: Option<bool>,
+    auto_approve: Option<bool>,
 }
 
 // tells an explicit null (Some(None)) apart from a missing field (None)
@@ -110,6 +114,9 @@ pub struct Session {
     reasoning_effort: Option<String>,
     /// Faster responses at a higher cost.
     fast: bool,
+    /// The sandbox's network access requests are approved without asking; each still appears as
+    /// `access.requested`, followed by `access.decided` with `automatic: true`.
+    auto_approve: bool,
     status: Status,
     /// Set while `status` is `needs_input`; answer with `POST /v1/sessions/{id}/answers`.
     pending_questions: Option<Vec<Question>>,
@@ -178,6 +185,15 @@ pub async fn create(
             project,
         )
         .await?;
+    let session = if body.auto_approve {
+        state
+            .store
+            .set_session_auto_approve(workspace, session.id, true)
+            .await?
+            .unwrap_or(session)
+    } else {
+        session
+    };
     Ok((StatusCode::CREATED, Json(session_object(&session))))
 }
 
@@ -337,6 +353,12 @@ pub async fn update(
             .set_session_model(workspace, session.id, model_id, effort, fast)
             .await?;
     }
+    if let Some(auto_approve) = body.auto_approve {
+        state
+            .store
+            .set_session_auto_approve(workspace, session.id, auto_approve)
+            .await?;
+    }
     let session = state
         .store
         .update_session(workspace, session.id, title, project)
@@ -436,6 +458,7 @@ pub(super) fn session_object(session: &store::Session) -> Session {
         model: session.model.clone(),
         reasoning_effort: session.reasoning_effort.clone(),
         fast: session.fast,
+        auto_approve: session.auto_approve,
         status: match session.status {
             SessionStatus::Idle => Status::Idle,
             SessionStatus::Running => Status::Running,

@@ -119,6 +119,13 @@ pub enum SessionEvent {
         rationale: String,
         security_notes: String,
     },
+    /// An access request was answered without the user, because the chat approves automatically.
+    #[serde(rename = "access.decided")]
+    AccessDecided {
+        id: String,
+        approved: bool,
+        automatic: bool,
+    },
     /// The agent asked the user something; the run ends with `run.needs_input`.
     #[serde(rename = "question")]
     Question { questions: Vec<Question> },
@@ -276,6 +283,11 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
             binary: request.binary,
             rationale: request.rationale,
             security_notes: request.security_notes,
+        },
+        Event::AccessDecided { id, approved } => SessionEvent::AccessDecided {
+            id,
+            approved,
+            automatic: true,
         },
         Event::Question { questions, .. } => SessionEvent::Question {
             questions: questions.into_iter().map(Question::from).collect(),

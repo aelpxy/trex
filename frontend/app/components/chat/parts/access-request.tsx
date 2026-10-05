@@ -13,7 +13,7 @@ export function AccessRequest({ part, onResolve }: AccessRequestProps) {
     return (
       <p className="flex items-center gap-2 text-xs text-muted">
         <Icon size={13} className={approved ? "" : "text-danger"} />
-        Network access to <span className="font-medium text-ink">{part.host}</span> {approved ? "approved" : "rejected"}
+        Network access to <span className="font-medium text-ink">{part.host}</span> {approved ? (part.automatic ? "approved automatically" : "approved") : "rejected"}
       </p>
     );
   }

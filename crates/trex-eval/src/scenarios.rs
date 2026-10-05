@@ -175,6 +175,7 @@ scenarios![
     build_and_package,
     ask_then_continue,
     approve_blocked_network,
+    auto_approve_network,
     schedule_from_chat,
     serve_in_the_background,
     preview_a_site,
@@ -741,6 +742,43 @@ async fn schedule_from_chat(cx: Arc<Ctx>) -> anyhow::Result<()> {
             cx.api.delete_scheduled_task(id).await?;
         }
     }
+    Ok(())
+}
+
+// with auto-approve on, a blocked command goes through without anyone answering
+async fn auto_approve_network(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let session = cx.session(MODEL).await?;
+    cx.api
+        .patch(
+            &format!("/sessions/{session}"),
+            serde_json::json!({"auto_approve": true}),
+        )
+        .await?;
+    let mut watch = cx.watch(&session);
+    cx.api
+        .send(
+            &session,
+            "Use bash to run `curl -sS --max-time 10 https://example.org` and tell me the page title.",
+            false,
+        )
+        .await?;
+    let end = watch.until_end().await?;
+    cx.check_completed(&end);
+    let decided = watch
+        .seen
+        .iter()
+        .any(|event| event["type"] == "access.decided" && event["automatic"] == true);
+    cx.check(
+        "approved it automatically",
+        decided,
+        "no automatic access.decided",
+    );
+    let reply = cx.reply(&session).await?;
+    cx.check(
+        "reached the site",
+        reply.contains("Example Domain"),
+        excerpt(&reply),
+    );
     Ok(())
 }
 

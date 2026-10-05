@@ -18,7 +18,7 @@ pub use self::{
 // sqlx only accepts static sql, so the shared column list is spliced in at compile time
 macro_rules! columns {
     () => {
-        "id, workspace_id, project_id, scheduled_task_id, title, model, reasoning_effort, fast, sandbox, sandbox_stopped, status, pending_question, last_error, queued_messages, \
+        "id, workspace_id, project_id, scheduled_task_id, title, model, reasoning_effort, fast, auto_approve, sandbox, sandbox_stopped, status, pending_question, last_error, queued_messages, \
          EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at, EXTRACT(EPOCH FROM updated_at)::BIGINT AS updated_at"
     };
 }
@@ -51,6 +51,8 @@ pub struct Session {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub fast: bool,
+    // network access requests are approved without asking the user
+    pub auto_approve: bool,
     pub sandbox: Option<String>,
     pub sandbox_stopped: bool,
     pub status: SessionStatus,
@@ -95,6 +97,7 @@ impl FromRow<'_, PgRow> for Session {
             model: row.try_get("model")?,
             reasoning_effort: row.try_get("reasoning_effort")?,
             fast: row.try_get("fast")?,
+            auto_approve: row.try_get("auto_approve")?,
             sandbox: row.try_get("sandbox")?,
             sandbox_stopped: row.try_get("sandbox_stopped")?,
             status: SessionStatus::parse(&status)
@@ -153,8 +156,8 @@ impl Store {
             .context("failed to start a transaction")?;
         let id = Uuid::now_v7();
         let sql = concat!(
-            "INSERT INTO sessions (id, workspace_id, project_id, title, model, reasoning_effort, fast, reasoning_model, reasoning_from) ",
-            "SELECT $1, workspace_id, project_id, title, model, reasoning_effort, fast, reasoning_model, LEAST(reasoning_from, $4) ",
+            "INSERT INTO sessions (id, workspace_id, project_id, title, model, reasoning_effort, fast, auto_approve, reasoning_model, reasoning_from) ",
+            "SELECT $1, workspace_id, project_id, title, model, reasoning_effort, fast, auto_approve, reasoning_model, LEAST(reasoning_from, $4) ",
             "FROM sessions WHERE id = $2 AND workspace_id = $3 RETURNING ",
             columns!()
         );
@@ -277,6 +280,25 @@ impl Store {
             .fetch_optional(&self.pg)
             .await
             .context("failed to update session model")
+    }
+
+    pub async fn set_session_auto_approve(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        auto_approve: bool,
+    ) -> anyhow::Result<Option<Session>> {
+        let sql = concat!(
+            "UPDATE sessions SET auto_approve = $3, updated_at = NOW() WHERE id = $1 AND workspace_id = $2 RETURNING ",
+            columns!()
+        );
+        sqlx::query_as(sql)
+            .bind(id)
+            .bind(workspace)
+            .bind(auto_approve)
+            .fetch_optional(&self.pg)
+            .await
+            .context("failed to update session auto approve")
     }
 
     // reasoning is only readable by the model that wrote it, so a run on a different model than the

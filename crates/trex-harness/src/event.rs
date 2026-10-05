@@ -46,6 +46,11 @@ pub enum Event {
     },
     Usage(Usage),
     AccessRequest(AccessRequest),
+    // a request was answered without the user, because the chat approves access automatically
+    AccessDecided {
+        id: String,
+        approved: bool,
+    },
     Question {
         call_id: String,
         questions: Vec<Question>,

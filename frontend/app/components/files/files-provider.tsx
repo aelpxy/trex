@@ -38,7 +38,11 @@ type Files = {
   write: (path: string, content: string) => void;
   create: (path: string) => void;
   rename: (from: string, to: string) => void;
-  requestRemove: (path: string) => void;
+  // asks first; a folder takes every file under it
+  requestRemove: (path: string, folder?: boolean) => void;
+  // writes a file from the desktop into the sandbox, replacing one at that path; resolves to
+  // whether it worked, having shown why when it didn't
+  upload: (path: string, file: Blob) => Promise<boolean>;
 };
 
 const FilesContext = createContext<Files | null>(null);
@@ -85,7 +89,7 @@ export function FilesProvider({ sessionId, generated, writing, running, children
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, string | null>>({});
-  const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
+  const [pendingRemoval, setPendingRemoval] = useState<{ path: string; folder: boolean } | null>(null);
   // contents read from the sandbox or the library, newer than the tool calls that wrote them
   const [loaded, setLoaded] = useState<Record<string, string>>({});
   const [binaries, setBinaries] = useState<Record<string, BinaryFile>>({});
@@ -270,6 +274,26 @@ export function FilesProvider({ sessionId, generated, writing, running, children
     [read, sessionId, overrides, listed, save],
   );
 
+  const upload = useCallback(
+    async (path: string, file: Blob) => {
+      if (!sessionId) return false;
+      return putSandboxFile(sessionId, path, file)
+        .then(() => {
+          // what was cached for that path is stale now
+          const drop = <T,>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([key]) => key !== path));
+          setOverrides(drop);
+          setLoaded(drop);
+          setListed((current) => (current.includes(path) ? current : [...current, path]));
+          return true;
+        })
+        .catch((cause) => {
+          toasts.add({ title: `Couldn't upload ${path}`, description: errorText(cause), type: "error" });
+          return false;
+        });
+    },
+    [sessionId],
+  );
+
   const remove = (path: string) => {
     setOverrides((current) => ({ ...current, [path]: null }));
     setOpenPath((current) => (current === path ? null : current));
@@ -306,17 +330,19 @@ export function FilesProvider({ sessionId, generated, writing, running, children
       revert,
       create,
       rename,
-      requestRemove: setPendingRemoval,
+      requestRemove: (path: string, folder = false) => setPendingRemoval({ path, folder }),
+      upload,
     }),
-    [preview, previewError, openPreview, closePreview, panelOpen, openPath, paths, sessionId, loading, error, showPanel, open, openLibrary, refresh, writing, close, read, write, revert, create, rename],
+    [preview, previewError, openPreview, closePreview, panelOpen, openPath, paths, sessionId, loading, error, showPanel, open, openLibrary, refresh, writing, close, read, write, revert, create, rename, upload],
   );
 
   return (
     <FilesContext value={value}>
       {children}
       <DeleteConfirmDialog
-        target={pendingRemoval ? { kind: "file", id: pendingRemoval, name: pendingRemoval } : null}
-        onConfirm={(target) => remove(target.id)}
+        target={pendingRemoval ? { kind: pendingRemoval.folder ? "folder" : "file", id: pendingRemoval.path, name: pendingRemoval.path } : null}
+        consequence={pendingRemoval?.folder ? " and every file in it" : ""}
+        onConfirm={(target) => (target.kind === "folder" ? paths.filter((path) => path.startsWith(`${target.id}/`)).forEach(remove) : remove(target.id))}
         onCancel={() => setPendingRemoval(null)}
       />
     </FilesContext>

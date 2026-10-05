@@ -585,6 +585,10 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
             return message.state === "running" ? { ...next, state: "running" } : { ...next, state: message.state };
           });
           break;
+        case "access.decided":
+          // decided without the user; deciding never changes whether the run is going
+          updateLast((message) => ({ ...applyEvent(message, { type: "access.resolved", id: String(data.id), approved: data.approved === true, automatic: data.automatic === true }, at), state: message.state }));
+          break;
         case "question":
           questions.current = (data.questions as ApiQuestion[]) ?? [];
           answers.current.clear();

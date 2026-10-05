@@ -49,6 +49,8 @@ pub struct AccessGate<'a> {
     pub sandbox: &'a LazySandbox<'a>,
     // runs nobody is watching can't ask, so they report the block and carry on
     pub unattended: bool,
+    // the user chose to approve every request in this chat without being asked
+    pub auto_approve: bool,
 }
 
 impl AccessGate<'_> {
@@ -106,13 +108,27 @@ impl AccessGate<'_> {
                 hosts(&new)
             )));
         }
+        let mut automatic = self.auto_approve;
         for request in &new {
-            events
-                .send(Event::AccessRequest(request.clone()))
-                .await
-                .context("event receiver dropped")?;
+            if self.auto_approve {
+                // one that couldn't be approved is left for the user, whose card is already showing
+                automatic &=
+                    approve_automatically(self.openshell, sandbox, request, events).await?;
+            } else {
+                send(events, Event::AccessRequest(request.clone())).await?;
+            }
         }
         let decided = self.wait_for_decisions(sandbox, &new).await?;
+        if automatic
+            && decided
+                .iter()
+                .all(|status| *status == AccessStatus::Approved)
+        {
+            return Ok(Some(format!(
+                "[network access to {} was approved automatically; run the command again]",
+                hosts(&new)
+            )));
+        }
         Ok(Some(note(&new, &decided)))
     }
 
@@ -140,6 +156,37 @@ impl AccessGate<'_> {
             sleep(DECISION_INTERVAL).await;
         }
     }
+}
+
+async fn send(events: &mpsc::Sender<Event>, event: Event) -> anyhow::Result<()> {
+    events.send(event).await.context("event receiver dropped")
+}
+
+// shows the request, approves it and says so; false when approving failed and the user has to
+pub async fn approve_automatically(
+    openshell: &OpenShell,
+    sandbox: &trex_sandbox::Sandbox,
+    request: &AccessRequest,
+    events: &mpsc::Sender<Event>,
+) -> anyhow::Result<bool> {
+    send(events, Event::AccessRequest(request.clone())).await?;
+    if let Err(error) = openshell.approve_access(sandbox, request).await {
+        tracing::warn!(
+            error = format!("{error:#}"),
+            request = request.id,
+            "failed to approve access automatically, asking the user"
+        );
+        return Ok(false);
+    }
+    send(
+        events,
+        Event::AccessDecided {
+            id: request.id.clone(),
+            approved: true,
+        },
+    )
+    .await?;
+    Ok(true)
 }
 
 fn hosts(requests: &[AccessRequest]) -> String {

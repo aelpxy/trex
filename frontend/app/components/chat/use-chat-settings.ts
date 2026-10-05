@@ -15,6 +15,7 @@ function load(): ChatSettings {
       model,
       effort: effortFor(model, typeof parsed.effort === "string" ? parsed.effort : DEFAULT_CHAT_SETTINGS.effort),
       fast: parsed.fast === true,
+      autoApprove: parsed.autoApprove === true,
     };
   } catch (error) {
     console.warn("could not read chat settings", error);
@@ -26,6 +27,7 @@ const settingsOf = (session: ApiSession): ChatSettings => ({
   model: session.model,
   effort: effortFor(session.model, session.reasoning_effort ?? DEFAULT_CHAT_SETTINGS.effort),
   fast: session.fast,
+  autoApprove: session.auto_approve,
 });
 
 // an open chat uses and updates its session's settings; a new chat starts from the last ones picked
@@ -54,9 +56,9 @@ export function useChatSettings(session?: ApiSession) {
     const fitted = { ...next, effort: effortFor(next.model, next.effort) };
     setSettings(fitted);
     if (!sessionId) return;
-    const { model, reasoning_effort, fast } = sessionSettings(fitted);
-    trex.updateSession(sessionId, { model, reasoning_effort, fast }).catch((error) => {
-      console.warn("could not change the chat's model", error);
+    const { model, reasoning_effort, fast, auto_approve } = sessionSettings(fitted);
+    trex.updateSession(sessionId, { model, reasoning_effort, fast, auto_approve }).catch((error) => {
+      console.warn("could not change the chat's settings", error);
       setSettings(settings);
     });
   };

@@ -6,6 +6,7 @@ import { isMac, isTouch } from "~/components/command/shortcuts";
 import { focusRingOutset, iconButton } from "~/components/ui/styles";
 import { ATTACHMENT_TYPES, kindOf, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_MESSAGE_CHARS, readAsDataUrl } from "~/lib/attachments";
 
+import { AutoApproveToggle } from "./auto-approve-toggle";
 import { COMMAND_MENU_ID, CommandMenu, optionId } from "./command-menu";
 import { FastToggle } from "./fast-toggle";
 import { effortsFor, MODELS, supportsFast, type ChatSettings } from "./models";
@@ -243,6 +244,7 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
           <OptionSelect label="Model" options={MODELS} value={settings.model} onChange={(model) => onSettingsChange({ model })} />
           <OptionSelect label="Thinking effort" options={effortsFor(settings.model)} value={settings.effort} onChange={(effort) => onSettingsChange({ effort })} icon={<LuBrain size={13} className="shrink-0" />} />
           {supportsFast(settings.model) && <FastToggle pressed={settings.fast} onChange={(fast) => onSettingsChange({ fast })} />}
+          <AutoApproveToggle pressed={settings.autoApprove} onChange={(autoApprove) => onSettingsChange({ autoApprove })} />
         </div>
         {status}
         {streaming && canSend && (

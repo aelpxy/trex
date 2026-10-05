@@ -18,7 +18,8 @@ export type ToolPart = {
   startedAt: number;
   endedAt?: number;
 };
-export type AccessPart = { type: "access"; id: string; host: string; binary: string; state: "pending" | "approved" | "rejected" };
+// `automatic` when the chat approved it without asking
+export type AccessPart = { type: "access"; id: string; host: string; binary: string; state: "pending" | "approved" | "rejected"; automatic?: boolean };
 export type QuestionPart = { type: "question"; id: string; question: string; options: string[]; answer?: string };
 
 export type PlanStep = { step: string; status: "pending" | "in_progress" | "completed" };
@@ -95,7 +96,7 @@ export type ChatEvent =
   | { type: "tool.output"; id: string; delta: string }
   | { type: "tool.result"; id: string; ok: boolean; summary?: string }
   | { type: "access.requested"; id: string; host: string; binary: string }
-  | { type: "access.resolved"; id: string; approved: boolean }
+  | { type: "access.resolved"; id: string; approved: boolean; automatic?: boolean }
   | { type: "question"; id: string; question: string; options: string[] }
   | { type: "question.answered"; id: string; answer: string }
   | { type: "plan.updated"; explanation?: string; steps: PlanStep[] }
