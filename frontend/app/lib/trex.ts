@@ -48,10 +48,12 @@ export type ApiUsage = {
   model: string;
   input_tokens: number;
   cached_input_tokens: number;
+  cache_write_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
   credits: number;
   duration_ms: number;
+  first_token_ms: number | null;
 };
 
 export type ApiAttachmentInput = { data: string; filename: string };
@@ -106,6 +108,7 @@ export const trex = {
   accessRequests: (id: string) => api<List<ApiAccessRequest>>("GET", `/sessions/${id}/access_requests`).then((list) => list.data),
   decideAccess: (id: string, request: string, approve: boolean) => api<unknown>("POST", `/sessions/${id}/access_requests/${request}/${approve ? "approve" : "reject"}`),
 
+  createPreview: (id: string, port: number) => api<{ port: number; url: string; expires_at: number }>("POST", `/sessions/${id}/previews`, { port }),
   sandboxFiles: (id: string) => api<List<ApiSandboxFile>>("GET", `/sessions/${id}/files`),
   moveSandboxFile: (id: string, from: string, to: string) => api<ApiSandboxFile>("POST", `/sessions/${id}/files/move`, { from, to }),
   deleteSandboxFile: (id: string, path: string) => api<unknown>("DELETE", `/sessions/${id}/files/${encodePath(path)}`),

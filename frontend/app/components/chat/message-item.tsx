@@ -15,6 +15,7 @@ import { ErrorCard } from "./parts/error-card";
 import { MessageEditor } from "./parts/message-editor";
 import { MessageAttachments } from "./parts/message-attachments";
 import { PlanCard } from "./parts/plan-card";
+import { PreviewCard } from "./parts/preview-card";
 import { QuestionCard } from "./parts/question-card";
 import { ReasoningBlock } from "./parts/reasoning-block";
 import { RunFooter } from "./parts/run-footer";
@@ -49,6 +50,8 @@ function PartView({ part, onRespond, onRetry }: { part: Part; onRespond: Respond
       return <PlanCard part={part} />;
     case "error":
       return <ErrorCard part={part} onRetry={onRetry} />;
+    case "preview":
+      return <PreviewCard part={part} />;
     case "access":
       return <AccessRequest part={part} onResolve={(approved) => onRespond(part.id, { kind: "access", approved })} />;
     case "question":

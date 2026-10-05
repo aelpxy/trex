@@ -70,7 +70,7 @@ function FileBody({ path }: { path: string }) {
     );
   }
 
-  if (!preview && !changed) return <div className="min-h-0 flex-1">{editor}</div>;
+  if (!preview && !changed) return <div className="relative min-h-0 flex-1">{editor}</div>;
 
   return (
     <Tabs.Root value={view} onValueChange={(value) => setView(String(value))} className="flex min-h-0 flex-1 flex-col">
@@ -93,7 +93,7 @@ function FileBody({ path }: { path: string }) {
         )}
         <Tabs.Indicator className="absolute top-1/2 left-0 -z-1 h-7 w-(--active-tab-width) translate-x-(--active-tab-left) -translate-y-1/2 rounded-md bg-subtle transition-[translate,width] duration-150" />
       </Tabs.List>
-      <Tabs.Panel value="code" className="min-h-0 flex-1 outline-none">
+      <Tabs.Panel value="code" className="relative min-h-0 flex-1 outline-none">
         {editor}
       </Tabs.Panel>
       {preview && (
@@ -161,7 +161,7 @@ export function FilePanel() {
         // menus are portaled and the editor handles its own Escape, so only close for unhandled presses inside the panel
         if (event.key === "Escape" && !event.defaultPrevented && event.currentTarget.contains(event.target as Node)) close();
       }}
-      className="glass fixed inset-0 z-40 flex flex-col md:relative md:z-auto md:w-[52%] md:max-w-4xl md:min-w-[32rem] md:border-l md:border-line"
+      className="glass fixed inset-0 z-40 flex min-h-0 flex-col overflow-hidden md:relative md:z-auto md:w-[52%] md:max-w-4xl md:min-w-[32rem] md:border-l md:border-line"
     >
       <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-2">
         <Button
@@ -200,7 +200,7 @@ export function FilePanel() {
             <FileTree />
           </div>
         )}
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {openPath ? (
             <FileBody key={openPath} path={openPath} />
           ) : (

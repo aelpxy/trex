@@ -9,7 +9,14 @@ export type FileStatus = "new" | "edited" | null;
 // a file with no text to edit, such as an image, shown from an object url
 export type BinaryFile = { url: string; type: string };
 
+// a server in the sandbox shown in the side panel, at its own origin
+export type OpenPreview = { port: number; path: string; url: string };
+
 type Files = {
+  preview: OpenPreview | null;
+  previewError: string | null;
+  openPreview: (port: number, path?: string) => Promise<void>;
+  closePreview: () => void;
   panelOpen: boolean;
   openPath: string | null;
   paths: string[];
@@ -70,6 +77,8 @@ type FilesProviderProps = {
 // user edits show on top of the agent's version and are saved to the sandbox
 export function FilesProvider({ sessionId, generated, writing, running, children }: FilesProviderProps) {
   const [panelOpen, setPanelOpen] = useState(false);
+  const [preview, setPreview] = useState<OpenPreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [openPath, setOpenPath] = useState<string | null>(null);
   const [listed, setListed] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -177,11 +186,32 @@ export function FilesProvider({ sessionId, generated, writing, running, children
     return () => timers.forEach((timer) => clearTimeout(timer));
   }, []);
 
-  const showPanel = useCallback(() => setPanelOpen(true), []);
+  // the side panel shows either files or a preview
+  const openPreview = useCallback(
+    async (port: number, path = "/") => {
+      if (!sessionId) return;
+      setPreviewError(null);
+      try {
+        const created = await trex.createPreview(sessionId, port);
+        setPreview({ port, path, url: created.url });
+        setPanelOpen(false);
+      } catch (cause) {
+        setPreviewError(`Couldn't open the preview. ${errorText(cause)}`);
+      }
+    },
+    [sessionId],
+  );
+  const closePreview = useCallback(() => setPreview(null), []);
+
+  const showPanel = useCallback(() => {
+    setPreview(null);
+    setPanelOpen(true);
+  }, []);
   const close = useCallback(() => setPanelOpen(false), []);
   const open = useCallback(
     (path: string) => {
       setOpenPath(path);
+      setPreview(null);
       setPanelOpen(true);
       void load(path);
     },
@@ -191,6 +221,7 @@ export function FilesProvider({ sessionId, generated, writing, running, children
     const content = await (await download(path)).text();
     setLoaded((current) => ({ ...current, [path]: content }));
     setOpenPath(path);
+    setPreview(null);
     setPanelOpen(true);
   }, []);
 
@@ -252,6 +283,10 @@ export function FilesProvider({ sessionId, generated, writing, running, children
 
   const value = useMemo(
     () => ({
+      preview,
+      previewError,
+      openPreview,
+      closePreview,
       panelOpen,
       openPath,
       paths,
@@ -272,7 +307,7 @@ export function FilesProvider({ sessionId, generated, writing, running, children
       rename,
       requestRemove: setPendingRemoval,
     }),
-    [panelOpen, openPath, paths, sessionId, loading, error, showPanel, open, openLibrary, refresh, writing, close, read, write, revert, create, rename],
+    [preview, previewError, openPreview, closePreview, panelOpen, openPath, paths, sessionId, loading, error, showPanel, open, openLibrary, refresh, writing, close, read, write, revert, create, rename],
   );
 
   return (

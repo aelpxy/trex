@@ -67,6 +67,11 @@ function reduce(message: AssistantMessage, event: ChatEvent, now: number): Assis
         ? { ...message, parts: parts.map((part) => (part.type === "plan" ? plan : part)) }
         : { ...message, parts: [...parts, plan] };
     }
+    case "preview.opened":
+      // the event and the tool's result both report it, so it shows once
+      return parts.some((part) => part.type === "preview" && part.port === event.port && part.path === event.path)
+        ? { ...message, parts }
+        : { ...message, parts: [...parts, { type: "preview", port: event.port, path: event.path }] };
     case "usage":
       return { ...message, parts, usage: event.usage };
     case "run.completed":

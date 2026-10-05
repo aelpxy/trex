@@ -16,20 +16,26 @@ const SANDBOX_ROOT = "/sandbox/";
 const ASK_USER = "ask_user";
 const UPDATE_PLAN = "update_plan";
 const APPLY_PATCH = "apply_patch";
-const PLAN_LABEL = "Plan";
 const COMPACTING_LABEL = "Summarizing context";
 
 export type ChatData = { session: ApiSession; items: ApiItem[]; access: ApiAccessRequest[]; usage: ApiUsage[] };
 
-function addUsage(total: Usage, entry: { input_tokens: number; cached_input_tokens: number; output_tokens: number; reasoning_tokens: number; credits: number; duration_ms: number }): Usage {
+type UsageEntry = Omit<ApiUsage, "created_at">;
+
+function addUsage(total: Usage, entry: UsageEntry): Usage {
   return {
     inputTokens: total.inputTokens + entry.input_tokens,
     cachedTokens: total.cachedTokens + entry.cached_input_tokens,
+    cacheWriteTokens: total.cacheWriteTokens + entry.cache_write_tokens,
     outputTokens: total.outputTokens + entry.output_tokens,
     reasoningTokens: total.reasoningTokens + entry.reasoning_tokens,
     credits: total.credits + entry.credits,
     responses: total.responses + 1,
     modelMs: total.modelMs + entry.duration_ms,
+    firstTokenMs: total.firstTokenMs + (entry.first_token_ms ?? 0),
+    firstTokenCount: total.firstTokenCount + (entry.first_token_ms == null ? 0 : 1),
+    peakInputTokens: Math.max(total.peakInputTokens, entry.input_tokens),
+    models: total.models.includes(entry.model) ? total.models : [...total.models, entry.model],
   };
 }
 
@@ -120,6 +126,8 @@ function toolView(name: string, args: Record<string, unknown>): { name: ToolName
       return { name: "process", title: "Stop process", input: { detail: text(args.id) } };
     case "get_current_time":
       return { name: "time", input: { detail: text(args.timezone) } };
+    case "show_preview":
+      return { name: "web", title: "Open preview", input: { detail: `localhost:${String(args.port ?? "")}${text(args.path) || "/"}` } };
     default: {
       const main = args.command ?? args.path ?? args.url ?? args.pattern ?? args.id;
       return { name: "shell", input: { command: typeof main === "string" && main ? `${name} ${shortPath(main)}` : name } };
@@ -175,6 +183,9 @@ function resultEvents(id: string, call: ToolCall | undefined, output: string, is
   if (call.name === "bash" && !live) events.push({ type: "tool.output", id, delta: output.replace(/\n?\[exit code -?\d+\]\s*$/, "") });
   // a command that never ran, e.g. because the sandbox didn't start, streamed nothing, so its error is the output
   if (call.name === "bash" && live && isError) events.push({ type: "tool.output", id, delta: output });
+  if (call.name === "show_preview" && !isError && typeof call.args.port === "number") {
+    events.push({ type: "preview.opened", port: call.args.port, path: text(call.args.path) || "/" });
+  }
   const ok = !isError && (!exit || exit[1] === "0");
   events.push({ type: "tool.result", id, ok, summary: exit ? `exit ${exit[1]}` : isError ? "failed" : undefined });
   return events;
@@ -416,14 +427,12 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
           }
           break;
         }
-        case "plan.updated": {
-          const steps = Array.isArray(data.steps) ? (data.steps as { step: string; status: string }[]) : [];
-          const done = steps.filter((step) => step.status === "completed").length;
-          const active = steps.find((step) => step.status === "in_progress")?.step;
-          const label = `${PLAN_LABEL} · ${done} of ${steps.length} done${active ? ` · ${active}` : ""}`;
-          updateLast((message) => setStatus(message, label, true, (part) => part.type === "status" && part.label.startsWith(PLAN_LABEL)));
+        case "plan.updated":
+          emit(planEvent(data.explanation, data.steps));
           break;
-        }
+        case "preview.opened":
+          emit({ type: "preview.opened", port: Number(data.port), path: String(data.path ?? "/") });
+          break;
         case "context.compacting":
           updateLast((message) => setStatus(message, COMPACTING_LABEL, false));
           break;
@@ -432,12 +441,15 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
           break;
         case "usage":
           usage.current = addUsage(usage.current, {
+            model: String(data.model ?? ""),
             input_tokens: Number(data.input_tokens ?? 0),
             cached_input_tokens: Number(data.cached_input_tokens ?? 0),
+            cache_write_tokens: Number(data.cache_write_tokens ?? 0),
             output_tokens: Number(data.output_tokens ?? 0),
             reasoning_tokens: Number(data.reasoning_tokens ?? 0),
             credits: Number(data.credits ?? 0),
             duration_ms: Number(data.duration_ms ?? 0),
+            first_token_ms: typeof data.time_to_first_token_ms === "number" ? data.time_to_first_token_ms : null,
           });
           emit({ type: "usage", usage: usage.current });
           break;

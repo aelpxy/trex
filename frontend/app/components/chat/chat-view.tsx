@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { FilePanel } from "~/components/files/file-panel";
+import { PreviewPanel } from "~/components/files/preview-panel";
 import { FilesButton } from "~/components/files/files-button";
 import { FilesProvider, useFiles } from "~/components/files/files-provider";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
@@ -50,6 +51,29 @@ function OpenWhileWriting({ writing }: { writing: string[] }) {
   return null;
 }
 
+// a preview the agent opens during a run shows right away, like a written artifact
+function OpenLivePreviews({ messages }: { messages: Message[] }) {
+  const { openPreview } = useFiles();
+  const last = messages.at(-1);
+  const live = last?.role === "assistant" && last.state === "running" ? last.parts.flatMap((part) => (part.type === "preview" ? [`${part.port}${part.path}`] : [])) : [];
+  const seen = useRef<Set<string> | null>(null);
+  const key = live.join("\n");
+  useEffect(() => {
+    const opened = key ? key.split("\n") : [];
+    // previews from before the page loaded aren't reopened
+    if (seen.current === null) {
+      seen.current = new Set(opened);
+      return;
+    }
+    const next = opened.find((preview) => !seen.current!.has(preview));
+    if (!next) return;
+    seen.current.add(next);
+    const [, port, path] = next.match(/^(\d+)(.*)$/) ?? [];
+    void openPreview(Number(port), path || "/");
+  }, [key, openPreview]);
+  return null;
+}
+
 type ChatViewProps = { chatId?: string; data?: ChatData; fresh?: FreshChat };
 
 export function ChatView({ chatId, data, fresh }: ChatViewProps) {
@@ -73,7 +97,8 @@ export function ChatView({ chatId, data, fresh }: ChatViewProps) {
   return (
     <FilesProvider sessionId={chatId} generated={files} writing={writing} running={running}>
       <OpenWhileWriting writing={writing} />
-      <div className="flex min-h-0 flex-1">
+      <OpenLivePreviews messages={messages} />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         <DropZone onFiles={(files) => setDropped((current) => ({ files, id: (current?.id ?? 0) + 1 }))}>
           <div ref={scroller} className="flex min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain">
             {messages.length > 0 && <h1 className="sr-only">{title}</h1>}
@@ -116,6 +141,7 @@ export function ChatView({ chatId, data, fresh }: ChatViewProps) {
           </div>
         </DropZone>
         <FilePanel />
+        <PreviewPanel />
       </div>
     </FilesProvider>
   );

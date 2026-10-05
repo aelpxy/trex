@@ -24,23 +24,46 @@ export type QuestionPart = { type: "question"; id: string; question: string; opt
 export type PlanStep = { step: string; status: "pending" | "in_progress" | "completed" };
 export type PlanPart = { type: "plan"; explanation?: string; steps: PlanStep[] };
 
+// a server in the sandbox the agent opened for the user
+export type PreviewPart = { type: "preview"; port: number; path: string };
+
 // `retry` when the run can be continued from where it stopped
 export type ErrorPart = { type: "error"; title: string; detail?: string; retry: boolean };
 
-export type Part = ReasoningPart | TextPart | StatusPart | ToolPart | AccessPart | QuestionPart | PlanPart | ErrorPart;
+export type Part = ReasoningPart | TextPart | StatusPart | ToolPart | AccessPart | QuestionPart | PlanPart | ErrorPart | PreviewPart;
 
 export type Usage = {
   inputTokens: number;
   cachedTokens: number;
+  cacheWriteTokens: number;
   outputTokens: number;
   reasoningTokens: number;
   credits: number;
   responses: number;
   // time spent generating, summed over the model responses
   modelMs: number;
+  // waits for the first token, summed over the responses that reported one
+  firstTokenMs: number;
+  firstTokenCount: number;
+  // the largest single request, which is how full the context got
+  peakInputTokens: number;
+  models: string[];
 };
 
-export const EMPTY_USAGE: Usage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, credits: 0, responses: 0, modelMs: 0 };
+export const EMPTY_USAGE: Usage = {
+  inputTokens: 0,
+  cachedTokens: 0,
+  cacheWriteTokens: 0,
+  outputTokens: 0,
+  reasoningTokens: 0,
+  credits: 0,
+  responses: 0,
+  modelMs: 0,
+  firstTokenMs: 0,
+  firstTokenCount: 0,
+  peakInputTokens: 0,
+  models: [],
+};
 
 export type UserMessage = { id: string; role: "user"; content: string; attachments?: MessageAttachment[] };
 export type AssistantMessage = {
@@ -74,6 +97,7 @@ export type ChatEvent =
   | { type: "question"; id: string; question: string; options: string[] }
   | { type: "question.answered"; id: string; answer: string }
   | { type: "plan.updated"; explanation?: string; steps: PlanStep[] }
+  | { type: "preview.opened"; port: number; path: string }
   | { type: "usage"; usage: Usage }
   | { type: "run.completed" }
   | { type: "run.failed"; title: string; detail?: string; retry: boolean }

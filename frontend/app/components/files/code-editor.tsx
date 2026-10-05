@@ -61,5 +61,5 @@ export default function CodeEditor({ path, value, onChange }: CodeEditorProps) {
     if (current !== value) editor.dispatch({ changes: { from: 0, to: current.length, insert: value }, annotations: external.of(true) });
   }, [value]);
 
-  return <div ref={host} className="h-full min-h-0 overflow-hidden" />;
+  return <div ref={host} className="absolute inset-0 overflow-hidden" />;
 }

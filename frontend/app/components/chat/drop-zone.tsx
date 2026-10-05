@@ -11,7 +11,7 @@ export function DropZone({ onFiles, children }: { onFiles: (files: File[]) => vo
 
   return (
     <div
-      className="relative flex min-w-0 flex-1 flex-col"
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col"
       onDragEnter={(event) => {
         if (!hasFiles(event)) return;
         event.preventDefault();
