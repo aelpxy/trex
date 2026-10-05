@@ -9,7 +9,7 @@ import { trex, type ApiAccessRequest, type ApiItem, type ApiQuestion, type ApiSe
 
 import { applyEvent } from "./events";
 import { sessionSettings, type ChatSettings } from "./models";
-import { EMPTY_USAGE, type AssistantMessage, type ChatEvent, type Message, type Part, type Response, type Usage } from "./types";
+import { EMPTY_USAGE, type AssistantMessage, type ChatEvent, type Message, type Part, type PlanStep, type Response, type ToolName, type ToolPart, type Usage } from "./types";
 
 const TITLE_MAX_LENGTH = 60;
 const SANDBOX_ROOT = "/sandbox/";
@@ -82,9 +82,49 @@ function parseArgs(raw: string): Record<string, unknown> {
 }
 
 // tools other than bash and the file editors show as a command line: the tool and its main argument
-function describe(name: string, args: Record<string, unknown>) {
-  const main = args.command ?? args.path ?? args.url ?? args.pattern ?? args.library_path ?? args.sandbox_path ?? args.id ?? args.timezone;
-  return typeof main === "string" && main ? `${name} ${shortPath(main)}` : name;
+function failedEvent(code: string | undefined, error: string): ChatEvent {
+  if (code === "insufficient_credits") return { type: "run.failed", title: "You're out of credits", detail: "The run stopped after its last step.", retry: false };
+  return { type: "run.failed", title: "The run failed", detail: error || undefined, retry: true };
+}
+
+function planEvent(explanation: unknown, steps: unknown): ChatEvent {
+  const valid = Array.isArray(steps) ? steps.filter((step): step is PlanStep => typeof step?.step === "string" && ["pending", "in_progress", "completed"].includes(step?.status)) : [];
+  return { type: "plan.updated", explanation: typeof explanation === "string" && explanation ? explanation : undefined, steps: valid };
+}
+
+const text = (value: unknown) => (typeof value === "string" ? value : "");
+
+// how the cards label each tool; anything unknown shows as a command with its main argument
+function toolView(name: string, args: Record<string, unknown>): { name: ToolName; title?: string; input: ToolPart["input"] } {
+  switch (name) {
+    case "read_file":
+      return { name: "read_file", input: { path: shortPath(args.path) } };
+    case "glob":
+    case "grep": {
+      const where = text(args.path) ? ` in ${shortPath(args.path) || "/"}` : "";
+      return { name: "search", input: { detail: `${text(args.pattern)}${where}` } };
+    }
+    case "web_fetch":
+      return { name: "web", input: { detail: text(args.url) } };
+    case "library_list":
+      return { name: "library", title: "Browse library", input: { detail: text(args.prefix) } };
+    case "library_load":
+      return { name: "library", title: "Load from library", input: { detail: text(args.library_path) } };
+    case "library_save":
+      return { name: "library", title: "Save to library", input: { detail: text(args.library_path) || shortPath(args.sandbox_path) } };
+    case "view_image":
+      return { name: "image", input: { path: shortPath(args.path) } };
+    case "process_output":
+      return { name: "process", input: { detail: text(args.id) || "all processes" } };
+    case "stop_process":
+      return { name: "process", title: "Stop process", input: { detail: text(args.id) } };
+    case "get_current_time":
+      return { name: "time", input: { detail: text(args.timezone) } };
+    default: {
+      const main = args.command ?? args.path ?? args.url ?? args.pattern ?? args.id;
+      return { name: "shell", input: { command: typeof main === "string" && main ? `${name} ${shortPath(main)}` : name } };
+    }
+  }
 }
 
 function titleFrom(content: string) {
@@ -104,7 +144,8 @@ const newAssistant = (startedAt: number | null = Date.now()): AssistantMessage =
 // update_plan have their own events
 function callEvents(id: string, call: ToolCall): ChatEvent[] {
   const { name, args } = call;
-  if (name === ASK_USER || name === UPDATE_PLAN || name === APPLY_PATCH) return [];
+  if (name === UPDATE_PLAN) return [planEvent(args.explanation, args.plan)];
+  if (name === ASK_USER || name === APPLY_PATCH) return [];
   if (name === "bash") return [{ type: "tool.call", id, name: "shell", input: { command: `${String(args.command ?? "")}${args.background ? " &" : ""}` } }];
   if (name === "write_file") {
     return [
@@ -113,7 +154,7 @@ function callEvents(id: string, call: ToolCall): ChatEvent[] {
     ];
   }
   if (name === "edit_file") return [{ type: "tool.call", id, name: "edit_file", input: { path: shortPath(args.path), before: String(args.old_string ?? ""), after: String(args.new_string ?? "") } }];
-  return [{ type: "tool.call", id, name: "shell", input: { command: describe(name, args) } }];
+  return [{ type: "tool.call", id, ...toolView(name, args) }];
 }
 
 function resultEvents(id: string, call: ToolCall | undefined, output: string, isError: boolean, live: boolean): ChatEvent[] {
@@ -224,7 +265,7 @@ function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: numbe
     const message = questionEvents(session.pending_questions).reduce((current, event) => applyEvent(current, event, 0), assistant());
     messages[messages.length - 1] = message;
   } else if (session.status === "failed" && session.last_error) {
-    apply([{ type: "text.delta", delta: `\n\n**The run failed.** ${session.last_error}` }]);
+    apply([failedEvent(undefined, session.last_error)]);
   }
   const pending = data.access.filter((request) => request.status === "pending");
   if (pending.length) {
@@ -440,8 +481,7 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
           flushQueued();
           break;
         case "run.failed": {
-          const text = data.code === "insufficient_credits" ? "**You're out of credits.** The run stopped after its last step." : `**The run failed.** ${String(data.error ?? "")}`;
-          emit({ type: "text.delta", delta: `\n\n${text}` }, { type: "run.completed" });
+          emit(failedEvent(typeof data.code === "string" ? data.code : undefined, String(data.error ?? "")));
           flushQueued();
           break;
         }
@@ -460,12 +500,30 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
   }, [chatId, fresh, onEvent]);
 
   const fail = useCallback((error: unknown) => {
-    const text =
+    const event: ChatEvent =
       error instanceof ApiError && error.type === "insufficient_credits_error"
-        ? "**You're out of credits.** Add credits to keep chatting."
-        : `**Couldn't send the message.** ${error instanceof Error ? error.message : String(error)}`;
-    updateLast((message) => applyEvent(applyEvent(message, { type: "text.delta", delta: text }), { type: "run.completed" }));
+        ? { type: "run.failed", title: "You're out of credits", detail: "Add credits to keep chatting.", retry: false }
+        : { type: "run.failed", title: "Couldn't send the message", detail: error instanceof Error ? error.message : String(error), retry: false };
+    updateLast((message) => applyEvent(message, event));
   }, [updateLast]);
+
+  // edits and regenerations continue in a new chat, since a chat's history is never rewritten
+  const branch = useCallback(
+    async (message: number, content?: string) => {
+      if (!chatId) return;
+      const session = await trex.branch(chatId, content === undefined ? { message } : { message, content });
+      addChat(session);
+      navigate(`/chat/${session.id}`);
+    },
+    [chatId, addChat, navigate],
+  );
+
+  // continues the failed run in the same reply
+  const retry = useCallback(() => {
+    if (!chatId) return;
+    updateLast((message) => ({ ...message, state: "running", endedAt: undefined, parts: message.parts.filter((part) => part.type !== "error") }));
+    trex.retry(chatId).catch(fail);
+  }, [chatId, updateLast, fail]);
 
   const send = useCallback(
     (content: string, attachments: OutgoingAttachment[] = [], interrupt = false) => {
@@ -549,5 +607,5 @@ export function useChat({ chatId, data, fresh, settings }: UseChatOptions) {
     [chatId, renameChat],
   );
 
-  return { messages, running, queued, send, stop, respond, title, rename };
+  return { messages, running, queued, send, stop, retry, branch, respond, title, rename };
 }

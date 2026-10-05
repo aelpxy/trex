@@ -100,6 +100,8 @@ export const trex = {
   sendMessage: (id: string, content: string, options: { interrupt?: boolean; attachments?: ApiAttachmentInput[] } = {}) =>
     api<{ queued: boolean }>("POST", `/sessions/${id}/messages`, { content, ...options }),
   answer: (id: string, answers: { selected: string[]; text: string | null }[]) => api<unknown>("POST", `/sessions/${id}/answers`, { answers }),
+  branch: (id: string, body: { message: number; content?: string }) => api<ApiSession>("POST", `/sessions/${id}/branch`, body),
+  retry: (id: string) => api<unknown>("POST", `/sessions/${id}/retry`),
   cancel: (id: string) => api<unknown>("POST", `/sessions/${id}/cancel`),
   accessRequests: (id: string) => api<List<ApiAccessRequest>>("GET", `/sessions/${id}/access_requests`).then((list) => list.data),
   decideAccess: (id: string, request: string, approve: boolean) => api<unknown>("POST", `/sessions/${id}/access_requests/${request}/${approve ? "approve" : "reject"}`),

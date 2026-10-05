@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { FilePanel } from "~/components/files/file-panel";
 import { FilesButton } from "~/components/files/files-button";
@@ -8,6 +8,7 @@ import { previewOf } from "~/lib/preview";
 
 import { ChatHeader } from "./chat-header";
 import { Composer } from "./composer";
+import { DropZone } from "./drop-zone";
 import { MessageItem } from "./message-item";
 import { ScrollToBottom } from "./scroll-to-bottom";
 import { Suggestions } from "./suggestions";
@@ -33,7 +34,7 @@ function filesFrom(messages: Message[]) {
 function writingFrom(messages: Message[]) {
   const last = messages.at(-1);
   if (last?.role !== "assistant" || last.state !== "running") return [];
-  return last.parts.flatMap((part) => (part.type === "tool" && part.state === "running" && part.name !== "shell" && part.input.path ? [part.input.path] : []));
+  return last.parts.flatMap((part) => (part.type === "tool" && part.state === "running" && (part.name === "write_file" || part.name === "edit_file") && part.input.path ? [part.input.path] : []));
 }
 
 // like an artifact, a page or document the agent starts writing opens in the panel, once per file
@@ -54,9 +55,10 @@ type ChatViewProps = { chatId?: string; data?: ChatData; fresh?: FreshChat };
 export function ChatView({ chatId, data, fresh }: ChatViewProps) {
   const { requestDelete } = useWorkspace();
   const { settings, update } = useChatSettings(data?.session);
-  const { messages, running, queued, send, stop, respond, title, rename: setTitle } = useChat({ chatId, data, fresh, settings });
+  const { messages, running, queued, send, stop, retry, branch, respond, title, rename: setTitle } = useChat({ chatId, data, fresh, settings });
   const { scroller, atBottom, follow, scrollToBottom } = useFollowScroll(messages);
   const files = useMemo(() => filesFrom(messages), [messages]);
+  const [dropped, setDropped] = useState<{ files: File[]; id: number }>();
   const writingNow = writingFrom(messages);
   const writingKey = writingNow.join("\n");
   const writing = useMemo(() => (writingKey ? writingKey.split("\n") : []), [writingKey]);
@@ -66,39 +68,53 @@ export function ChatView({ chatId, data, fresh }: ChatViewProps) {
     send(content, attachments, interrupt);
   }
 
-  const composer = <Composer streaming={running} settings={settings} queued={queued} onSettingsChange={update} onSend={sendAndFollow} onStop={stop} />;
+  const composer = <Composer dropped={dropped} streaming={running} settings={settings} queued={queued} onSettingsChange={update} onSend={sendAndFollow} onStop={stop} />;
 
   return (
     <FilesProvider sessionId={chatId} generated={files} writing={writing} running={running}>
       <OpenWhileWriting writing={writing} />
       <div className="flex min-h-0 flex-1">
-        <div ref={scroller} className="flex min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain">
-          {messages.length > 0 && <h1 className="sr-only">{title}</h1>}
-          {title && <ChatHeader title={title} onRename={setTitle} onDelete={chatId ? () => requestDelete({ kind: "chat", id: chatId, name: title }) : undefined} actions={<FilesButton />} />}
-          {messages.length === 0 ? (
-            <div className="flex flex-1 flex-col items-center justify-center px-4 pb-[12vh]">
-              <div className="w-full max-w-2xl">
-                <h1 className="mb-6 text-center text-2xl font-medium tracking-tight">{title ? "Continue the conversation" : "What are we building?"}</h1>
-                {composer}
-                {!title && <Suggestions onPick={sendAndFollow} />}
-              </div>
-            </div>
-          ) : (
-            <>
-              <div role="log" aria-label="Conversation" aria-busy={running} className="mx-auto w-full max-w-2xl flex-1 space-y-6 px-4 pt-6 pb-4">
-                {messages.map((message) => (
-                  <MessageItem key={message.id} message={message} onRespond={respond} />
-                ))}
-                  </div>
-              <div className="sticky bottom-0 px-4 pt-2 pb-4">
-                <div className="relative mx-auto w-full max-w-2xl">
-                  <ScrollToBottom visible={!atBottom} onClick={scrollToBottom} />
+        <DropZone onFiles={(files) => setDropped((current) => ({ files, id: (current?.id ?? 0) + 1 }))}>
+          <div ref={scroller} className="flex min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain">
+            {messages.length > 0 && <h1 className="sr-only">{title}</h1>}
+            {title && <ChatHeader title={title} onRename={setTitle} onDelete={chatId ? () => requestDelete({ kind: "chat", id: chatId, name: title }) : undefined} actions={<FilesButton />} />}
+            {messages.length === 0 ? (
+              <div className="flex flex-1 flex-col items-center justify-center px-4 pb-[12vh]">
+                <div className="w-full max-w-2xl">
+                  <h1 className="mb-6 text-center text-2xl font-medium tracking-tight">{title ? "Continue the conversation" : "What are we building?"}</h1>
                   {composer}
+                  {!title && <Suggestions onPick={sendAndFollow} />}
                 </div>
               </div>
-            </>
-          )}
-        </div>
+            ) : (
+              <>
+                <div role="log" aria-label="Conversation" aria-busy={running} className="mx-auto w-full max-w-2xl flex-1 space-y-6 px-4 pt-6 pb-4">
+                  {messages.map((message, index) => {
+                    // branches name a message by its place among the user's messages, as the server counts them
+                    const userIndex = messages.slice(0, index + 1).filter((earlier) => earlier.role === "user").length - 1;
+                    const canBranch = Boolean(chatId) && userIndex >= 0;
+                    return (
+                      <MessageItem
+                        key={message.id}
+                        message={message}
+                        onRespond={respond}
+                        onRetry={index === messages.length - 1 ? retry : undefined}
+                        onEdit={canBranch && message.role === "user" ? (content) => branch(userIndex, content) : undefined}
+                        onRegenerate={canBranch && message.role === "assistant" ? () => branch(userIndex) : undefined}
+                      />
+                    );
+                  })}
+                    </div>
+                <div className="sticky bottom-0 px-4 pt-2 pb-4">
+                  <div className="relative mx-auto w-full max-w-2xl">
+                    <ScrollToBottom visible={!atBottom} onClick={scrollToBottom} />
+                    {composer}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </DropZone>
         <FilePanel />
       </div>
     </FilesProvider>

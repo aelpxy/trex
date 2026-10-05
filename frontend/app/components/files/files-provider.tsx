@@ -13,6 +13,7 @@ type Files = {
   panelOpen: boolean;
   openPath: string | null;
   paths: string[];
+  sessionId?: string;
   // the chat has a sandbox to browse, even before its files are listed
   canBrowse: boolean;
   loading: boolean;
@@ -254,6 +255,7 @@ export function FilesProvider({ sessionId, generated, writing, running, children
       panelOpen,
       openPath,
       paths,
+      sessionId,
       canBrowse: Boolean(sessionId),
       loading,
       error,

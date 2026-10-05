@@ -42,6 +42,8 @@ export function effortFor(model: string, effort: Effort): Effort {
   return levels.includes("medium") ? "medium" : levels[0];
 }
 
+export const supportsFast = (model: string) => API_MODELS.get(model)?.fast === true;
+
 export type ChatSettings = { model: string; effort: Effort; fast: boolean };
 
 export const DEFAULT_CHAT_SETTINGS: ChatSettings = { model: "", effort: "medium", fast: false };

@@ -26,7 +26,8 @@ function reduce(message: AssistantMessage, event: ChatEvent, now: number): Assis
     case "sandbox.creating":
       return { ...message, parts: [...parts, { type: "status", label: "Starting sandbox", done: false }] };
     case "sandbox.ready":
-      return { ...message, parts: parts.map((part) => (part.type === "status" && !part.done ? { ...part, label: "Sandbox ready", done: true } : part)) };
+      // a ready sandbox is the normal case, so its progress line goes away
+      return { ...message, parts: parts.filter((part) => !(part.type === "status" && !part.done)) };
     case "reasoning.delta":
       return last?.type === "reasoning" && !last.endedAt
         ? { ...message, parts: [...parts.slice(0, -1), { ...last, text: last.text + event.delta }] }
@@ -45,8 +46,8 @@ function reduce(message: AssistantMessage, event: ChatEvent, now: number): Assis
       return { ...message, parts: parts.filter((part) => !isTool(event.id)(part)) };
     case "tool.call":
       return parts.some(isTool(event.id))
-        ? { ...message, parts: updatePart(parts, isTool(event.id), (tool) => ({ ...tool, name: event.name, input: event.input, output: "" })) }
-        : { ...message, parts: [...parts, { type: "tool", id: event.id, name: event.name, input: event.input, output: "", state: "running", startedAt: now }] };
+        ? { ...message, parts: updatePart(parts, isTool(event.id), (tool) => ({ ...tool, name: event.name, title: event.title, input: event.input, output: "" })) }
+        : { ...message, parts: [...parts, { type: "tool", id: event.id, name: event.name, title: event.title, input: event.input, output: "", state: "running", startedAt: now }] };
     case "tool.output":
       return { ...message, parts: updatePart(parts, isTool(event.id), (tool) => ({ ...tool, output: tool.output + event.delta })) };
     case "tool.result":
@@ -59,10 +60,19 @@ function reduce(message: AssistantMessage, event: ChatEvent, now: number): Assis
       return { ...message, state: "needs_input", parts: [...parts, { type: "question", id: event.id, question: event.question, options: event.options }] };
     case "question.answered":
       return { ...message, state: "running", parts: updatePart(parts, isQuestion(event.id), (question) => ({ ...question, answer: event.answer })) };
+    case "plan.updated": {
+      // one checklist per reply, kept where it first appeared
+      const plan: Part = { type: "plan", explanation: event.explanation, steps: event.steps };
+      return parts.some((part) => part.type === "plan")
+        ? { ...message, parts: parts.map((part) => (part.type === "plan" ? plan : part)) }
+        : { ...message, parts: [...parts, plan] };
+    }
     case "usage":
       return { ...message, parts, usage: event.usage };
     case "run.completed":
       return { ...message, parts, state: "completed", endedAt: now };
+    case "run.failed":
+      return { ...message, parts: [...parts, { type: "error", title: event.title, detail: event.detail, retry: event.retry }], state: "completed", endedAt: now };
     case "run.cancelled":
       return {
         ...message,

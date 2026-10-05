@@ -1,6 +1,6 @@
 import type { MessageAttachment } from "~/lib/attachments";
 
-export type ToolName = "shell" | "write_file" | "edit_file";
+export type ToolName = "shell" | "write_file" | "edit_file" | "read_file" | "search" | "web" | "library" | "image" | "process" | "time";
 
 export type ReasoningPart = { type: "reasoning"; text: string; startedAt: number; endedAt?: number };
 export type TextPart = { type: "text"; text: string };
@@ -9,7 +9,9 @@ export type ToolPart = {
   type: "tool";
   id: string;
   name: ToolName;
-  input: { command?: string; path?: string; before?: string; after?: string };
+  input: { command?: string; path?: string; before?: string; after?: string; detail?: string };
+  // overrides the tool's usual label, e.g. "Save to library"
+  title?: string;
   output: string;
   state: "running" | "done" | "error";
   summary?: string;
@@ -19,7 +21,13 @@ export type ToolPart = {
 export type AccessPart = { type: "access"; id: string; host: string; binary: string; state: "pending" | "approved" | "rejected" };
 export type QuestionPart = { type: "question"; id: string; question: string; options: string[]; answer?: string };
 
-export type Part = ReasoningPart | TextPart | StatusPart | ToolPart | AccessPart | QuestionPart;
+export type PlanStep = { step: string; status: "pending" | "in_progress" | "completed" };
+export type PlanPart = { type: "plan"; explanation?: string; steps: PlanStep[] };
+
+// `retry` when the run can be continued from where it stopped
+export type ErrorPart = { type: "error"; title: string; detail?: string; retry: boolean };
+
+export type Part = ReasoningPart | TextPart | StatusPart | ToolPart | AccessPart | QuestionPart | PlanPart | ErrorPart;
 
 export type Usage = {
   inputTokens: number;
@@ -58,15 +66,17 @@ export type ChatEvent =
   // a tool call still being written, shown as it arrives and replaced by its tool.call
   | { type: "tool.draft"; id: string; name: ToolName; input: ToolPart["input"]; output: string }
   | { type: "tool.discard"; id: string }
-  | { type: "tool.call"; id: string; name: ToolName; input: ToolPart["input"] }
+  | { type: "tool.call"; id: string; name: ToolName; input: ToolPart["input"]; title?: string }
   | { type: "tool.output"; id: string; delta: string }
   | { type: "tool.result"; id: string; ok: boolean; summary?: string }
   | { type: "access.requested"; id: string; host: string; binary: string }
   | { type: "access.resolved"; id: string; approved: boolean }
   | { type: "question"; id: string; question: string; options: string[] }
   | { type: "question.answered"; id: string; answer: string }
+  | { type: "plan.updated"; explanation?: string; steps: PlanStep[] }
   | { type: "usage"; usage: Usage }
   | { type: "run.completed" }
+  | { type: "run.failed"; title: string; detail?: string; retry: boolean }
   | { type: "run.cancelled" };
 
 export type Response = { kind: "answer"; value: string } | { kind: "access"; approved: boolean };

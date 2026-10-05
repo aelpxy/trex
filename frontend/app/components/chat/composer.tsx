@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from "react";
 import { Button } from "@base-ui/react/button";
 import { LuArrowUp, LuBrain, LuClock, LuFileText, LuPaperclip, LuSquare, LuX } from "react-icons/lu";
 
@@ -6,7 +6,7 @@ import { focusRingOutset, iconButton } from "~/components/ui/styles";
 import { ATTACHMENT_TYPES, kindOf, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_MESSAGE_CHARS, readAsDataUrl } from "~/lib/attachments";
 
 import { FastToggle } from "./fast-toggle";
-import { effortsFor, MODELS, type ChatSettings } from "./models";
+import { effortsFor, MODELS, supportsFast, type ChatSettings } from "./models";
 import { OptionSelect } from "./option-select";
 import type { OutgoingAttachment, QueuedMessage } from "./use-chat";
 
@@ -20,7 +20,11 @@ type ComposerProps = {
   onSettingsChange: (patch: Partial<ChatSettings>) => void;
   onSend: (content: string, attachments: OutgoingAttachment[], interrupt: boolean) => void;
   onStop: () => void;
+  // files dropped on the chat, attached once each
+  dropped?: { files: File[]; id: number };
 };
+
+const isMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
 const roundButton = `inline-flex size-8 cursor-pointer items-center justify-center rounded-full bg-ink text-on-solid transition-colors hover:bg-ink/85 data-disabled:cursor-not-allowed data-disabled:opacity-30 ${focusRingOutset}`;
 
@@ -47,7 +51,7 @@ function AttachmentChip({ attachment, onRemove }: { attachment: OutgoingAttachme
   );
 }
 
-export function Composer({ streaming, settings, queued = [], onSettingsChange, onSend, onStop }: ComposerProps) {
+export function Composer({ streaming, settings, queued = [], dropped, onSettingsChange, onSend, onStop }: ComposerProps) {
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<OutgoingAttachment[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +65,13 @@ export function Composer({ streaming, settings, queued = [], onSettingsChange, o
     element.style.height = "auto";
     element.style.height = `${Math.min(element.scrollHeight, MAX_HEIGHT_PX)}px`;
   }, [value]);
+
+  const handledDrop = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (!dropped || handledDrop.current === dropped.id) return;
+    handledDrop.current = dropped.id;
+    void attach(dropped.files);
+  }, [dropped]);
 
   async function attach(files: File[]) {
     setError(null);
@@ -100,17 +111,10 @@ export function Composer({ streaming, settings, queued = [], onSettingsChange, o
     void attach(files);
   }
 
-  function onDrop(event: DragEvent<HTMLFormElement>) {
-    if (event.dataTransfer.files.length === 0) return;
-    event.preventDefault();
-    void attach([...event.dataTransfer.files]);
-  }
 
   return (
     <form
       onSubmit={submit}
-      onDragOver={(event) => event.dataTransfer.types.includes("Files") && event.preventDefault()}
-      onDrop={onDrop}
       className="glass rounded-2xl border border-line p-2 shadow-sm transition-colors focus-within:border-muted/50"
     >
       {queued.length > 0 && (
@@ -143,6 +147,11 @@ export function Composer({ streaming, settings, queued = [], onSettingsChange, o
         placeholder={streaming ? "Add to the task" : "Ask anything"}
         className="block max-h-50 w-full resize-none bg-transparent px-2 py-1.5 text-sm leading-6 text-ink outline-none placeholder:text-muted"
       />
+      {streaming && canSend && !error && (
+        <p className="px-2 pb-1 text-[11px] text-muted">
+          <kbd className="font-sans">Enter</kbd> adds it after the current step · <kbd className="font-sans">{isMac() ? "⌘" : "Ctrl"}+Enter</kbd> sends it now
+        </p>
+      )}
       {error && (
         <p role="alert" className="px-2 pb-1 text-xs text-danger">
           {error}
@@ -166,7 +175,7 @@ export function Composer({ streaming, settings, queued = [], onSettingsChange, o
           </Button>
           <OptionSelect label="Model" options={MODELS} value={settings.model} onChange={(model) => onSettingsChange({ model })} />
           <OptionSelect label="Thinking effort" options={effortsFor(settings.model)} value={settings.effort} onChange={(effort) => onSettingsChange({ effort })} icon={<LuBrain size={13} className="shrink-0" />} />
-          <FastToggle pressed={settings.fast} onChange={(fast) => onSettingsChange({ fast })} />
+          {supportsFast(settings.model) && <FastToggle pressed={settings.fast} onChange={(fast) => onSettingsChange({ fast })} />}
         </div>
         {streaming && canSend && (
           <Button
