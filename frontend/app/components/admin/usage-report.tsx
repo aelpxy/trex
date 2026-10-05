@@ -2,12 +2,11 @@ import { useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 
 import { columnsFor, DataTable } from "~/components/ui/data-table";
-import { focusRing } from "~/components/ui/styles";
+import { tabLink } from "~/components/ui/tab-nav";
 import { formatUsd } from "~/lib/credits";
+import { count, tokens } from "~/lib/format";
 import { queries } from "~/lib/queries";
 import type { ApiUsageReport } from "~/lib/trex";
-
-import { count, tokens } from "./format";
 
 export const USAGE_RANGES = [7, 30, 90];
 export const DEFAULT_USAGE_DAYS = 30;
@@ -91,7 +90,7 @@ export function UsageReport({ days }: { days: number }) {
             replace
             preventScrollReset
             aria-current={days === range ? "page" : undefined}
-            className={`h-7 rounded-md px-2.5 text-xs leading-7 font-medium text-muted hover:text-ink aria-[current=page]:bg-subtle aria-[current=page]:text-ink ${focusRing}`}
+            className={tabLink}
           >
             {range} days
           </Link>

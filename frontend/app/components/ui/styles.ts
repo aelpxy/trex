@@ -1,6 +1,12 @@
 export const focusRing = "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
 export const focusRingOutset = "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 
+const badgeBase = "rounded px-1.5 py-0.5 text-[10px] font-medium";
+export const badge = `${badgeBase} bg-subtle text-muted`;
+export const dangerBadge = `${badgeBase} bg-danger/10 text-danger`;
+
+export const fieldLabel = "mb-1.5 block text-xs font-medium text-muted";
+
 export const iconButton = `inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted transition-colors hover:bg-subtle hover:text-ink ${focusRing}`;
 
 const popIn = "origin-(--transform-origin) transition-[transform,opacity] data-ending-style:scale-95 data-ending-style:opacity-0 data-starting-style:scale-95 data-starting-style:opacity-0";

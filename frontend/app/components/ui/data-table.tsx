@@ -58,11 +58,13 @@ type DataTableProps<T extends RowData> = {
   rowLabel?: (row: T) => string;
   // extra attributes per row, e.g. to drag rows or drop onto them; the row's id is in `data-row-id`
   rowProps?: (row: T) => HTMLAttributes<HTMLTableRowElement>;
+  // replaces the default space above the table, e.g. inside a section that already spaces its content
+  className?: string;
 };
 
 const SORT_ICON = { asc: LuArrowUp, desc: LuArrowDown };
 
-export function DataTable<T extends RowData>({ label, data, columns, rowId, onRowClick, empty = "Nothing here yet.", sorting, onSortingChange, selection, onSelectionChange, canSelect, rowLabel, rowProps }: DataTableProps<T>) {
+export function DataTable<T extends RowData>({ label, data, columns, rowId, onRowClick, empty = "Nothing here yet.", sorting, onSortingChange, selection, onSelectionChange, canSelect, rowLabel, rowProps, className = "mt-4" }: DataTableProps<T>) {
   const controlled = sorting !== undefined;
   const selectable = selection !== undefined;
   const table = useTable({
@@ -90,7 +92,7 @@ export function DataTable<T extends RowData>({ label, data, columns, rowId, onRo
   }
 
   return (
-    <div className="ui-card mt-4 overflow-x-auto">
+    <div className={`ui-card overflow-x-auto ${className}`}>
       <table aria-label={label} className="w-full text-left text-sm">
         <thead className="border-b border-line text-xs text-muted">
           {table.getHeaderGroups().map((group) => (
@@ -170,7 +172,7 @@ export function DataTable<T extends RowData>({ label, data, columns, rowId, onRo
           })}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={columns.length + (selectable ? 1 : 0)} className="px-4 py-6 text-center text-sm text-muted">
+              <td colSpan={columns.length + (selectable ? 1 : 0)} className="px-4 py-10 text-center text-sm text-muted">
                 {empty}
               </td>
             </tr>

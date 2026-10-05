@@ -2,8 +2,9 @@ import { Menu } from "@base-ui/react/menu";
 import { LuDownload, LuEllipsis, LuExternalLink, LuFolderInput, LuFolderOpen, LuPencil, LuTrash2 } from "react-icons/lu";
 
 import { dangerMenuItem, iconButton, menuItem, menuSeparator, popup } from "~/components/ui/styles";
+import { plural } from "~/lib/format";
 
-import { plural, viewable, type Entry } from "./entries";
+import { viewable, type Entry } from "./entries";
 
 export type EntryActions = {
   onOpenFolder: (entry: Entry) => void;
@@ -21,7 +22,7 @@ export function EntryMenuItems({ targets, onOpenFolder, onShow, onRename, onMove
       <>
         <Menu.Item onClick={() => onMove(targets)} className={menuItem}>
           <LuFolderInput size={14} />
-          Move {plural(targets.length, "item")}…
+          Move {plural(targets.length, "item")} to…
         </Menu.Item>
         <Menu.Separator className={menuSeparator} />
         <Menu.Item onClick={() => onDelete(targets)} className={dangerMenuItem}>

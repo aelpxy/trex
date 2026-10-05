@@ -23,7 +23,7 @@ export function Checkbox({ checked, onCheckedChange, children, label, indetermin
         onCheckedChange={onCheckedChange}
         disabled={disabled}
         aria-label={label}
-        className={`flex size-4 shrink-0 items-center justify-center rounded border border-line bg-surface transition-colors data-checked:border-ink data-checked:bg-ink data-indeterminate:border-ink data-indeterminate:bg-ink ${focusRingOutset}`}
+        className={`flex size-4 shrink-0 items-center justify-center rounded border pointer-coarse:size-5 border-line bg-surface transition-colors data-checked:border-ink data-checked:bg-ink data-indeterminate:border-ink data-indeterminate:bg-ink ${focusRingOutset}`}
       >
         <BaseCheckbox.Indicator className="text-on-solid">{indeterminate ? <LuMinus size={12} strokeWidth={3} /> : <LuCheck size={12} strokeWidth={3} />}</BaseCheckbox.Indicator>
       </BaseCheckbox.Root>

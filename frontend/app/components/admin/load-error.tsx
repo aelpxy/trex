@@ -1,4 +1,4 @@
-import { errorText } from "./format";
+import { errorText } from "~/lib/format";
 
 // a list or panel that couldn't load; action outcomes go in toasts instead
 export function LoadError({ error }: { error: unknown }) {

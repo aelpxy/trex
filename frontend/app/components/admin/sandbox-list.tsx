@@ -8,24 +8,25 @@ import { Button } from "~/components/ui/button";
 import { columnsFor, DataTable } from "~/components/ui/data-table";
 import { DeleteConfirmDialog, type DeleteTarget } from "~/components/ui/delete-confirm-dialog";
 import { EmptyState } from "~/components/ui/empty-state";
-import { dangerMenuItem, focusRing, iconButton, menuItem, menuSeparator, popup } from "~/components/ui/styles";
+import { badge, dangerBadge, dangerMenuItem, iconButton, menuItem, menuSeparator, popup } from "~/components/ui/styles";
+import { tabLink } from "~/components/ui/tab-nav";
+import { ago, plural } from "~/lib/format";
 import { queries } from "~/lib/queries";
 import { toastOutcome, trackToast } from "~/lib/toasts";
 import type { ApiAdminSandbox, ApiSandboxState } from "~/lib/trex";
+import { UNTITLED } from "~/lib/workspace";
 
-import { ago } from "./format";
 import { useDeleteSandbox, useStopSandbox } from "./mutations";
 
-const STATE: Record<ApiSandboxState, { label: string; tone: string }> = {
-  running: { label: "Running", tone: "bg-subtle text-ink" },
-  starting: { label: "Starting", tone: "bg-subtle text-muted" },
-  stopping: { label: "Stopping", tone: "bg-subtle text-muted" },
-  stopped: { label: "Stopped", tone: "bg-subtle text-muted" },
-  deleting: { label: "Deleting", tone: "bg-subtle text-muted" },
-  error: { label: "Error", tone: "bg-danger/10 text-danger" },
-  unknown: { label: "Unknown", tone: "bg-subtle text-muted" },
+const STATE: Record<ApiSandboxState, string> = {
+  running: "Running",
+  starting: "Starting",
+  stopping: "Stopping",
+  stopped: "Stopped",
+  deleting: "Deleting",
+  error: "Error",
+  unknown: "Unknown",
 };
-const badge = "rounded px-1.5 py-0.5 text-[10px] font-medium";
 
 // which sandboxes the list shows, kept in the url
 const FILTERS = [
@@ -37,7 +38,7 @@ type Filter = (typeof FILTERS)[number]["id"];
 
 const keyOf = (sandbox: ApiAdminSandbox) => `${sandbox.workspace}/${sandbox.name}`;
 const matches = (sandbox: ApiAdminSandbox, filter: Filter) => (filter === "leftovers" ? sandbox.chat === null : filter === "errors" ? sandbox.state === "error" : true);
-const plural = (count: number) => (count === 1 ? "1 sandbox" : `${count} sandboxes`);
+const sandboxCount = (count: number) => plural(count, "sandbox", "sandboxes");
 
 function SandboxMenu({ sandbox, onDelete }: { sandbox: ApiAdminSandbox; onDelete: () => void }) {
   const stop = useStopSandbox();
@@ -56,7 +57,7 @@ function SandboxMenu({ sandbox, onDelete }: { sandbox: ApiAdminSandbox; onDelete
               onClick={() => void toastOutcome(stop.mutateAsync({ workspace: sandbox.workspace, name: sandbox.name }), { success: `Stopped ${sandbox.name}`, error: `Couldn't stop ${sandbox.name}` })}
               className={`${menuItem} data-disabled:cursor-not-allowed data-disabled:opacity-50`}
             >
-              <LuSquare size={13} />
+              <LuSquare size={14} />
               Stop
             </Menu.Item>
             <Menu.Separator className={menuSeparator} />
@@ -93,12 +94,12 @@ export function SandboxList() {
     const work = (async () => {
       for (const sandbox of targets) await remove.mutateAsync({ workspace: sandbox.workspace, name: sandbox.name });
     })();
-    const what = targets.length === 1 ? targets[0].name : plural(targets.length);
+    const what = targets.length === 1 ? targets[0].name : sandboxCount(targets.length);
     void trackToast(work, { loading: `Deleting ${what}…`, success: `Deleted ${what}`, error: `Couldn't delete ${what}` }).catch(() => {});
   }
 
   const deleteTarget = (targets: ApiAdminSandbox[]): DeleteTarget =>
-    targets.length === 1 ? { kind: "sandbox", id: keyOf(targets[0]), name: targets[0].name } : { kind: "sandboxes", id: "", name: plural(targets.length) };
+    targets.length === 1 ? { kind: "sandbox", id: keyOf(targets[0]), name: targets[0].name } : { kind: "sandboxes", id: "", name: sandboxCount(targets.length) };
 
   const columns = [
     column.accessor("name", {
@@ -116,8 +117,8 @@ export function SandboxList() {
       cell: ({ row }) =>
         row.original.chat ? (
           <span className="block min-w-0 truncate text-xs">
-            {row.original.chat.title ?? "Untitled chat"}
-            {row.original.chat.running && <span className={`ml-2 ${badge} bg-subtle text-muted`}>Working</span>}
+            {row.original.chat.title ?? UNTITLED}
+            {row.original.chat.running && <span className={`ml-2 ${badge}`}>Working</span>}
           </span>
         ) : (
           <span className="text-xs text-muted" title="No chat uses it any more, so it's safe to delete">
@@ -128,7 +129,7 @@ export function SandboxList() {
     }),
     column.accessor("state", {
       header: "State",
-      cell: (info) => <span className={`${badge} ${STATE[info.getValue()].tone}`}>{STATE[info.getValue()].label}</span>,
+      cell: (info) => <span className={info.getValue() === "error" ? dangerBadge : badge}>{STATE[info.getValue()]}</span>,
     }),
     column.accessor((sandbox) => sandbox.chat?.active_at ?? 0, {
       id: "active",
@@ -150,7 +151,7 @@ export function SandboxList() {
   return (
     <div>
       <p className="text-sm text-muted">
-        {plural(sandboxes.length)} on the gateway, {running} running. {leftovers.length > 0 ? `${plural(leftovers.length)} no chat uses any more.` : "Every one belongs to a chat."}
+        {sandboxCount(sandboxes.length)} on the gateway, {running} running. {leftovers.length > 0 ? `${sandboxCount(leftovers.length)} no chat uses any more.` : "Every one belongs to a chat."}
       </p>
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <nav aria-label="Show" className="flex items-center gap-1">
@@ -161,7 +162,7 @@ export function SandboxList() {
               replace
               preventScrollReset
               aria-current={filter === option.id ? "page" : undefined}
-              className={`h-7 rounded-md px-2.5 text-xs leading-7 font-medium text-muted tabular-nums hover:text-ink aria-[current=page]:bg-subtle aria-[current=page]:text-ink ${focusRing}`}
+              className={`${tabLink} tabular-nums`}
             >
               {option.label} {counts[option.id]}
             </Link>
@@ -169,7 +170,7 @@ export function SandboxList() {
         </nav>
         <span className="flex-1" />
         {leftovers.length > 0 && (
-          <Button variant="subtleDanger" onClick={() => setDeleting(leftovers)} className="h-8 px-3 text-xs">
+          <Button variant="subtleDanger" onClick={() => setDeleting(leftovers)} size="sm">
             <LuTrash2 size={14} />
             Delete {leftovers.length === 1 ? "1 leftover" : `${leftovers.length} leftovers`}
           </Button>

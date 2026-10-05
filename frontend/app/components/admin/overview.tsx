@@ -1,11 +1,13 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 
 import { columnsFor, DataTable } from "~/components/ui/data-table";
+import { Stat } from "~/components/ui/stat";
 import { formatUsd } from "~/lib/credits";
+import { count, tokens } from "~/lib/format";
 import { queries } from "~/lib/queries";
 import type { ApiOverview } from "~/lib/trex";
 
-import { count, tokens } from "./format";
+const card = "ui-card px-5 py-4";
 
 const column = columnsFor<ApiOverview["top_models"][number]>();
 const COLUMNS = [
@@ -14,27 +16,18 @@ const COLUMNS = [
   column.accessor("credits", { header: "Spend", cell: (info) => formatUsd(info.getValue()), meta: { align: "right" } }),
 ];
 
-function Stat({ label, value, note }: { label: string; value: string; note?: string }) {
-  return (
-    <div className="ui-card px-4 py-3.5">
-      <p className="text-[11px] text-muted">{label}</p>
-      <p className="mt-1 text-xl font-medium tracking-tight tabular-nums">{value}</p>
-      {note && <p className="mt-0.5 text-[11px] text-muted">{note}</p>}
-    </div>
-  );
-}
-
 export function Overview() {
   const { data: overview } = useSuspenseQuery(queries.admin.overview());
   return (
     <div className="space-y-8">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <Stat label="Users" value={count(overview.users)} note={`${count(overview.admins)} ${overview.admins === 1 ? "admin" : "admins"}`} />
-        <Stat label="Workspaces" value={count(overview.workspaces)} />
-        <Stat label="Chats" value={count(overview.chats)} note={`${count(overview.running)} running now`} />
-        <Stat label="Spend today" value={formatUsd(overview.spend_today)} note={`${tokens(overview.tokens_today)} tokens`} />
-        <Stat label="Spend, last 30 days" value={formatUsd(overview.spend_month)} note={`${tokens(overview.tokens_month)} tokens`} />
-      </div>
+      <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <Stat size="lg" className={card} label="Users" value={count(overview.users)} note={`${count(overview.admins)} ${overview.admins === 1 ? "admin" : "admins"}`} />
+        <Stat size="lg" className={card} label="Workspaces" value={count(overview.workspaces)} />
+        <Stat size="lg" className={card} label="Chats" value={count(overview.chats)} />
+        <Stat size="lg" className={card} label="Running now" value={count(overview.running)} note="Agents working at this moment" />
+        <Stat size="lg" className={card} label="Spend today" value={formatUsd(overview.spend_today)} note={`${tokens(overview.tokens_today)} tokens`} />
+        <Stat size="lg" className={card} label="Spend, last 30 days" value={formatUsd(overview.spend_month)} note={`${tokens(overview.tokens_month)} tokens`} />
+      </dl>
       <section>
         <h2 className="text-sm font-medium">Top models, last 30 days</h2>
         <DataTable label="Top models" data={overview.top_models} columns={COLUMNS} rowId={(row) => row.model} empty="No usage yet." />

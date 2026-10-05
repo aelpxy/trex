@@ -1,12 +1,13 @@
-import { date } from "~/components/admin/format";
 import { columnsFor } from "~/components/ui/data-table";
+import { date, plural } from "~/lib/format";
 
-import { entryIcon, formatSize, plural, type Entry } from "./entries";
+import { entryIcon, formatSize, type Entry } from "./entries";
 import { EntryRowMenu, type EntryActions } from "./entry-menu";
 
 const column = columnsFor<Entry>();
 
-export const entryColumns = (actions: EntryActions) => [
+// name, size and modified, shared by the file manager and the admin library
+export const fileColumns = [
   column.accessor("name", {
     header: "Name",
     cell: ({ row }) => {
@@ -26,6 +27,10 @@ export const entryColumns = (actions: EntryActions) => [
   }),
   column.accessor("size", { header: "Size", cell: (info) => <span className="text-xs text-muted">{formatSize(info.getValue())}</span>, meta: { align: "right", className: "hidden sm:table-cell" } }),
   column.accessor("modified", { header: "Modified", cell: (info) => <span className="text-xs text-muted">{date(info.getValue())}</span>, meta: { align: "right", className: "hidden md:table-cell" } }),
+];
+
+export const entryColumns = (actions: EntryActions) => [
+  ...fileColumns,
   column.display({
     id: "actions",
     header: () => <span className="sr-only">Actions</span>,

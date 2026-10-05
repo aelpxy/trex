@@ -3,12 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
 import { Button } from "~/components/ui/button";
+import { FilterInput } from "~/components/ui/filter-input";
 import { SelectField } from "~/components/ui/select-field";
 import { queries } from "~/lib/queries";
+import { matches, useUrlFilter } from "~/lib/use-url-filter";
 
 import { LoadError } from "./load-error";
-import { FilterInput } from "./filter-input";
-import { matches, useUrlFilter } from "./use-url-filter";
 
 const LEVELS = ["error", "warn", "info", "debug"] as const;
 type Level = (typeof LEVELS)[number];
@@ -50,7 +50,7 @@ export function LogTail() {
         <div className="min-w-0 flex-1">
           <FilterInput value={filter} onChange={setFilter} label="Search logs" />
         </div>
-        <Button variant="quiet" onClick={() => setPaused((current) => !current)} className="h-10 px-3 text-xs">
+        <Button variant="quiet" size="lg" onClick={() => setPaused((current) => !current)}>
           {paused ? "Resume" : "Pause"}
         </Button>
       </div>

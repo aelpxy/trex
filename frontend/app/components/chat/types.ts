@@ -77,7 +77,9 @@ export type AssistantMessage = {
   // what the model is writing before its tool call arrives, such as a long file
   writing?: string;
 };
-export type Message = UserMessage | AssistantMessage;
+// a compaction the user asked for, shown between turns rather than inside a reply
+export type CompactionMessage = { id: string; role: "compaction"; state: "running" | "done" | "stopped" | "failed"; summary?: string; error?: string };
+export type Message = UserMessage | AssistantMessage | CompactionMessage;
 
 // mirrors the trex SSE event names so the live stream can feed the same reducer
 export type ChatEvent =

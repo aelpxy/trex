@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Input } from "@base-ui/react/input";
 
-import { focusRing } from "~/components/ui/styles";
+import { focusRing } from "./styles";
 
 const SETTLE_MS = 250;
 

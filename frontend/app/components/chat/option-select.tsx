@@ -29,7 +29,7 @@ export function OptionSelect<T extends string>({ label, options, value, onChange
       </Select.Trigger>
       <Select.Portal>
         <Select.Positioner side="top" align="start" sideOffset={6} alignItemWithTrigger={false} className="z-50 outline-none select-none">
-          <Select.Popup className="glass w-64 origin-(--transform-origin) rounded-lg p-1 ${popup}">
+          <Select.Popup className={`w-64 rounded-lg p-1 ${popup}`}>
             <Select.List className="max-h-(--available-height) overflow-y-auto">
               {options.map((option) => (
                 <Select.Item

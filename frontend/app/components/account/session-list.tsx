@@ -2,17 +2,13 @@ import { LuMonitor, LuSmartphone, LuTablet } from "react-icons/lu";
 import { UAParser } from "ua-parser-js";
 
 import { Button } from "~/components/ui/button";
+import { ago, date } from "~/lib/format";
 import type { ApiSignInSession } from "~/lib/trex";
 
-const ago = (seconds: number) => {
-  const minutes = Math.round((Date.now() / 1000 - seconds) / 60);
-  if (minutes < 2) return "Active now";
-  if (minutes < 60) return `Active ${minutes}m ago`;
-  if (minutes < 60 * 24) return `Active ${Math.round(minutes / 60)}h ago`;
-  return `Active ${Math.round(minutes / 60 / 24)}d ago`;
+const active = (seconds: number) => {
+  const when = ago(seconds);
+  return when === "Just now" ? "Active now" : `Active ${when}`;
 };
-
-const date = (seconds: number) => new Date(seconds * 1000).toLocaleDateString(undefined, { dateStyle: "medium" });
 
 // "Chrome on Windows" and the matching icon, from the stored user agent
 function describe(userAgent: string | null) {
@@ -46,7 +42,7 @@ export function SessionList({ sessions, onEnd, ending = null }: SessionListProps
                 {session.current && <span className="ml-2 rounded bg-subtle px-1.5 py-0.5 text-[10px] font-medium text-muted">This device</span>}
               </p>
               <p className="truncate text-xs text-muted">
-                {session.current ? "Active now" : ago(session.last_used_at)}
+                {session.current ? "Active now" : active(session.last_used_at)}
                 {ip && ` · ${ip}`}
                 {` · Signed in ${date(session.created_at)}`}
               </p>

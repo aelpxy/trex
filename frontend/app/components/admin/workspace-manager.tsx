@@ -6,7 +6,7 @@ import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
 import { SelectField } from "~/components/ui/select-field";
 import { DrawerSection } from "~/components/ui/side-drawer";
-import { focusRing } from "~/components/ui/styles";
+import { fieldLabel, focusRing } from "~/components/ui/styles";
 import { dollarsToCredits, formatUsd } from "~/lib/credits";
 import { queries } from "~/lib/queries";
 import { toastOutcome } from "~/lib/toasts";
@@ -14,7 +14,6 @@ import type { ApiAdminWorkspace } from "~/lib/trex";
 
 import { useAdjustFunds, useSetModels, useSetPlan } from "./mutations";
 
-const label = "mb-1.5 block text-[11px] font-medium text-muted";
 const input = `ui-input h-10 ${focusRing}`;
 
 function FundsForm({ workspace }: { workspace: ApiAdminWorkspace }) {
@@ -40,14 +39,14 @@ function FundsForm({ workspace }: { workspace: ApiAdminWorkspace }) {
       <form onSubmit={submit} className="space-y-3">
         <div className="flex gap-2">
           <Field.Root className="w-32 shrink-0">
-            <Field.Label className={label}>Amount</Field.Label>
+            <Field.Label className={fieldLabel}>Amount</Field.Label>
             <div className="relative">
               <span className="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-sm text-muted">$</span>
               <Field.Control type="number" step="0.01" value={dollars} onValueChange={setDollars} placeholder="10.00" className={`${input} pl-7`} />
             </div>
           </Field.Root>
           <Field.Root className="min-w-0 flex-1">
-            <Field.Label className={label}>Reason</Field.Label>
+            <Field.Label className={fieldLabel}>Reason</Field.Label>
             <Field.Control value={reason} onValueChange={setReason} placeholder="Admin adjustment" className={input} />
           </Field.Root>
         </div>
@@ -117,14 +116,13 @@ function PlanForm({ workspace }: { workspace: ApiAdminWorkspace }) {
           event.preventDefault();
           void toastOutcome(save.mutateAsync({ workspace: workspace.id, plan }), { success: "Plan changed", error: "Couldn't change the plan" });
         }}
-        className="flex gap-2"
       >
-        <div className="min-w-0 flex-1">
-          <SelectField label="Plan" options={options} value={plan} onChange={setPlan} />
+        <SelectField label="Plan" options={options} value={plan} onChange={setPlan} />
+        <div className="mt-3 flex justify-end">
+          <Button type="submit" disabled={plan === workspace.plan || save.isPending}>
+            Set plan
+          </Button>
         </div>
-        <Button type="submit" disabled={plan === workspace.plan || save.isPending}>
-          Set plan
-        </Button>
       </form>
     </DrawerSection>
   );

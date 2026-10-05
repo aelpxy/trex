@@ -105,8 +105,21 @@ export function ChatView({ chatId, data, fresh, project: newIn, children }: Chat
   }
 
   const meter = chatId && contextWindow ? <ContextMeter used={contextTokens} window={contextWindow} onCompact={running ? undefined : compact} /> : null;
+  const latest = messages.at(-1);
+  const summarizing = latest?.role === "compaction" && latest.state === "running";
   const composer = (
-    <Composer dropped={dropped} streaming={running} settings={settings} queued={queued} onSettingsChange={update} onSend={sendAndFollow} onStop={stop} commands={commands} status={meter} />
+    <Composer
+      dropped={dropped}
+      streaming={running}
+      settings={settings}
+      queued={queued}
+      onSettingsChange={update}
+      onSend={sendAndFollow}
+      onStop={stop}
+      commands={commands}
+      status={meter}
+      placeholder={summarizing ? "Summarizing… a message now is answered right after" : undefined}
+    />
   );
 
   return (

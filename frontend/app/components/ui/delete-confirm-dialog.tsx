@@ -12,6 +12,9 @@ type DeleteConfirmDialogProps = {
   onCancel: () => void;
 };
 
+// these name a count, like "3 users", rather than one thing, so they aren't quoted
+const PLURAL_KINDS = new Set<DeleteTarget["kind"]>(["users", "items", "sandboxes"]);
+
 export function DeleteConfirmDialog({ target, consequence = "", onConfirm, onCancel }: DeleteConfirmDialogProps) {
   return (
     <AlertDialog.Root open={target !== null} onOpenChange={(open) => !open && onCancel()}>
@@ -21,7 +24,8 @@ export function DeleteConfirmDialog({ target, consequence = "", onConfirm, onCan
           <AlertDialog.Popup className={`${dialogPopup} max-w-sm`}>
             <AlertDialog.Title className={dialogTitle}>Delete {target?.kind}?</AlertDialog.Title>
             <AlertDialog.Description className={dialogDescription}>
-              “{target?.name}”{consequence} will be permanently deleted.
+              {target && PLURAL_KINDS.has(target.kind) ? target.name : `“${target?.name}”`}
+              {consequence} will be permanently deleted.
             </AlertDialog.Description>
             <div className="mt-6 flex justify-end gap-2">
               <AlertDialog.Close render={<Button variant="quiet" />}>Cancel</AlertDialog.Close>

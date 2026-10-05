@@ -1,7 +1,7 @@
 import { WorkspaceLibrary } from "~/components/admin/workspace-library";
-import { listParams } from "~/components/admin/use-url-filter";
 import { queries } from "~/lib/queries";
 import { queryClient } from "~/lib/query-client";
+import { listParams } from "~/lib/use-url-filter";
 
 import type { Route } from "./+types/library";
 

@@ -3,20 +3,20 @@ import { Link, useNavigate, useSearchParams } from "react-router";
 import { LuArrowLeft, LuDownload, LuExternalLink, LuFolder, LuFolderOpen } from "react-icons/lu";
 
 import { Breadcrumbs } from "~/components/library/breadcrumbs";
-import { entriesOf, entryIcon, formatSize, openFile, viewable, type Entry } from "~/components/library/entries";
+import { entriesOf, formatSize, openFile, viewable, type Entry } from "~/components/library/entries";
+import { fileColumns } from "~/components/library/entry-columns";
 import { Button } from "~/components/ui/button";
 import { columnsFor, DataTable } from "~/components/ui/data-table";
 import { EmptyState } from "~/components/ui/empty-state";
+import { FilterInput } from "~/components/ui/filter-input";
 import { Pagination, usePage } from "~/components/ui/pagination";
 import { focusRing, iconButton } from "~/components/ui/styles";
 import { adminLibraryFile } from "~/lib/api";
+import { date, plural } from "~/lib/format";
 import { ADMIN_PAGE_SIZE, queries } from "~/lib/queries";
 import { errorMessage, toasts } from "~/lib/toasts";
 import type { ApiAdminWorkspace } from "~/lib/trex";
-
-import { FilterInput } from "./filter-input";
-import { date } from "./format";
-import { useUrlFilter, useUrlSort } from "./use-url-filter";
+import { useUrlFilter, useUrlSort } from "~/lib/use-url-filter";
 
 const workspaceColumn = columnsFor<ApiAdminWorkspace>();
 const WORKSPACE_COLUMNS = [
@@ -94,25 +94,7 @@ function Browser({ id }: { id: string }) {
 
   const column = columnsFor<Entry>();
   const columns = [
-    column.accessor("name", {
-      header: "Name",
-      cell: ({ row }) => {
-        const Icon = entryIcon(row.original);
-        return (
-          <span className="flex min-w-0 items-center gap-3">
-            <Icon size={16} className="shrink-0 text-muted" />
-            <span className="min-w-0">
-              <span className={`block truncate ${row.original.kind === "folder" ? "font-medium" : ""}`} title={row.original.path}>
-                {row.original.name}
-              </span>
-              {row.original.kind === "folder" && <span className="block text-xs text-muted">{row.original.files === 1 ? "1 file" : `${row.original.files.toLocaleString()} files`}</span>}
-            </span>
-          </span>
-        );
-      },
-    }),
-    column.accessor("size", { header: "Size", cell: (info) => <span className="text-xs text-muted">{formatSize(info.getValue())}</span>, meta: { align: "right", className: "hidden sm:table-cell" } }),
-    column.accessor("modified", { header: "Modified", cell: (info) => <span className="text-xs text-muted">{date(info.getValue())}</span>, meta: { align: "right", className: "hidden md:table-cell" } }),
+    ...fileColumns,
     column.display({
       id: "actions",
       header: () => <span className="sr-only">Actions</span>,
@@ -146,7 +128,7 @@ function Browser({ id }: { id: string }) {
           <p className="truncate text-xs text-muted">{workspace?.owner_email ?? id}</p>
         </div>
         <p className="shrink-0 text-right text-xs text-muted tabular-nums">
-          {files.length === 1 ? "1 file" : `${files.length.toLocaleString()} files`}
+          {plural(files.length, "file")}
           <span className="block">{formatSize(total)}</span>
         </p>
       </div>
@@ -157,7 +139,7 @@ function Browser({ id }: { id: string }) {
           <div className="mt-4">
             <FilterInput value={filter} onChange={setFilter} label="Search every file in this library" />
           </div>
-          <div className="mt-3 flex min-h-6 items-center">{filter ? <p className="text-xs text-muted">{entries.length === 1 ? "1 match" : `${entries.length.toLocaleString()} matches`} across all folders</p> : <Breadcrumbs folder={folder} onOpen={openFolder} />}</div>
+          <div className="mt-4 flex min-h-8 items-center">{filter ? <p className="text-xs text-muted">{plural(entries.length, "match", "matches")} across all folders</p> : <Breadcrumbs folder={folder} onOpen={openFolder} />}</div>
           <DataTable
             label="Files"
             data={entries}

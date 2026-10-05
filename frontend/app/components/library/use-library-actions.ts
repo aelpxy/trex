@@ -1,10 +1,11 @@
 import { useRef } from "react";
 
 import { download } from "~/lib/api";
+import { plural } from "~/lib/format";
 import { errorMessage, toasts, trackToast } from "~/lib/toasts";
 import type { ApiFile } from "~/lib/trex";
 
-import { baseName, filesOf, foldersOf, freeName, movesOf, openFile, parentOf, placeName, plural, type Entry } from "./entries";
+import { baseName, filesOf, foldersOf, freeName, movesOf, openFile, parentOf, placeName, type Entry } from "./entries";
 import { useDeleteFiles, useMoveFiles, useUploadFiles } from "./mutations";
 
 type Messages = { loading: string; success: string; error: string };

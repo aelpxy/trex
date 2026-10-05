@@ -54,12 +54,10 @@ export function QuestionCard({ part, onAnswer, onSkip }: QuestionCardProps) {
         <Button type="submit" variant="quiet" disabled={!other.trim()}>
           Send
         </Button>
+        <Button type="button" variant="quiet" onClick={onSkip} title="Skip the question; the agent stops here">
+          Skip
+        </Button>
       </form>
-      <div className="mt-2 pl-7.5">
-        <BaseButton onClick={onSkip} className={`cursor-pointer rounded text-xs text-muted hover:text-ink ${focusRing}`}>
-          Skip question
-        </BaseButton>
-      </div>
     </section>
   );
 }

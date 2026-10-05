@@ -2,25 +2,26 @@ import { useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "
 import { ContextMenu } from "@base-ui/react/context-menu";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
-import { LuFiles, LuFolderPlus, LuSquareCheck, LuUpload } from "react-icons/lu";
+import { LuFiles, LuFolderInput, LuFolderPlus, LuSquareCheck, LuTrash2, LuUpload } from "react-icons/lu";
 
-import { FilterInput } from "~/components/admin/filter-input";
-import { useUrlFilter } from "~/components/admin/use-url-filter";
 import { Button } from "~/components/ui/button";
 import { DataTable, type RowSelectionState } from "~/components/ui/data-table";
 import { DeleteConfirmDialog, type DeleteTarget } from "~/components/ui/delete-confirm-dialog";
 import { EmptyState } from "~/components/ui/empty-state";
+import { FilterInput } from "~/components/ui/filter-input";
+import { SelectionBar } from "~/components/ui/selection-bar";
 import { menuItem, popup } from "~/components/ui/styles";
+import { plural } from "~/lib/format";
 import { queries } from "~/lib/queries";
+import { useUrlFilter } from "~/lib/use-url-filter";
 
 import { Breadcrumbs } from "./breadcrumbs";
-import { baseName, entriesOf, foldersOf, keyOf, parentOf, placeName, plural, viewable, type Entry } from "./entries";
+import { baseName, entriesOf, foldersOf, keyOf, parentOf, placeName, viewable, type Entry } from "./entries";
 import { entryColumns } from "./entry-columns";
 import { EntryMenuItems, type EntryActions } from "./entry-menu";
 import { MoveDialog } from "./move-dialog";
 import { NameDialog } from "./name-dialog";
 import { ReplaceDialog } from "./replace-dialog";
-import { SelectionBar } from "./selection-bar";
 import { useEntryDrag } from "./use-entry-drag";
 import { useFileDrop } from "./use-file-drop";
 import { useLibraryActions } from "./use-library-actions";
@@ -112,7 +113,7 @@ export function FileManager() {
 
   const close = () => setPending(null);
   const uploadButton = (
-    <Button onClick={() => input.current?.click()}>
+    <Button size="lg" onClick={() => input.current?.click()}>
       <LuUpload size={14} />
       Upload
     </Button>
@@ -143,7 +144,7 @@ export function FileManager() {
             <div className="min-w-0 flex-1">
               <FilterInput value={filter} onChange={setFilter} label="Search every file" />
             </div>
-            <Button variant="quiet" onClick={() => setPending({ action: "folder" })} aria-label="New folder" title="New folder" className="px-3">
+            <Button variant="quiet" size="lg" onClick={() => setPending({ action: "folder" })} aria-label="New folder" title="New folder" className="px-4">
               <LuFolderPlus size={15} />
               <span className="hidden sm:inline">New folder</span>
             </Button>
@@ -151,7 +152,16 @@ export function FileManager() {
           </div>
           <div className="mt-4 flex min-h-8 items-center">
             {selected.length > 0 ? (
-              <SelectionBar count={selected.length} onClear={() => setSelection({})} onMove={() => actions.onMove(selected)} onDelete={() => actions.onDelete(selected)} />
+              <SelectionBar summary={`${plural(selected.length, "item")} selected`} onClear={() => setSelection({})}>
+                <Button variant="quiet" size="sm" onClick={() => actions.onMove(selected)}>
+                  <LuFolderInput size={14} />
+                  Move
+                </Button>
+                <Button variant="subtleDanger" size="sm" onClick={() => actions.onDelete(selected)}>
+                  <LuTrash2 size={14} />
+                  Delete
+                </Button>
+              </SelectionBar>
             ) : filter ? (
               <p className="text-xs text-muted">{plural(entries.length, "match")} across all folders</p>
             ) : (

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Drawer } from "@base-ui/react/drawer";
 import { LuX } from "react-icons/lu";
 
+import { Stat } from "./stat";
 import { dialogDescription, dialogTitle, iconButton } from "./styles";
 
 type SideDrawerProps = {
@@ -21,7 +22,7 @@ export function SideDrawer({ open, onOpenChange, title, description, children, f
       <Drawer.Portal>
         <Drawer.Backdrop className="fixed inset-0 z-50 bg-black/30 opacity-[calc(1-var(--drawer-swipe-progress))] transition-opacity duration-200 data-ending-style:opacity-0 data-starting-style:opacity-0 data-swiping:duration-0" />
         <Drawer.Viewport className="fixed inset-0 z-50 flex justify-end">
-          <Drawer.Popup className="flex h-full w-[28rem] max-w-[calc(100vw-2rem)] translate-x-(--drawer-swipe-movement-x) flex-col border-l border-line bg-surface shadow-lg outline-none transition-transform duration-[220ms] ease-[cubic-bezier(0.32,0.72,0,1)] data-ending-style:translate-x-full data-starting-style:translate-x-full data-swiping:select-none">
+          <Drawer.Popup className="flex h-full w-[28rem] max-w-[calc(100vw-2rem)] translate-x-(--drawer-swipe-movement-x) glass flex-col border-l border-line shadow-lg outline-none transition-transform duration-[220ms] ease-[cubic-bezier(0.32,0.72,0,1)] data-ending-style:translate-x-full data-starting-style:translate-x-full data-swiping:select-none">
             <Drawer.Content className="flex min-h-0 flex-1 flex-col">
               <div className="flex items-start gap-3 border-b border-line px-5 py-4">
                 <div className="min-w-0 flex-1">
@@ -50,8 +51,8 @@ export function DrawerSection({ title, description, action, children }: DrawerSe
     <section className="border-b border-line px-5 py-4 last:border-0">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <h3 className="text-xs font-medium">{title}</h3>
-          {description && <p className="mt-0.5 text-[11px] text-muted">{description}</p>}
+          <h3 className="text-sm font-medium">{title}</h3>
+          {description && <p className="mt-1 text-xs text-muted">{description}</p>}
         </div>
         {action && <div className="-my-1 shrink-0">{action}</div>}
       </div>
@@ -63,12 +64,9 @@ export function DrawerSection({ title, description, action, children }: DrawerSe
 // the key facts about the record, at the top of the drawer
 export function DrawerStats({ stats }: { stats: { label: string; value: ReactNode }[] }) {
   return (
-    <dl className="grid grid-cols-2 gap-px border-b border-line bg-line">
-      {stats.map((stat) => (
-        <div key={stat.label} className="bg-surface px-5 py-3">
-          <dt className="text-[11px] text-muted">{stat.label}</dt>
-          <dd className="mt-0.5 truncate text-sm font-medium tabular-nums">{stat.value}</dd>
-        </div>
+    <dl className="grid grid-cols-2 border-b border-line">
+      {stats.map((stat, index) => (
+        <Stat key={stat.label} label={stat.label} value={stat.value} className={`border-line px-5 py-3 ${index % 2 === 0 ? "border-r" : ""} ${index >= 2 ? "border-t" : ""}`} />
       ))}
     </dl>
   );

@@ -58,7 +58,10 @@ pub enum Event {
         reason: String,
     },
     Compacting,
-    Compacted,
+    // the summary later requests start from
+    Compacted {
+        summary: String,
+    },
     // a tool created, changed or removed a file in the sandbox; `diff` is a unified diff, and
     // `before`/`after` hold the whole file when it is small enough to show
     FileChanged {

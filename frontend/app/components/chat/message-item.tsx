@@ -16,6 +16,7 @@ import { MessageEditor } from "./parts/message-editor";
 import { MessageAttachments } from "./parts/message-attachments";
 import { PlanCard } from "./parts/plan-card";
 import { PreviewCard } from "./parts/preview-card";
+import { CompactionDivider } from "./parts/compaction-divider";
 import { QuestionCard } from "./parts/question-card";
 import { ReasoningBlock } from "./parts/reasoning-block";
 import { RunFooter } from "./parts/run-footer";
@@ -175,5 +176,6 @@ function UserMessageView({ message, onEdit }: { message: UserMessage; onEdit?: (
 
 export function MessageItem({ message, onRespond, onRetry, onRegenerate, onEdit }: { message: Message } & MessageProps) {
   if (message.role === "user") return <UserMessageView message={message} onEdit={onEdit} />;
+  if (message.role === "compaction") return <CompactionDivider message={message} />;
   return <AssistantMessageView message={message} onRespond={onRespond} onRetry={onRetry} onRegenerate={onRegenerate} />;
 }

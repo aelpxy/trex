@@ -29,6 +29,8 @@ type ComposerProps = {
   commands?: SlashCommand[];
   // shown before the send button, like how full the context is
   status?: ReactNode;
+  // replaces the usual hint, e.g. while the context is being summarized
+  placeholder?: string;
 };
 
 const roundButton = `inline-flex size-8 cursor-pointer items-center justify-center rounded-full bg-ink text-on-solid transition-colors hover:bg-ink/85 data-disabled:cursor-not-allowed data-disabled:opacity-30 ${focusRingOutset}`;
@@ -56,7 +58,7 @@ function AttachmentChip({ attachment, onRemove }: { attachment: OutgoingAttachme
   );
 }
 
-export function Composer({ streaming, settings, queued = [], dropped, onSettingsChange, onSend, onStop, commands = [], status }: ComposerProps) {
+export function Composer({ streaming, settings, queued = [], dropped, onSettingsChange, onSend, onStop, commands = [], status, placeholder }: ComposerProps) {
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<OutgoingAttachment[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -209,7 +211,7 @@ export function Composer({ streaming, settings, queued = [], dropped, onSettings
         rows={1}
         autoFocus={!isTouch()}
         aria-label="Message"
-        placeholder={streaming ? "Add to the task" : commands.length > 0 ? "Ask anything, or type / for commands" : "Ask anything"}
+        placeholder={placeholder ?? (streaming ? "Add to the task" : commands.length > 0 ? "Ask anything, or type / for commands" : "Ask anything")}
         className="block max-h-50 w-full resize-none bg-transparent px-2 py-1.5 text-sm leading-6 text-ink outline-none placeholder:text-muted"
       />
       {streaming && canSend && !error && (

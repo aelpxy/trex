@@ -4,17 +4,18 @@ import { LuActivity, LuSquare } from "react-icons/lu";
 import { Button } from "~/components/ui/button";
 import { columnsFor, DataTable } from "~/components/ui/data-table";
 import { EmptyState } from "~/components/ui/empty-state";
+import { badge, dangerBadge } from "~/components/ui/styles";
 import { formatUsd } from "~/lib/credits";
 import { queries } from "~/lib/queries";
 import { trackToast } from "~/lib/toasts";
 import type { ApiLiveRun } from "~/lib/trex";
+import { UNTITLED } from "~/lib/workspace";
 
 import { useCancelRun } from "./mutations";
 import { useNow } from "./use-now";
 
 // a run's instance renews its lease every 10s; past this, another instance resumes it
 const STALE_AFTER_SECS = 30;
-const badge = "ml-2 rounded px-1.5 py-0.5 text-[10px] font-medium";
 
 function duration(seconds: number) {
   const s = Math.max(0, seconds);
@@ -25,7 +26,7 @@ function duration(seconds: number) {
 
 function StopButton({ run }: { run: ApiLiveRun }) {
   const cancel = useCancelRun();
-  const title = run.title ?? "Untitled chat";
+  const title = run.title ?? UNTITLED;
   return (
     <Button
       variant="subtleDanger"
@@ -33,7 +34,7 @@ function StopButton({ run }: { run: ApiLiveRun }) {
       onClick={() =>
         void trackToast(cancel.mutateAsync(run.session), { loading: `Stopping “${title}”…`, success: `Asked “${title}” to stop; it ends within 10s`, error: `Couldn't stop “${title}”` }).catch(() => {})
       }
-      className="h-8 px-3 text-xs"
+      size="sm"
     >
       <LuSquare size={12} />
       {run.cancel_requested ? "Stopping…" : "Stop"}
@@ -53,8 +54,8 @@ export function RunList() {
       cell: ({ row }) => (
         <span className="block min-w-0">
           <span className="block truncate font-medium">
-            {row.original.title ?? "Untitled chat"}
-            {row.original.scheduled && <span className={`${badge} bg-subtle text-muted`}>Scheduled</span>}
+            {row.original.title ?? UNTITLED}
+            {row.original.scheduled && <span className={`ml-2 ${badge}`}>Scheduled</span>}
           </span>
           <span className="block truncate text-xs text-muted">{row.original.owner_email ?? row.original.workspace_name}</span>
         </span>
@@ -82,7 +83,7 @@ export function RunList() {
         const age = info.getValue() === null ? null : now - (info.getValue() ?? now);
         if (age !== null && age > STALE_AFTER_SECS) {
           return (
-            <span className={`${badge} bg-danger/10 text-danger`} title="Its server stopped renewing it; another server resumes it shortly">
+            <span className={dangerBadge} title="Its server stopped renewing it; another server resumes it shortly">
               Stalled {duration(age)}
             </span>
           );

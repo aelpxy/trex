@@ -37,8 +37,13 @@ pub enum SessionEvent {
     /// `items` and `usage` are how many conversation items (by `seq`) and usage records existed when
     /// the run started; a client that reloads mid-run keeps those and rebuilds the rest from this
     /// run's events (`?from=run`).
+    /// `compact` marks a run that only compacts the context, which the user asked for.
     #[serde(rename = "run.started")]
-    RunStarted { items: i64, usage: i64 },
+    RunStarted {
+        items: i64,
+        usage: i64,
+        compact: bool,
+    },
     /// The chat was given a title, generated from its first message.
     #[serde(rename = "session.updated")]
     SessionUpdated { title: String },
@@ -151,12 +156,13 @@ pub enum SessionEvent {
         explanation: Option<String>,
         steps: Vec<PlanStep>,
     },
-    /// The context is nearly full and is being summarized; this can take a while.
+    /// The context is being summarized, because it's nearly full or the user asked; this can take
+    /// a while.
     #[serde(rename = "context.compacting")]
     ContextCompacting,
-    /// Later requests start from the summary; it appears as a `compaction` item.
+    /// Later requests start from `summary`; it appears as a `compaction` item.
     #[serde(rename = "context.compacted")]
-    ContextCompacted,
+    ContextCompacted { summary: String },
     /// A message sent while the agent was working is now part of the conversation, after
     /// everything streamed so far. The agent reads it before its next step.
     #[serde(rename = "message.received")]
@@ -325,7 +331,7 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
                 .collect(),
         },
         Event::Compacting => SessionEvent::ContextCompacting,
-        Event::Compacted => SessionEvent::ContextCompacted,
+        Event::Compacted { summary } => SessionEvent::ContextCompacted { summary },
         Event::MessageReceived { content } => SessionEvent::MessageReceived { content },
         Event::Interrupted => SessionEvent::RunInterrupted,
         Event::Done => return None,

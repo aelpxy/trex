@@ -32,7 +32,6 @@ export const entryIcon = (entry: Entry): IconType =>
 export const baseName = (path: string) => path.replace(/\/$/, "").split("/").pop() ?? path;
 export const parentOf = (path: string) => path.slice(0, path.replace(/\/$/, "").lastIndexOf("/") + 1);
 export const placeName = (folder: string) => (folder ? baseName(folder) : "your library");
-export const plural = (count: number, noun: string) => `${count.toLocaleString()} ${noun}${count === 1 ? "" : "s"}`;
 
 // the folders and files one level under `folder`, or every file matching `search` anywhere
 export function entriesOf(files: ApiFile[], folder: string, search: string): Entry[] {

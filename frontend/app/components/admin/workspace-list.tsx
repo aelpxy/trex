@@ -3,18 +3,18 @@ import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { LuFolderOpen } from "react-icons/lu";
 
+import { Button } from "~/components/ui/button";
 import { columnsFor, DataTable } from "~/components/ui/data-table";
+import { FilterInput } from "~/components/ui/filter-input";
 import { Pagination, usePage } from "~/components/ui/pagination";
 import { DrawerStats, SideDrawer } from "~/components/ui/side-drawer";
-import { focusRing } from "~/components/ui/styles";
 import { formatUsd } from "~/lib/credits";
+import { date } from "~/lib/format";
 import { ADMIN_PAGE_SIZE, queries } from "~/lib/queries";
 import type { ApiAdminWorkspace } from "~/lib/trex";
+import { useUrlFilter, useUrlSort } from "~/lib/use-url-filter";
 
-import { FilterInput } from "./filter-input";
-import { date } from "./format";
 import { useDrawerRecord } from "./use-drawer-record";
-import { useUrlFilter, useUrlSort } from "./use-url-filter";
 import { WorkspaceManager } from "./workspace-manager";
 
 const column = columnsFor<ApiAdminWorkspace>();
@@ -87,10 +87,10 @@ export function WorkspaceList() {
           title={workspace.name}
           description={workspace.owner_email ?? workspace.id}
           footer={
-            <Link to={`/admin/library?workspace=${workspace.id}`} className={`inline-flex h-8 items-center gap-2 rounded-md px-3 text-xs text-muted transition-colors hover:bg-subtle hover:text-ink ${focusRing}`}>
+            <Button variant="quiet" size="sm" nativeButton={false} render={<Link to={`/admin/library?workspace=${workspace.id}`} />}>
               <LuFolderOpen size={14} />
               Browse library
-            </Link>
+            </Button>
           }
         >
           <DrawerStats

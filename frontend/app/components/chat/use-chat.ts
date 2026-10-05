@@ -12,7 +12,7 @@ import { trex, type ApiAccessRequest, type ApiItem, type ApiItemAttachment, type
 
 import { applyEvent } from "./events";
 import { sessionSettings, type ChatSettings } from "./models";
-import { EMPTY_USAGE, type AssistantMessage, type ChatEvent, type Message, type Part, type PlanStep, type Response, type ToolName, type ToolPart, type Usage } from "./types";
+import { EMPTY_USAGE, type AssistantMessage, type ChatEvent, type CompactionMessage, type Message, type Part, type PlanStep, type Response, type ToolName, type ToolPart, type Usage } from "./types";
 
 const TITLE_MAX_LENGTH = 60;
 const SANDBOX_ROOT = "/sandbox/";
@@ -47,11 +47,22 @@ function addUsage(total: Usage, entry: UsageEntry): Usage {
 // it finished in; the turn's last item marks when it ended
 function timeTurns(messages: Message[], turns: { started: number; ended: number }[], usage: ApiUsage[], running: boolean): Message[] {
   let turn = -1;
+  // a turn's time and usage go on its last reply only, so nothing in it shows them twice
+  const lastReplies = new Set<number>();
+  let replied = false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") replied = false;
+    else if (messages[index].role === "assistant" && !replied) {
+      lastReplies.add(index);
+      replied = true;
+    }
+  }
   return messages.map((message, index) => {
-    if (message.role === "user") {
-      turn += 1;
+    if (message.role !== "assistant") {
+      if (message.role === "user") turn += 1;
       return message;
     }
+    if (!lastReplies.has(index)) return message;
     const window = turns[turn];
     if (!window) return message;
     const next = turns[turn + 1]?.started ?? Number.POSITIVE_INFINITY;
@@ -259,8 +270,9 @@ function accessEvent(request: ApiAccessRequest): ChatEvent {
 
 // the conversation as saved; with `upto`, only the items that existed when the running run started,
 // since its events are replayed to rebuild the rest
-function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: { items: number; usage: number }): Message[] {
-  const running = upto !== undefined || data.session.status === "running";
+// `compact` replays a compaction the user asked for, which adds no reply of its own
+function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: { items: number; usage: number; compact?: boolean }): Message[] {
+  const running = upto?.compact ? false : upto !== undefined || data.session.status === "running";
   const messages: Message[] = [];
   const turns: { started: number; ended: number }[] = [];
   const assistant = () => {
@@ -280,6 +292,7 @@ function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: { ite
   // a replay re-adds this run's usage from its events, so only the records from before it count here
   const usage = upto === undefined ? data.usage : data.usage.slice(0, upto.usage);
 
+  let previous: ApiItem | undefined;
   for (const item of items) {
     if (item.type === "message" && item.role === "user") turns.push({ started: item.created_at, ended: item.created_at });
     // compacting later, on request, isn't time the reply took
@@ -290,12 +303,16 @@ function messagesFrom(data: ChatData, calls: Map<string, ToolCall>, upto?: { ite
       const message = assistant();
       messages[messages.length - 1] = { ...message, parts: [...message.parts, { type: "reasoning", text: item.summary, startedAt: 0, endedAt: 0 }] };
     }
+    // one the user asked for follows a finished reply and sits between turns; one mid-run is part of its work
+    else if (item.type === "compaction" && previous?.type === "message" && previous.role === "assistant")
+      messages.push({ id: crypto.randomUUID(), role: "compaction", state: "done", summary: item.summary });
     else if (item.type === "compaction") messages[messages.length - 1] = setStatus(assistant(), "Context summarized", true);
     else if (item.type === "tool_call") {
       const call = { name: item.name, args: parseArgs(item.arguments) };
       calls.set(item.call_id, call);
       apply(callEvents(item.call_id, call));
     } else if (item.type === "tool_result") apply(resultEvents(item.call_id, calls.get(item.call_id), item.output, item.output.startsWith("error:"), false));
+    previous = item;
   }
 
   const { session } = data;
@@ -370,7 +387,8 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
   const navigate = useNavigate();
   const { addChat, renameChat } = useWorkspace();
 
-  const running = messages.at(-1)?.role === "assistant" && (messages.at(-1) as AssistantMessage).state === "running";
+  const latest = messages.at(-1);
+  const running = (latest?.role === "assistant" || latest?.role === "compaction") && latest.state === "running";
 
   // changes the newest assistant message, starting one if the run began elsewhere
   const updateLast = useCallback((change: (message: AssistantMessage) => AssistantMessage) => {
@@ -394,10 +412,13 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
       const at = eventTime(event);
       // the replay begins at the run's start; when that was trimmed from the stream, there's nothing to rebuild
       if (replaying.current && event.type !== "run.started" && event.type !== "run.resumed") replaying.current = false;
+      // a compaction run, whether asked for here, in another tab or before a reload
+      if (event.type === "run.started" && data.compact === true) compacting.current = true;
       if ((event.type === "run.started" || event.type === "run.resumed") && replaying.current && chat) {
         replaying.current = false;
         calls.current.clear();
-        const rebuilt = messagesFrom(chat, calls.current, { items: Number(data.items ?? 0), usage: Number(data.usage ?? 0) });
+        const rebuilt = messagesFrom(chat, calls.current, { items: Number(data.items ?? 0), usage: Number(data.usage ?? 0), compact: compacting.current });
+        if (compacting.current) rebuilt.push({ id: crypto.randomUUID(), role: "compaction", state: "running" });
         const last = rebuilt.at(-1);
         // tool calls the restart cut off never finish, as when the resume is seen live
         if (event.type === "run.resumed" && last?.role === "assistant") rebuilt[rebuilt.length - 1] = setStatus(stopUnsettled(last), "Resumed after a restart", true);
@@ -406,14 +427,52 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
         setMessages(rebuilt);
         return;
       }
+      // a compaction the user asked for is its own entry between turns, untouched by the reply before it
+      if (compacting.current) {
+        const settle = (change: Partial<CompactionMessage>) =>
+          setMessages((current) => {
+            const last = current.at(-1);
+            return last?.role === "compaction" ? [...current.slice(0, -1), { ...last, ...change }] : current;
+          });
+        switch (event.type) {
+          case "run.started":
+            setMessages((current) => [...current, { id: crypto.randomUUID(), role: "compaction", state: "running" }]);
+            return;
+          case "context.compacting":
+          case "usage":
+            return;
+          case "context.compacted":
+            setContextTokens(null);
+            settle({ state: "done", summary: String(data.summary ?? "") });
+            return;
+          case "run.completed":
+            compacting.current = false;
+            settle({ state: "done" });
+            return;
+          case "run.cancelled":
+            compacting.current = false;
+            settle({ state: "stopped" });
+            flushQueued();
+            return;
+          case "run.failed":
+            compacting.current = false;
+            settle({ state: "failed", error: String(data.error ?? "") });
+            flushQueued();
+            return;
+          case "message.received":
+            // a message sent meanwhile gets a normal reply once the summary is saved
+            compacting.current = false;
+            settle({ state: "done" });
+            break;
+        }
+      }
       switch (event.type) {
         case "run.started":
           setMessages((current) => {
             const last = current.at(-1);
-            // answering a question, retrying or compacting continues the same reply, so its usage keeps adding up
-            const continuing = last?.role === "assistant" && (last.state === "running" || compacting.current);
+            // answering a question or retrying continues the same reply, so its usage keeps adding up
+            const continuing = last?.role === "assistant" && last.state === "running";
             usage.current = continuing ? (last.usage ?? EMPTY_USAGE) : EMPTY_USAGE;
-            if (continuing && last.state !== "running") return [...current.slice(0, -1), { ...last, state: "running" }];
             return continuing ? current : [...current, newAssistant(at)];
           });
           break;
@@ -549,18 +608,13 @@ export function useChat({ chatId, data, fresh, settings, projectId }: UseChatOpt
           }
           break;
         case "run.completed":
-          // a compaction keeps the reply's own end time
-          if (compacting.current) updateLast((message) => ({ ...message, state: "completed" }));
-          else emitAt(at, { type: "run.completed" });
-          compacting.current = false;
+          emitAt(at, { type: "run.completed" });
           break;
         case "run.cancelled":
-          compacting.current = false;
           emitAt(at, { type: "run.cancelled" });
           flushQueued();
           break;
         case "run.failed": {
-          compacting.current = false;
           emitAt(at, failedEvent(typeof data.code === "string" ? data.code : undefined, String(data.error ?? "")));
           flushQueued();
           break;

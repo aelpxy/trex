@@ -2,8 +2,7 @@ import { AlertDialog } from "@base-ui/react/alert-dialog";
 
 import { Button } from "~/components/ui/button";
 import { backdrop, dialogDescription, dialogPopup, dialogTitle, dialogViewport } from "~/components/ui/styles";
-
-import { plural } from "./entries";
+import { plural } from "~/lib/format";
 
 type ReplaceDialogProps = { names: string[]; onReplace: () => void; onKeepBoth: () => void; onCancel: () => void };
 

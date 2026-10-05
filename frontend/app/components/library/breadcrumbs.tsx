@@ -15,7 +15,7 @@ type BreadcrumbsProps = {
 export function Breadcrumbs({ folder, onOpen, dropProps, dropTarget }: BreadcrumbsProps) {
   const parts = folder.split("/").filter(Boolean);
   const crumb = (path: string, current: boolean) =>
-    `rounded px-1 hover:text-ink ${focusRing} ${current ? "font-medium text-ink" : "cursor-pointer"} ${dropTarget === path ? "bg-accent/15 text-ink ring-1 ring-accent" : ""}`;
+    `rounded px-1 hover:text-ink ${focusRing} ${current ? "font-medium text-ink" : "cursor-pointer"} ${dropTarget === path ? "bg-accent/10 text-ink outline-2 -outline-offset-2 outline-accent" : ""}`;
   return (
     <nav aria-label="Folder" className="flex min-w-0 flex-wrap items-center gap-0.5 text-xs text-muted">
       <button type="button" {...dropProps?.("")} onClick={() => onOpen("")} className={crumb("", parts.length === 0)}>

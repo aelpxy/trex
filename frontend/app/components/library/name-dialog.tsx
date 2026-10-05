@@ -3,7 +3,7 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
 
 import { Button } from "~/components/ui/button";
-import { backdrop, dialogDescription, dialogPopup, dialogTitle, dialogViewport, focusRing } from "~/components/ui/styles";
+import { backdrop, dialogDescription, dialogPopup, dialogTitle, dialogViewport, fieldLabel, focusRing } from "~/components/ui/styles";
 
 type NameDialogProps = {
   title: string;
@@ -36,7 +36,7 @@ export function NameDialog({ title, description, initial = "", action, onSubmit,
             <Dialog.Description className={dialogDescription}>{description}</Dialog.Description>
             <form onSubmit={submit} className="mt-5">
               <Field.Root invalid={invalid !== null}>
-                <Field.Label className="mb-1.5 block text-xs font-medium text-muted">Name</Field.Label>
+                <Field.Label className={fieldLabel}>Name</Field.Label>
                 <Field.Control value={name} onValueChange={setName} required autoFocus autoComplete="off" spellCheck={false} className={`ui-input h-10 ${focusRing}`} />
                 {invalid && <p className="mt-1.5 text-xs text-danger">{invalid}</p>}
               </Field.Root>

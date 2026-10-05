@@ -454,7 +454,13 @@ impl Agent<'_> {
         }
         let recent = history::recent_user_messages(history, RECENT_USER_MESSAGE_CHARS);
         history.push(history::checkpoint(&recent, summary));
-        send(events, Event::Compacted).await?;
+        send(
+            events,
+            Event::Compacted {
+                summary: summary.to_owned(),
+            },
+        )
+        .await?;
         Ok(())
     }
 
@@ -1034,7 +1040,7 @@ mod tests {
                     retries.push(attempt);
                 }
                 Event::Compacting => compacting += 1,
-                Event::Compacted => compacted += 1,
+                Event::Compacted { .. } => compacted += 1,
                 _ => {}
             }
         }

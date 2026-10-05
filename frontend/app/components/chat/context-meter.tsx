@@ -1,15 +1,14 @@
-import { Meter } from "@base-ui/react/meter";
 import { Popover } from "@base-ui/react/popover";
 import { LuMinimize2 } from "react-icons/lu";
 
 import { Button } from "~/components/ui/button";
+import { Meter } from "~/components/ui/meter";
 import { focusRingOutset, popup } from "~/components/ui/styles";
+import { tokens } from "~/lib/format";
 
-// the agent compacts by itself at this share of the window, so the meter warns a little before
+// the agent compacts by itself at this share of the window, and the ring stands out a little before
 const AUTO_COMPACT_PERCENT = 80;
-const WARN_PERCENT = 60;
-
-const tokens = (value: number) => (value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value >= 1000 ? `${Math.round(value / 1000)}k` : String(value));
+const FILLING_PERCENT = 60;
 
 type ContextMeterProps = {
   used: number | null;
@@ -22,7 +21,8 @@ type ContextMeterProps = {
 export function ContextMeter({ used, window, onCompact }: ContextMeterProps) {
   const percent = used === null ? 0 : Math.min(100, Math.round((used / window) * 100));
   const ring = 2 * Math.PI * 7;
-  const warn = percent >= WARN_PERCENT;
+  // nothing goes wrong as it fills, so it only grows more prominent rather than turning red
+  const filling = percent >= FILLING_PERCENT;
 
   return (
     <Popover.Root>
@@ -32,31 +32,30 @@ export function ContextMeter({ used, window, onCompact }: ContextMeterProps) {
       >
         <svg viewBox="0 0 18 18" className="size-4 -rotate-90" aria-hidden>
           <circle cx="9" cy="9" r="7" fill="none" strokeWidth="2.5" className="stroke-line" />
-          <circle cx="9" cy="9" r="7" fill="none" strokeWidth="2.5" strokeLinecap="round" strokeDasharray={ring} strokeDashoffset={ring * (1 - percent / 100)} className={warn ? "stroke-danger" : "stroke-muted"} />
+          <circle cx="9" cy="9" r="7" fill="none" strokeWidth="2.5" strokeLinecap="round" strokeDasharray={ring} strokeDashoffset={ring * (1 - percent / 100)} className={filling ? "stroke-ink" : "stroke-muted"} />
         </svg>
-        <span className="pointer-coarse:hidden">{used === null ? "—" : `${percent}%`}</span>
+        <span>{used === null ? "—" : `${percent}%`}</span>
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Positioner side="top" align="end" sideOffset={8} className="z-50">
-          <Popover.Popup className={`w-72 rounded-xl p-4 ${popup}`}>
-            <Popover.Title className="text-sm font-medium">Context</Popover.Title>
-            <Meter.Root value={used ?? 0} max={window} className="mt-3">
-              <div className="mb-1.5 flex items-baseline justify-between text-xs">
-                <Meter.Label className="text-muted">Used</Meter.Label>
-                <span className="text-muted tabular-nums">{used === null ? "Just summarized" : `${tokens(used)} of ${tokens(window)}`}</span>
-              </div>
-              <Meter.Track className="h-1.5 overflow-hidden rounded-full bg-subtle">
-                <Meter.Indicator className={`h-full rounded-full transition-[width] ${warn ? "bg-danger" : "bg-ink"}`} />
-              </Meter.Track>
-            </Meter.Root>
+          <Popover.Popup className={`w-72 rounded-lg p-4 ${popup}`}>
+            <Popover.Title className="mb-3 text-sm font-medium">Context</Popover.Title>
+            <Meter
+              label="Used"
+              value={used ?? 0}
+              max={window}
+              detail={used === null ? "Just summarized" : `${tokens(used)} of ${tokens(window)}`}
+              valueText={used === null ? "Just summarized" : `${percent}% of the context window`}
+            />
             <Popover.Description className="mt-3 text-xs text-muted">
               At {AUTO_COMPACT_PERCENT}% the conversation is summarized on its own so the agent can keep going. Compact earlier to start the next message from a short summary.
+              {!onCompact && " You can compact once the current run ends."}
             </Popover.Description>
             <Popover.Close
               render={
-                <Button variant="quiet" disabled={!onCompact} onClick={onCompact} className="mt-3 h-8 w-full px-3 text-xs">
-                  <LuMinimize2 size={13} />
-                  {onCompact ? "Compact now" : "Available once the run ends"}
+                <Button variant="quiet" size="sm" disabled={!onCompact} onClick={onCompact} className="mt-3 w-full">
+                  <LuMinimize2 size={14} />
+                  Compact now
                 </Button>
               }
             />

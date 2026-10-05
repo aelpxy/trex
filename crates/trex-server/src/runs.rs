@@ -418,7 +418,11 @@ async fn run(
     let started = if start == Start::Resumed {
         SessionEvent::RunResumed { items, usage }
     } else {
-        SessionEvent::RunStarted { items, usage }
+        SessionEvent::RunStarted {
+            items,
+            usage,
+            compact: start == Start::Compact,
+        }
     };
     publish(&state, session, started).await;
     let result = tokio::select! {

@@ -1,7 +1,7 @@
 import { useCallback, useState, type FormEvent } from "react";
 import { Field } from "@base-ui/react/field";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
-import { LuTrash2, LuX } from "react-icons/lu";
+import { LuTrash2 } from "react-icons/lu";
 
 import { MIN_PASSWORD_LENGTH } from "~/components/account/password-form";
 import { SessionList } from "~/components/account/session-list";
@@ -9,25 +9,25 @@ import { PasswordInput } from "~/components/auth/password-input";
 import { Button } from "~/components/ui/button";
 import { columnsFor, DataTable, type RowSelectionState } from "~/components/ui/data-table";
 import { DeleteConfirmDialog } from "~/components/ui/delete-confirm-dialog";
+import { FilterInput } from "~/components/ui/filter-input";
 import { Pagination, usePage } from "~/components/ui/pagination";
+import { SelectionBar } from "~/components/ui/selection-bar";
 import { DrawerSection, DrawerStats, SideDrawer } from "~/components/ui/side-drawer";
+import { badge, dangerBadge, fieldLabel } from "~/components/ui/styles";
 import { Switch } from "~/components/ui/switch";
 import { useWorkspace } from "~/components/workspace/workspace-provider";
 import { formatUsd } from "~/lib/credits";
+import { ago, date, plural } from "~/lib/format";
 import { ADMIN_PAGE_SIZE, queries } from "~/lib/queries";
 import { toastOutcome, trackToast } from "~/lib/toasts";
 import type { ApiAdminUser } from "~/lib/trex";
+import { useUrlFilter, useUrlSort } from "~/lib/use-url-filter";
 
 import { LoadError } from "./load-error";
-import { FilterInput } from "./filter-input";
-import { ago, date } from "./format";
 import { useDeleteUser, useDeleteUsers, useEndUserSession, useSetRole, useSetSuspended, useSetUserPassword, useSignOutUser } from "./mutations";
 import { useDrawerRecord } from "./use-drawer-record";
-import { useUrlFilter, useUrlSort } from "./use-url-filter";
 import { WorkspaceManager } from "./workspace-manager";
 
-const badge = "ml-2 rounded bg-subtle px-1.5 py-0.5 text-[10px] font-medium text-muted";
-const suspendedBadge = "ml-2 rounded bg-danger/10 px-1.5 py-0.5 text-[10px] font-medium text-danger";
 
 const column = columnsFor<ApiAdminUser>();
 const COLUMNS = [
@@ -37,8 +37,8 @@ const COLUMNS = [
       <span className="block min-w-0">
         <span className="block truncate font-medium">
           {row.original.name}
-          {row.original.role === "admin" && <span className={badge}>Admin</span>}
-          {row.original.suspended_at !== null && <span className={suspendedBadge}>Suspended</span>}
+          {row.original.role === "admin" && <span className={`ml-2 ${badge}`}>Admin</span>}
+          {row.original.suspended_at !== null && <span className={`ml-2 ${dangerBadge}`}>Suspended</span>}
         </span>
         <span className="block truncate text-xs text-muted">{row.original.email}</span>
       </span>
@@ -80,7 +80,7 @@ function Devices({ user }: { user: ApiAdminUser }) {
             variant="quiet"
             disabled={signOut.isPending}
             onClick={() => void toastOutcome(signOut.mutateAsync(user.id), { success: `Signed ${user.name} out everywhere`, error: `Couldn't sign ${user.name} out` })}
-            className="h-8 px-3 text-xs"
+            size="sm"
           >
             Sign out everywhere
           </Button>
@@ -166,7 +166,7 @@ function Password({ user }: { user: ApiAdminUser }) {
     <DrawerSection title="Password" description={`Sets a new one of at least ${MIN_PASSWORD_LENGTH} characters and signs them out everywhere. Share it with them yourself.`}>
       <form onSubmit={submit} className="flex items-end gap-2">
         <Field.Root className="min-w-0 flex-1">
-          <Field.Label className="mb-1.5 block text-[11px] font-medium text-muted">New password</Field.Label>
+          <Field.Label className={fieldLabel}>New password</Field.Label>
           <PasswordInput value={password} onValueChange={setPassword} minLength={MIN_PASSWORD_LENGTH} autoComplete="new-password" />
         </Field.Root>
         <Button type="submit" disabled={password.length < MIN_PASSWORD_LENGTH || save.isPending}>
@@ -193,7 +193,7 @@ function DeleteUser({ user, onDeleted }: { user: ApiAdminUser; onDeleted: () => 
 
   return (
     <>
-      <Button variant="subtleDanger" disabled={self || remove.isPending} title={self ? "You can't delete yourself" : undefined} onClick={() => setConfirming(true)} className="h-8 px-3 text-xs">
+      <Button variant="subtleDanger" disabled={self || remove.isPending} title={self ? "You can't delete yourself" : undefined} onClick={() => setConfirming(true)} size="sm">
         <LuTrash2 size={14} />
         Delete user
       </Button>
@@ -210,7 +210,7 @@ function DeleteUser({ user, onDeleted }: { user: ApiAdminUser; onDeleted: () => 
   );
 }
 
-const plural = (count: number) => (count === 1 ? "1 user" : `${count} users`);
+const userCount = (count: number) => plural(count, "user");
 
 // the users ticked on this page, deleted together after one confirmation
 function BulkDelete({ users, onClear }: { users: ApiAdminUser[]; onClear: () => void }) {
@@ -221,23 +221,20 @@ function BulkDelete({ users, onClear }: { users: ApiAdminUser[]; onClear: () => 
 
   if (users.length === 0) return null;
   return (
-    <div role="toolbar" aria-label="Selected users" className="ui-card mt-3 flex items-center gap-2 px-2 py-1.5">
-      <Button variant="quiet" onClick={onClear} aria-label="Clear selection" title="Clear selection" className="h-8 px-2">
-        <LuX size={14} />
-      </Button>
-      <p className="text-xs font-medium tabular-nums">{plural(users.length)} selected</p>
-      <span className="flex-1" />
-      <Button variant="subtleDanger" disabled={remove.isPending} onClick={() => setConfirming(true)} className="h-8 px-3 text-xs">
-        <LuTrash2 size={14} />
-        Delete {plural(users.length)}
-      </Button>
+    <div className="mt-3">
+      <SelectionBar summary={`${userCount(users.length)} selected`} onClear={onClear}>
+        <Button variant="subtleDanger" size="sm" disabled={remove.isPending} onClick={() => setConfirming(true)}>
+          <LuTrash2 size={14} />
+          Delete {userCount(users.length)}
+        </Button>
+      </SelectionBar>
       <DeleteConfirmDialog
         target={confirming ? { kind: users.length === 1 ? "user" : "users", id: "", name: names } : null}
         consequence={users.length === 1 ? " with their workspace, chats, sandboxes, files, schedules and balance" : " with their workspaces, chats, sandboxes, files, schedules and balances"}
         onCancel={() => setConfirming(false)}
         onConfirm={() => {
           setConfirming(false);
-          const what = plural(users.length);
+          const what = userCount(users.length);
           trackToast(
             remove.mutateAsync(users.map((user) => user.id)),
             { loading: `Deleting ${what}…`, success: `Deleted ${what}`, error: `Couldn't delete every user` },
@@ -302,8 +299,8 @@ export function UserList() {
           title={
             <>
               {user.name}
-              {user.role === "admin" && <span className={badge}>Admin</span>}
-              {user.suspended_at !== null && <span className={suspendedBadge}>Suspended</span>}
+              {user.role === "admin" && <span className={`ml-2 ${badge}`}>Admin</span>}
+              {user.suspended_at !== null && <span className={`ml-2 ${dangerBadge}`}>Suspended</span>}
             </>
           }
           description={user.email}

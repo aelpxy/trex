@@ -62,14 +62,14 @@ export function AppearanceSettings() {
   return (
     <>
       <Section title="Theme">
-        <div className="ui-card px-4 py-3.5">
+        <div className="ui-card px-5 py-4">
           <Switch checked={theme === "dark"} onCheckedChange={(dark) => setTheme(dark ? "dark" : "light")} description="Easier on the eyes at night. Saved in this browser.">
             Dark mode
           </Switch>
         </div>
       </Section>
       <Section title="Background" description="An image behind the app, kept in this browser only.">
-        <div className="ui-card p-4">
+        <div className="ui-card px-5 py-4">
           <div className="flex aspect-video items-center justify-center overflow-hidden rounded-lg bg-subtle bg-cover bg-center ring-1 ring-line" style={backgroundUrl ? { backgroundImage: `url("${backgroundUrl}")` } : undefined}>
             {!backgroundUrl && <span className="text-xs text-muted">No image</span>}
           </div>
@@ -83,11 +83,11 @@ export function AppearanceSettings() {
         </div>
       </Section>
       <Section title="Glass" description="How much the panels blur and let the background through.">
-        <div className="ui-card space-y-2 px-4 py-3">
+        <div className="ui-card space-y-2 px-5 py-4">
           <SettingSlider label="Blur" value={settings.blur} min={0} max={40} unit="px" onChange={(blur) => setSettings({ ...settings, blur })} />
           <SettingSlider label="Glass opacity" value={settings.opacity} min={20} max={100} unit="%" onChange={(opacity) => setSettings({ ...settings, opacity })} />
           <div className="flex justify-end pt-1">
-            <Button variant="quiet" onClick={() => setSettings(DEFAULT_SETTINGS)} className="h-8 px-3 text-xs">
+            <Button variant="quiet" onClick={() => setSettings(DEFAULT_SETTINGS)} size="sm">
               Reset to defaults
             </Button>
           </div>

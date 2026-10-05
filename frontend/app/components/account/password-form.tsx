@@ -4,12 +4,12 @@ import { useMutation } from "@tanstack/react-query";
 
 import { PasswordInput } from "~/components/auth/password-input";
 import { Button } from "~/components/ui/button";
+import { fieldLabel } from "~/components/ui/styles";
 import { toasts } from "~/lib/toasts";
 import { trex } from "~/lib/trex";
 
 export const MIN_PASSWORD_LENGTH = 8;
 
-const label = "mb-1.5 block text-xs font-medium text-muted";
 
 export function PasswordForm() {
   const [current, setCurrent] = useState("");
@@ -34,7 +34,7 @@ export function PasswordForm() {
   return (
     <form onSubmit={save} className="space-y-3">
       <Field.Root invalid={change.isError}>
-        <Field.Label className={label}>Current password</Field.Label>
+        <Field.Label className={fieldLabel}>Current password</Field.Label>
         <PasswordInput autoComplete="current-password" value={current} onValueChange={setCurrent} required />
         {change.error && (
           <p role="alert" className="mt-1.5 text-xs text-danger">
@@ -43,7 +43,7 @@ export function PasswordForm() {
         )}
       </Field.Root>
       <Field.Root>
-        <Field.Label className={label}>New password</Field.Label>
+        <Field.Label className={fieldLabel}>New password</Field.Label>
         <PasswordInput autoComplete="new-password" minLength={MIN_PASSWORD_LENGTH} value={next} onValueChange={setNext} required />
       </Field.Root>
       <Button type="submit" disabled={!current || next.length < MIN_PASSWORD_LENGTH || change.isPending}>
