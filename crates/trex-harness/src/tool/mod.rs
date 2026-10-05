@@ -1,12 +1,18 @@
 mod bash;
 mod file;
+mod image;
 mod library;
+mod patch;
+mod plan;
+mod process;
 mod search;
 mod time;
 mod web;
 
 use anyhow::Context;
-use async_openai::types::responses::{FunctionTool, Tool as ToolDefinition};
+use async_openai::types::responses::{
+    FunctionCallOutput, FunctionTool, InputContent, Tool as ToolDefinition,
+};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -17,7 +23,11 @@ use uuid::Uuid;
 pub use self::{
     bash::Bash,
     file::{EditFile, ReadFile, WriteFile},
+    image::ViewImage,
     library::{LibraryList, LibraryLoad, LibrarySave},
+    patch::ApplyPatch,
+    plan::UpdatePlan,
+    process::{ProcessOutput, StopProcess},
     search::{Glob, Grep},
     time::CurrentTime,
     web::WebFetch,
@@ -25,7 +35,7 @@ pub use self::{
 use crate::{event::Event, sandbox::LazySandbox};
 
 // keeps a single noisy result from flooding the model context
-const MAX_OUTPUT_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_OUTPUT_BYTES: usize = 32 * 1024;
 
 // a tool only ever reaches the sandbox and library of the user the run belongs to
 pub struct ToolContext<'a> {
@@ -51,6 +61,45 @@ pub trait Tool: Send + Sync {
         ctx: ToolContext<'a>,
         args: Value,
     ) -> BoxFuture<'a, anyhow::Result<String>>;
+
+    // what the model receives; tools whose results include images override it
+    fn call_content<'a>(
+        &'a self,
+        ctx: ToolContext<'a>,
+        args: Value,
+    ) -> BoxFuture<'a, anyhow::Result<ToolOutput>> {
+        Box::pin(async move { self.call(ctx, args).await.map(ToolOutput::Text) })
+    }
+}
+
+pub enum ToolOutput {
+    Text(String),
+    Content(Vec<InputContent>),
+}
+
+impl ToolOutput {
+    // what the ui and logs show; images and files appear as placeholders
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Content(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    InputContent::InputText(text) => text.text.clone(),
+                    InputContent::InputImage(_) => "[image]".to_owned(),
+                    InputContent::InputFile(_) => "[file]".to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    pub fn into_function_output(self) -> FunctionCallOutput {
+        match self {
+            Self::Text(text) => FunctionCallOutput::Text(text),
+            Self::Content(parts) => FunctionCallOutput::Content(parts),
+        }
+    }
 }
 
 // a vec keeps tool order stable across requests so the prompt prefix stays cacheable
@@ -76,6 +125,11 @@ impl Tools {
             Box::new(LibrarySave),
             Box::new(WebFetch::new()?),
             Box::new(CurrentTime),
+            Box::new(UpdatePlan),
+            Box::new(ApplyPatch),
+            Box::new(ProcessOutput),
+            Box::new(StopProcess),
+            Box::new(ViewImage),
         ]))
     }
 
@@ -99,6 +153,21 @@ impl Tools {
             .with_context(|| format!("unknown tool {name}"))?;
         let args = serde_json::from_str(arguments).context("tool arguments are not valid json")?;
         tool.call(ctx, args).await
+    }
+
+    pub async fn call_content(
+        &self,
+        ctx: ToolContext<'_>,
+        name: &str,
+        arguments: &str,
+    ) -> anyhow::Result<ToolOutput> {
+        let tool = self
+            .tools
+            .iter()
+            .find(|tool| tool.definition().name == name)
+            .with_context(|| format!("unknown tool {name}"))?;
+        let args = serde_json::from_str(arguments).context("tool arguments are not valid json")?;
+        tool.call_content(ctx, args).await
     }
 }
 

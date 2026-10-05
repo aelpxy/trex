@@ -39,6 +39,7 @@ struct Outcome {
     checks: Vec<scenarios::Check>,
     seconds: f64,
     tool_calls: usize,
+    tools: Vec<String>,
     input_tokens: u64,
     cached_tokens: u64,
     output_tokens: u64,
@@ -197,6 +198,13 @@ async fn run(
         checks: std::mem::take(&mut *cx.checks.lock().expect("checks lock poisoned")),
         seconds,
         tool_calls: tool_calls(&events).len(),
+        tools: tool_calls(&events)
+            .into_iter()
+            .map(|(name, args)| {
+                let args: String = args.to_string().chars().take(240).collect();
+                format!("{name} {args}")
+            })
+            .collect(),
         input_tokens: usage("input_tokens"),
         cached_tokens: usage("cached_input_tokens"),
         output_tokens: usage("output_tokens"),
@@ -269,6 +277,7 @@ fn to_json(outcomes: &[Outcome]) -> Value {
             "error": o.error,
             "seconds": o.seconds,
             "tool_calls": o.tool_calls,
+            "tools": o.tools,
             "input_tokens": o.input_tokens,
             "cached_input_tokens": o.cached_tokens,
             "output_tokens": o.output_tokens,

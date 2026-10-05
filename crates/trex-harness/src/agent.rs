@@ -7,8 +7,8 @@ use anyhow::{Context, anyhow, bail};
 use async_openai::{
     error::OpenAIError,
     types::responses::{
-        FunctionCallOutput, FunctionCallOutputItemParam, FunctionToolCall, InputItem, Item,
-        OutputItem, ReasoningEffort, Response, ResponseErrorCode, ResponseStreamEvent, Tool,
+        FunctionCallOutputItemParam, FunctionToolCall, InputItem, Item, OutputItem,
+        ReasoningEffort, Response, ResponseErrorCode, ResponseStreamEvent, Tool,
     },
 };
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
@@ -22,12 +22,13 @@ use trex_store::library::Library;
 use uuid::Uuid;
 
 use crate::{
+    attachment,
     event::{Event, Usage},
     history,
     model::{Model, Turn},
     question::{self, ASK_USER},
     sandbox::LazySandbox,
-    tool::{ToolContext, Tools},
+    tool::{ToolContext, ToolOutput, Tools},
 };
 
 const ACCESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -53,8 +54,8 @@ Be specific and complete; anything left out is forgotten. Reply with only the su
 
 // messages the user sent while a run was working, delivered between turns
 pub trait Inbox: Send + Sync {
-    // removes and returns the waiting messages, oldest first
-    fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<String>>>;
+    // removes and returns the waiting user messages as history items, oldest first
+    fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<Value>>>;
 }
 
 // persists history as it grows; `first` is the position of `items[0]` in history, so saving the
@@ -90,6 +91,7 @@ pub struct Agent<'a> {
     pub cache_key: Option<String>,
     pub steering: Option<Steering<'a>>,
     pub journal: Option<&'a dyn Journal>,
+    pub fast: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -191,6 +193,17 @@ impl Agent<'_> {
                     if self.receive_messages(history, events, saved).await? {
                         continue;
                     }
+                    // models sometimes stop with steps left; one reminder per plan gets them to finish
+                    if let Some(steps) = history::unfinished_plan(history) {
+                        tracing::info!(
+                            turn,
+                            steps = steps.len(),
+                            "reminding the model of its plan"
+                        );
+                        history.push(history::plan_reminder(&steps));
+                        self.save(history, saved).await?;
+                        continue;
+                    }
                     send(events, Event::Done).await?;
                     return Ok(RunOutcome::Completed);
                 }
@@ -235,8 +248,9 @@ impl Agent<'_> {
         };
         let messages = steering.inbox.take().await?;
         let received = !messages.is_empty();
-        for content in messages {
-            history.push(history::user_message(&content));
+        for message in messages {
+            let content = history::message_text(&message);
+            history.extend(history::from_json(vec![message])?);
             send(events, Event::MessageReceived { content }).await?;
         }
         self.save(history, saved).await?;
@@ -270,8 +284,8 @@ impl Agent<'_> {
         let mut output_chars = 0;
         while let Some((call, output)) = running.next().await {
             let output = output?;
-            output_chars += output.len();
-            history.push(output_item(call.call_id.clone(), output));
+            output_chars += output.text().len();
+            history.push(content_output_item(call.call_id.clone(), output));
             self.save(history, saved).await?;
         }
 
@@ -397,6 +411,7 @@ impl Agent<'_> {
         mode: Mode,
         events: &mpsc::Sender<Event>,
     ) -> Result<Sampled, Failure> {
+        let input = attachment::resolve(self.library, self.user, input).await?;
         let mut attempt = 1;
         loop {
             match self.stream_turn(input.clone(), mode, events).await {
@@ -477,6 +492,7 @@ impl Agent<'_> {
             reasoning_effort: self.reasoning_effort.clone(),
             allow_tools: mode.tools,
             cache_key: self.cache_key.clone(),
+            fast: self.fast,
         };
         let started = Instant::now();
         let mut first_token = None;
@@ -632,7 +648,7 @@ impl Agent<'_> {
         &self,
         call: &FunctionToolCall,
         events: &mpsc::Sender<Event>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<ToolOutput> {
         let ctx = ToolContext {
             user: self.user,
             library: self.library,
@@ -642,9 +658,13 @@ impl Agent<'_> {
             events,
         };
 
-        let (output, is_error) = match self.tools.call(ctx, &call.name, &call.arguments).await {
+        let (output, is_error) = match self
+            .tools
+            .call_content(ctx, &call.name, &call.arguments)
+            .await
+        {
             Ok(output) => (output, false),
-            Err(error) => (format!("error: {error:#}"), true),
+            Err(error) => (ToolOutput::Text(format!("error: {error:#}")), true),
         };
         tracing::debug!(
             call_id = call.call_id,
@@ -657,7 +677,7 @@ impl Agent<'_> {
             events,
             Event::ToolResult {
                 call_id: call.call_id.clone(),
-                output: output.clone(),
+                output: output.text(),
                 is_error,
             },
         )
@@ -730,9 +750,13 @@ fn is_overflow(code: Option<&str>, message: &str) -> bool {
 }
 
 pub(crate) fn output_item(call_id: String, output: String) -> InputItem {
+    content_output_item(call_id, ToolOutput::Text(output))
+}
+
+fn content_output_item(call_id: String, output: ToolOutput) -> InputItem {
     InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
         call_id: Some(call_id),
-        output: FunctionCallOutput::Text(output),
+        output: output.into_function_output(),
         id: None,
         status: None,
         caller: None,
@@ -917,6 +941,7 @@ mod tests {
             cache_key: None,
             steering: None,
             journal: None,
+            fast: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -976,6 +1001,7 @@ mod tests {
             cache_key: None,
             steering: None,
             journal: None,
+            fast: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
 
@@ -1003,9 +1029,13 @@ mod tests {
     struct ScriptedInbox(Mutex<VecDeque<Vec<String>>>);
 
     impl Inbox for ScriptedInbox {
-        fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<String>>> {
+        fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<Value>>> {
             let batch = self.0.lock().unwrap().pop_front().unwrap_or_default();
-            Box::pin(async move { Ok(batch) })
+            let items: Vec<_> = batch
+                .iter()
+                .map(|text| history::user_message(text))
+                .collect();
+            Box::pin(async move { history::to_json(&items) })
         }
     }
 
@@ -1048,6 +1078,7 @@ mod tests {
                 interrupts,
             }),
             journal: None,
+            fast: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message("Reply with only the word one.")];
@@ -1103,6 +1134,7 @@ mod tests {
                 interrupts,
             }),
             journal: None,
+            fast: false,
         };
         let (tx, mut rx) = mpsc::channel(1024);
         let mut history = vec![history::user_message(
@@ -1188,6 +1220,7 @@ mod tests {
             cache_key: None,
             steering: None,
             journal: None,
+            fast: false,
         };
 
         let mut history = vec![
@@ -1260,6 +1293,7 @@ mod tests {
             cache_key: None,
             steering: None,
             journal: None,
+            fast: false,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1317,6 +1351,7 @@ mod tests {
             cache_key: None,
             steering: None,
             journal: None,
+            fast: false,
         };
 
         let script = "timeout 15 bash -c 'exec 3<>/dev/tcp/example.com/443'";
@@ -1387,6 +1422,7 @@ mod tests {
             cache_key: None,
             steering: None,
             journal: None,
+            fast: false,
         };
         let mut history = vec![
             EasyInputMessage::from(
@@ -1449,6 +1485,7 @@ mod tests {
             cache_key: None,
             steering: None,
             journal: None,
+            fast: false,
         };
         let mut history = vec![
             EasyInputMessage::from(

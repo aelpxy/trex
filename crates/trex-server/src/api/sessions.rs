@@ -8,8 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trex_harness::{
-    history,
-    model::parse_effort,
+    attachment, history,
     question::{self, Answer},
 };
 use trex_sandbox::{Sandbox, workspace_name};
@@ -26,6 +25,8 @@ use super::{
 use crate::runs;
 
 const DEFAULT_LIMIT: i64 = 20;
+const MAX_ATTACHMENTS: usize = 10;
+pub const ATTACHMENT_PREFIX: &str = "att_";
 const MAX_LIMIT: i64 = 100;
 
 #[derive(Deserialize, ToSchema)]
@@ -33,9 +34,13 @@ pub struct CreateSession {
     /// A model id from `GET /v1/models`.
     #[schema(example = "gpt-6.1-sol")]
     model: String,
-    /// One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; the provider default when omitted.
+    /// One of the model's `reasoning_efforts` from `GET /v1/models` (any of `none`, `minimal`, `low`,
+    /// `medium`, `high`, `xhigh`, `max` when it lists none); the provider default when omitted.
     #[schema(example = "medium")]
     reasoning_effort: Option<String>,
+    /// Faster responses at a higher cost, on models whose `fast` is true.
+    #[serde(default)]
+    fast: bool,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -56,6 +61,32 @@ pub struct CreateMessage {
     /// away instead of after the step finishes.
     #[serde(default)]
     interrupt: bool,
+    /// Images (PNG, JPEG, GIF, WebP), PDFs or text files the model should see, up to 10.
+    #[serde(default)]
+    attachments: Vec<AttachmentInput>,
+}
+
+/// One attachment: either inline `data` or a file from the user's library.
+#[derive(Deserialize, ToSchema)]
+pub struct AttachmentInput {
+    /// A base64 data URL, e.g. `data:image/png;base64,...`.
+    data: Option<String>,
+    /// A path in the user's library.
+    library_path: Option<String>,
+    /// Shown to the model for PDFs and text files.
+    filename: Option<String>,
+}
+
+/// A file attached to a message; download it from `GET /v1/attachments/{id}`.
+#[derive(Serialize, ToSchema)]
+pub struct Attachment {
+    #[schema(example = "att_9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")]
+    id: String,
+    #[schema(example = "image")]
+    kind: &'static str,
+    #[schema(example = "image/png")]
+    mime_type: String,
+    filename: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -93,6 +124,8 @@ pub struct Session {
     object: &'static str,
     model: String,
     reasoning_effort: Option<String>,
+    /// Faster responses at a higher cost.
+    fast: bool,
     status: Status,
     /// Set while `status` is `needs_input`; answer with `POST /v1/sessions/{id}/answers`.
     pending_questions: Option<Vec<Question>>,
@@ -155,6 +188,8 @@ pub enum Item {
         #[schema(example = "assistant")]
         role: String,
         text: String,
+        /// Files the user attached; empty for other messages.
+        attachments: Vec<Attachment>,
     },
     ToolCall {
         call_id: String,
@@ -216,19 +251,31 @@ pub async fn create(
     CurrentUser(user): CurrentUser,
     Json(body): Json<CreateSession>,
 ) -> Result<(StatusCode, Json<Session>), ApiError> {
-    if state.models.get(&body.model).is_none() {
+    let Some(model) = state.models.get(&body.model) else {
         return Err(ApiError::invalid(
             format!("unknown model {}", body.model),
             "model",
         ));
+    };
+    if body.fast && !model.supports_fast() {
+        return Err(ApiError::invalid(
+            format!("{} has no fast mode", body.model),
+            "fast",
+        ));
     }
     if let Some(effort) = &body.reasoning_effort {
-        parse_effort(effort)
-            .map_err(|error| ApiError::invalid(error.to_string(), "reasoning_effort"))?;
+        model
+            .check_effort(effort)
+            .map_err(|error| ApiError::invalid(format!("{error:#}"), "reasoning_effort"))?;
     }
     let session = state
         .store
-        .create_session(user, &body.model, body.reasoning_effort.as_deref())
+        .create_session(
+            user,
+            &body.model,
+            body.reasoning_effort.as_deref(),
+            body.fast,
+        )
         .await?;
     Ok((StatusCode::CREATED, Json(session_object(&session))))
 }
@@ -384,8 +431,37 @@ pub async fn create_message(
     if body.content.trim().is_empty() {
         return Err(ApiError::invalid("content must not be empty", "content"));
     }
+    if body.attachments.len() > MAX_ATTACHMENTS {
+        return Err(ApiError::invalid(
+            format!("a message can have up to {MAX_ATTACHMENTS} attachments"),
+            "attachments",
+        ));
+    }
     let session = find_session(&state, user, &id).await?;
-    let started = runs::send_message(&state, user, &session, &body.content, body.interrupt).await?;
+    let mut parts = Vec::new();
+    for input in body.attachments {
+        let bytes = match (input.data, input.library_path) {
+            (Some(data), None) => attachment::decode_data_url(&data)
+                .map_err(|error| ApiError::invalid(format!("{error:#}"), "attachments"))?,
+            (None, Some(path)) => state.library.get(user, &path).await.map_err(|error| {
+                ApiError::invalid(format!("cannot attach {path}: {error:#}"), "attachments")
+            })?,
+            _ => {
+                return Err(ApiError::invalid(
+                    "each attachment needs exactly one of data or library_path",
+                    "attachments",
+                ));
+            }
+        };
+        let part = attachment::store(&state.library, user, input.filename.as_deref(), bytes)
+            .await
+            .map_err(|error| ApiError::invalid(format!("{error:#}"), "attachments"))?;
+        parts.push(part);
+    }
+    let message = history::to_json(&[attachment::user_message(&body.content, parts)])?
+        .pop()
+        .expect("one item was serialized");
+    let started = runs::send_message(&state, user, &session, message, body.interrupt).await?;
     let queued = matches!(started, runs::Started::Queued);
     Ok((StatusCode::ACCEPTED, Json(run_object(&session, queued))))
 }
@@ -637,6 +713,7 @@ fn session_object(session: &store::Session) -> Session {
         object: "session",
         model: session.model.clone(),
         reasoning_effort: session.reasoning_effort.clone(),
+        fast: session.fast,
         status: match session.status {
             SessionStatus::Idle => Status::Idle,
             SessionStatus::Running => Status::Running,
@@ -695,6 +772,8 @@ fn item(item: &Value) -> Option<Item> {
         "message" if history::checkpoint_text(item).is_some() => Some(Item::Compaction {
             summary: history::checkpoint_text(item)?.trim().to_owned(),
         }),
+        // developer messages are the harness talking to the model, not part of the conversation
+        "message" if item["role"] == "developer" => None,
         "message" => {
             let text = match &item["content"] {
                 Value::String(text) => text.clone(),
@@ -705,9 +784,19 @@ fn item(item: &Value) -> Option<Item> {
                     .join(""),
                 _ => return None,
             };
+            let attachments = attachment::references(item)
+                .into_iter()
+                .map(|(kind, hash, mime_type, filename)| Attachment {
+                    id: format!("{ATTACHMENT_PREFIX}{hash}"),
+                    kind,
+                    mime_type,
+                    filename,
+                })
+                .collect();
             Some(Item::Message {
                 role: text_of(&item["role"]),
                 text,
+                attachments,
             })
         }
         "function_call" => Some(Item::ToolCall {

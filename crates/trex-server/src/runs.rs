@@ -17,7 +17,6 @@ use trex_harness::{
     agent::{Agent, Inbox, Journal, RunOutcome, Steering},
     event::Event,
     history,
-    model::parse_effort,
     sandbox::{LazySandbox, SandboxProvider},
 };
 use trex_sandbox::{Sandbox, workspace_name};
@@ -76,8 +75,25 @@ impl Journal for SessionJournal<'_> {
 }
 
 impl Inbox for SessionInbox<'_> {
-    fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<String>>> {
-        Box::pin(self.store.take_queued_messages(self.user, self.session))
+    fn take(&self) -> BoxFuture<'_, anyhow::Result<Vec<Value>>> {
+        Box::pin(async move {
+            let queued = self
+                .store
+                .take_queued_messages(self.user, self.session)
+                .await?;
+            Ok(queued.into_iter().map(queued_item).collect())
+        })
+    }
+}
+
+// queues written before messages could carry attachments hold plain text
+fn queued_item(value: Value) -> Value {
+    match value {
+        Value::String(text) => history::to_json(&[history::user_message(&text)])
+            .ok()
+            .and_then(|mut items| items.pop())
+            .unwrap_or(Value::Null),
+        item => item,
     }
 }
 
@@ -160,16 +176,20 @@ pub async fn send_message(
     state: &Arc<AppState>,
     user: Uuid,
     session: &Session,
-    content: &str,
+    message: Value,
     interrupt: bool,
 ) -> Result<Started, ApiError> {
-    let input = history::to_json(&[history::user_message(content)])?;
+    let input = [message];
     // the run can end between the two attempts, so they are retried a few times
     for _ in 0..SEND_ATTEMPTS {
         if claim(state, user, session, &input).await? {
             return Ok(Started::Run);
         }
-        if state.store.queue_message(user, session.id, content).await? {
+        if state
+            .store
+            .queue_message(user, session.id, &input[0])
+            .await?
+        {
             if interrupt {
                 state.runs.interrupt(session.id);
             }
@@ -321,10 +341,10 @@ async fn stop(
     let result: anyhow::Result<()> = async {
         loop {
             let queued = state.store.take_queued_messages(user, session).await?;
-            let items: Vec<_> = queued.iter().map(|m| history::user_message(m)).collect();
+            let items: Vec<_> = queued.into_iter().map(queued_item).collect();
             state
                 .store
-                .append_session_items(user, session, &history::to_json(&items)?)
+                .append_session_items(user, session, &items)
                 .await?;
             match state
                 .store
@@ -364,7 +384,7 @@ async fn drive(
     let reasoning_effort = session
         .reasoning_effort
         .as_deref()
-        .map(parse_effort)
+        .map(|effort| model.check_effort(effort))
         .transpose()?;
 
     let provider = SessionSandbox {
@@ -401,6 +421,7 @@ async fn drive(
             interrupts,
         }),
         journal: Some(&journal),
+        fast: session.fast,
     };
 
     // the agent saves every item as it goes, so whatever happens the session can be continued

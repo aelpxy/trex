@@ -8,7 +8,7 @@ use axum::{
 use futures::{Stream, stream};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use trex_harness::event::{Event, OutputStream};
+use trex_harness::event::{Event, FileChange, OutputStream, StepStatus as HarnessStepStatus};
 use utoipa::{IntoParams, ToSchema};
 
 use super::{
@@ -106,6 +106,21 @@ pub enum SessionEvent {
         delay_ms: u64,
         reason: String,
     },
+    /// A tool created, changed, moved or deleted a file in the sandbox. `diff` is a unified diff
+    /// of the file (cut short when huge); for a move, `from` is the old path.
+    #[serde(rename = "file.changed")]
+    FileChanged {
+        path: String,
+        change: FileChangeKind,
+        from: Option<String>,
+        diff: String,
+    },
+    /// The agent's plan for the task, replacing any earlier one. Render it as a checklist.
+    #[serde(rename = "plan.updated")]
+    PlanUpdated {
+        explanation: Option<String>,
+        steps: Vec<PlanStep>,
+    },
     /// The context is nearly full and is being summarized; this can take a while.
     #[serde(rename = "context.compacting")]
     ContextCompacting,
@@ -129,6 +144,29 @@ pub enum SessionEvent {
     RunCancelled,
     #[serde(rename = "run.failed")]
     RunFailed { error: String },
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileChangeKind {
+    Added,
+    Updated,
+    Deleted,
+    Moved,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PlanStep {
+    step: String,
+    status: StepStatus,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Pending,
+    InProgress,
+    Completed,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -208,6 +246,34 @@ pub fn to_api(event: Event) -> Option<SessionEvent> {
             max_attempts,
             delay_ms: delay.as_millis() as u64,
             reason,
+        },
+        Event::FileChanged { path, change, diff } => {
+            let (change, from) = match change {
+                FileChange::Added => (FileChangeKind::Added, None),
+                FileChange::Updated => (FileChangeKind::Updated, None),
+                FileChange::Deleted => (FileChangeKind::Deleted, None),
+                FileChange::Moved { from } => (FileChangeKind::Moved, Some(from)),
+            };
+            SessionEvent::FileChanged {
+                path,
+                change,
+                from,
+                diff,
+            }
+        }
+        Event::PlanUpdated { explanation, steps } => SessionEvent::PlanUpdated {
+            explanation,
+            steps: steps
+                .into_iter()
+                .map(|step| PlanStep {
+                    step: step.step,
+                    status: match step.status {
+                        HarnessStepStatus::Pending => StepStatus::Pending,
+                        HarnessStepStatus::InProgress => StepStatus::InProgress,
+                        HarnessStepStatus::Completed => StepStatus::Completed,
+                    },
+                })
+                .collect(),
         },
         Event::Compacting => SessionEvent::ContextCompacting,
         Event::Compacted => SessionEvent::ContextCompacted,

@@ -160,11 +160,17 @@ scenarios![
     current_time,
     run_a_script,
     read_a_web_page,
+    describe_an_attached_image,
+    read_an_attached_pdf,
+    check_a_picture_it_drew,
     fix_a_failing_test,
+    rename_across_files,
     analyze_a_csv,
     build_and_package,
     ask_then_continue,
     approve_blocked_network,
+    serve_in_the_background,
+    run_a_long_job,
     steer_mid_run,
     interrupt_a_long_command,
     compact_a_long_task,
@@ -209,6 +215,11 @@ async fn run_a_script(cx: Arc<Ctx>) -> anyhow::Result<()> {
         !called(&watch, "library_save"),
         names(&watch),
     );
+    cx.check(
+        "didn't plan a quick task",
+        !called(&watch, "update_plan"),
+        names(&watch),
+    );
     let reply = cx.reply(&session).await?;
     cx.check("showed the output", reply.contains("34"), excerpt(&reply));
     Ok(())
@@ -236,6 +247,120 @@ async fn read_a_web_page(cx: Arc<Ctx>) -> anyhow::Result<()> {
     Ok(())
 }
 
+// 64x48, left half blue, right half yellow
+const SPLIT_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwCAIAAAAuKetIAAAAS0lEQVR42u3PMQ0AMAgAMCRMAZomfQJmgx8LPHxNaqCR96+qd1aFgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgMBUA/Czuw/DYXFZAAAAAElFTkSuQmCC";
+// one page: "Recipe notes: the secret ingredient is cardamom."
+const RECIPE_PDF: &str = "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA3OSA+PgpzdHJlYW0KQlQgL0YxIDE4IFRmIDcyIDcyMCBUZCAoUmVjaXBlIG5vdGVzOiB0aGUgc2VjcmV0IGluZ3JlZGllbnQgaXMgY2FyZGFtb20uKSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyNDEgMDAwMDAgbiAKMDAwMDAwMDM3MCAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjQ0MAolJUVPRgo=";
+
+async fn describe_an_attached_image(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let session = cx.session(MODEL).await?;
+    let mut watch = cx.watch(&session);
+    let data = format!("data:image/png;base64,{SPLIT_PNG}");
+    let attachments = json!([{"data": data, "filename": null, "library_path": null}]);
+    let question = "What color is the left half of this image, and what color is the right half? Reply only \
+        in the form `left: COLOR, right: COLOR`.";
+    cx.api
+        .send_with(&session, question, false, attachments)
+        .await?;
+    let end = watch.until_end().await?;
+    cx.check_completed(&end);
+    cx.check_no_sandbox(&watch);
+    let reply = cx.reply(&session).await?.to_lowercase();
+    let seen = reply.contains("left: blue") && reply.contains("right: yellow");
+    cx.check(
+        "saw blue on the left and yellow on the right",
+        seen,
+        excerpt(&reply),
+    );
+
+    let items = cx.api.items(&session).await?;
+    let attached: Vec<Value> = items
+        .iter()
+        .filter_map(|item| item["attachments"].as_array())
+        .flatten()
+        .cloned()
+        .collect();
+    let listed = attached.len() == 1 && attached[0]["kind"] == "image";
+    cx.check("the item lists the image", listed, format!("{attached:?}"));
+    let id = attached
+        .first()
+        .and_then(|a| a["id"].as_str())
+        .unwrap_or_default();
+    let downloaded = cx.api.attachment(id).await.unwrap_or_default();
+    cx.check(
+        "the attachment downloads intact",
+        downloaded == decode_base64(SPLIT_PNG),
+        format!("{} bytes", downloaded.len()),
+    );
+    Ok(())
+}
+
+async fn read_an_attached_pdf(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let session = cx.session(MODEL).await?;
+    let mut watch = cx.watch(&session);
+    let data = format!("data:application/pdf;base64,{RECIPE_PDF}");
+    let attachments = json!([{"data": data, "filename": "recipe.pdf", "library_path": null}]);
+    let question = "What is the secret ingredient in these notes? Reply with just the ingredient.";
+    cx.api
+        .send_with(&session, question, false, attachments)
+        .await?;
+    let end = watch.until_end().await?;
+    cx.check_completed(&end);
+    cx.check_no_sandbox(&watch);
+    let reply = cx.reply(&session).await?;
+    cx.check(
+        "read the pdf",
+        reply.to_lowercase().contains("cardamom"),
+        excerpt(&reply),
+    );
+    Ok(())
+}
+
+async fn check_a_picture_it_drew(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let prompt = "Pick one color from red, green or purple, then use Python to draw a large filled circle in \
+        that color on a white background and save it as /sandbox/circle.png. Then look at the image with \
+        view_image and tell me which color the circle is.";
+    let (session, watch) = cx.one_shot(MODEL, prompt).await?;
+    cx.check(
+        "looked at the image",
+        called(&watch, "view_image"),
+        names(&watch),
+    );
+    let drawn: String = tool_calls(&watch.seen)
+        .iter()
+        .filter(|(name, _)| name != "view_image")
+        .map(|(_, args)| args.to_string().to_lowercase())
+        .collect();
+    let reply = cx.reply(&session).await?.to_lowercase();
+    let matches = ["red", "green", "purple"]
+        .iter()
+        .any(|color| drawn.contains(color) && reply.contains(color));
+    cx.check("named the color it drew", matches, excerpt(&reply));
+    Ok(())
+}
+
+// the eval doesn't otherwise need a base64 crate, and these fixtures are tiny
+fn decode_base64(text: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let (mut buffer, mut bits) = (0u32, 0);
+    for byte in text.bytes().filter(|byte| *byte != b'=') {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            _ => 63,
+        };
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    out
+}
+
 const BUGGY_MEDIAN: &str = "def median(values):\n    ordered = sorted(values)\n    middle = len(ordered) // 2\n    return ordered[middle]\n";
 const MEDIAN_TESTS: &str = "import unittest\n\nfrom calc import median\n\n\nclass MedianTest(unittest.TestCase):\n    def test_odd(self):\n        self.assertEqual(median([3, 1, 2]), 2)\n\n    def test_even(self):\n        self.assertEqual(median([4, 1, 3, 2]), 2.5)\n\n    def test_single(self):\n        self.assertEqual(median([7]), 7)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n";
 
@@ -261,6 +386,66 @@ async fn fix_a_failing_test(cx: Arc<Ctx>) -> anyhow::Result<()> {
     std::fs::write(dir.path().join("test_calc.py"), MEDIAN_TESTS)?;
     let (passed, output) = python(dir.path(), &["-m", "unittest", "-q", "test_calc"])?;
     cx.check("the saved fix passes the tests", passed, excerpt(&output));
+    Ok(())
+}
+
+const SHAPES: &str = "def area(width, height):\n    return width * height\n";
+const REPORT: &str = "from shapes import area\n\n\ndef describe(width, height):\n    return f\"{width}x{height} has area {area(width, height)}\"\n";
+const SHAPE_TESTS: &str = "import unittest\n\nfrom report import describe\nfrom shapes import area\n\n\nclass ShapesTest(unittest.TestCase):\n    def test_area(self):\n        self.assertEqual(area(2, 3), 6)\n\n    def test_describe(self):\n        self.assertEqual(describe(2, 3), \"2x3 has area 6\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n";
+
+async fn rename_across_files(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let files = [
+        ("shapes.py", SHAPES),
+        ("report.py", REPORT),
+        ("test_shapes.py", SHAPE_TESTS),
+    ];
+    for (name, content) in files {
+        cx.api.put_file(&cx.path(name), content.into()).await?;
+    }
+    let dir = cx.path("");
+    let prompt = format!(
+        "My library has a small Python project in {dir}: shapes.py, report.py and test_shapes.py. Rename the \
+         function area to rectangle_area everywhere it is defined or used, including the tests, make sure the \
+         tests pass, then save all three files back to the same paths in my library."
+    );
+    let (_, watch) = cx.one_shot(MODEL, &prompt).await?;
+    let changed = watch
+        .seen
+        .iter()
+        .filter(|event| {
+            event["type"] == "file.changed"
+                && event["diff"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("rectangle_area"))
+        })
+        .count();
+    cx.check(
+        "reported the edits as diffs",
+        changed >= 3,
+        format!("{changed} file.changed events"),
+    );
+
+    let local = tempfile::tempdir()?;
+    let mut leftovers = Vec::new();
+    for (name, _) in files {
+        let content = cx.api.get_file(&cx.path(name)).await?.unwrap_or_default();
+        let text = String::from_utf8_lossy(&content).replace("rectangle_area", "");
+        if text.contains("area(") || text.contains("import area") {
+            leftovers.push(name);
+        }
+        std::fs::write(local.path().join(name), content)?;
+    }
+    cx.check(
+        "renamed every use",
+        leftovers.is_empty(),
+        format!("{leftovers:?}"),
+    );
+    let (passed, output) = python(local.path(), &["-m", "unittest", "-q", "test_shapes"])?;
+    cx.check(
+        "the saved project passes its tests",
+        passed,
+        excerpt(&output),
+    );
     Ok(())
 }
 
@@ -309,10 +494,33 @@ async fn build_and_package(cx: Arc<Ctx>) -> anyhow::Result<()> {
          Then save a tar.gz of the project to my library as {archive}, with the wordcount/ package and tests/ \
          at the top level of the archive."
     );
-    cx.one_shot(MODEL, &prompt).await?;
+    let (session, watch) = cx.one_shot(MODEL, &prompt).await?;
+    let reply = cx.reply(&session).await?;
+    let last_plan = watch
+        .seen
+        .iter()
+        .rev()
+        .find(|event| event["type"] == "plan.updated");
+    cx.check("kept a plan", last_plan.is_some(), names(&watch));
+    let finished = last_plan.is_some_and(|plan| {
+        plan["steps"]
+            .as_array()
+            .is_some_and(|steps| steps.iter().all(|step| step["status"] == "completed"))
+    });
+    cx.check(
+        "finished every step of the plan",
+        finished,
+        last_plan
+            .map(|plan| plan["steps"].to_string())
+            .unwrap_or_default(),
+    );
 
     let Some(bytes) = cx.api.get_file(&archive).await? else {
-        cx.check("saved the archive", false, "no archive in the library");
+        cx.check(
+            "saved the archive",
+            false,
+            format!("no archive; reply: {}", excerpt(&reply)),
+        );
         return Ok(());
     };
     let dir = tempfile::tempdir()?;
@@ -433,6 +641,53 @@ async fn approve_blocked_network(cx: Arc<Ctx>) -> anyhow::Result<()> {
     cx.check(
         "reached the site after approval",
         reply.contains("Example Domain"),
+        excerpt(&reply),
+    );
+    Ok(())
+}
+
+fn started_in_background(watch: &Watch) -> bool {
+    tool_calls(&watch.seen)
+        .iter()
+        .any(|(name, args)| name == "bash" && args["background"] == true)
+}
+
+async fn serve_in_the_background(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let prompt = "Create /sandbox/site/index.html containing the text hello from the background, serve /sandbox/site \
+        with Python's http.server on port 8000, fetch the page with curl, and tell me what it returned. Stop the \
+        server when you're done.";
+    let (session, watch) = cx.one_shot(MODEL, prompt).await?;
+    cx.check(
+        "ran the server in the background",
+        started_in_background(&watch),
+        names(&watch),
+    );
+    cx.check(
+        "stopped the server",
+        called(&watch, "stop_process"),
+        names(&watch),
+    );
+    let reply = cx.reply(&session).await?;
+    cx.check(
+        "fetched the page",
+        reply.contains("hello from the background"),
+        excerpt(&reply),
+    );
+    Ok(())
+}
+
+async fn run_a_long_job(cx: Arc<Ctx>) -> anyhow::Result<()> {
+    let prompt = "Run `sleep 130 && echo slow-job-done` (it takes a little over two minutes) and tell me what it printed.";
+    let (session, watch) = cx.one_shot(MODEL, prompt).await?;
+    cx.check(
+        "ran it in the background",
+        started_in_background(&watch),
+        names(&watch),
+    );
+    let reply = cx.reply(&session).await?;
+    cx.check(
+        "waited for the result",
+        reply.contains("slow-job-done"),
         excerpt(&reply),
     );
     Ok(())

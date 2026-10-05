@@ -7,7 +7,8 @@ use async_openai::{
     error::OpenAIError,
     types::responses::{
         CreateResponse, IncludeEnum, InputItem, InputParam, Reasoning, ReasoningEffort,
-        ReasoningSummary, ResponseStream, Tool, ToolChoiceOptions, ToolChoiceParam,
+        ReasoningSummary, ResponseStream, ServiceTierResponses, Tool, ToolChoiceOptions,
+        ToolChoiceParam,
     },
 };
 use serde::Deserialize;
@@ -20,6 +21,10 @@ pub struct Model {
     name: String,
     upstream: String,
     context_window: u64,
+    // the levels the provider accepts; none means any level is passed through
+    reasoning_efforts: Option<Vec<String>>,
+    // whether the provider offers the priority service tier for this model
+    fast: bool,
     client: Client<OpenAIConfig>,
 }
 
@@ -36,6 +41,8 @@ pub struct Turn {
     // the tools stay declared even when calls are disabled, so the cached prompt prefix still matches
     pub allow_tools: bool,
     pub cache_key: Option<String>,
+    // the priority service tier: faster responses for more credits
+    pub fast: bool,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +69,9 @@ struct ModelEntry {
     provider: String,
     upstream: Option<String>,
     context_window: Option<u64>,
+    reasoning_efforts: Option<Vec<String>>,
+    #[serde(default)]
+    fast: bool,
 }
 
 // accepts the effort names the responses api uses, e.g. low, medium, high
@@ -88,7 +98,15 @@ impl Models {
             if context_window == 0 {
                 bail!("model {}: context_window must be positive", entry.id);
             }
-            let model = Model::new(
+            if let Some(efforts) = &entry.reasoning_efforts {
+                if efforts.is_empty() {
+                    bail!("model {}: reasoning_efforts must not be empty", entry.id);
+                }
+                for effort in efforts {
+                    parse_effort(effort).with_context(|| format!("model {}", entry.id))?;
+                }
+            }
+            let mut model = Model::new(
                 entry.id.clone(),
                 entry.name.unwrap_or_else(|| entry.id.clone()),
                 entry.upstream.unwrap_or_else(|| entry.id.clone()),
@@ -96,6 +114,8 @@ impl Models {
                 provider.base_url.trim_end_matches('/'),
                 provider.api_key.as_deref(),
             );
+            model.reasoning_efforts = entry.reasoning_efforts;
+            model.fast = entry.fast;
             order.push(entry.id.clone());
             models.insert(entry.id, model);
         }
@@ -139,6 +159,8 @@ impl Model {
             name,
             upstream,
             context_window,
+            reasoning_efforts: None,
+            fast: false,
             client: Client::with_config(openai),
         }
     }
@@ -155,6 +177,29 @@ impl Model {
         self.context_window
     }
 
+    pub fn supports_fast(&self) -> bool {
+        self.fast
+    }
+
+    pub fn reasoning_efforts(&self) -> Option<&[String]> {
+        self.reasoning_efforts.as_deref()
+    }
+
+    // an unsupported level fails every request, so it is caught when a session picks it
+    pub fn check_effort(&self, effort: &str) -> anyhow::Result<ReasoningEffort> {
+        let parsed = parse_effort(effort)?;
+        if let Some(efforts) = &self.reasoning_efforts
+            && !efforts.iter().any(|allowed| allowed == effort)
+        {
+            bail!(
+                "{} supports reasoning effort {}",
+                self.id,
+                efforts.join(", ")
+            );
+        }
+        Ok(parsed)
+    }
+
     pub async fn stream(&self, turn: Turn) -> Result<ResponseStream, OpenAIError> {
         // trex owns conversation state, so reasoning must come back encrypted to be replayed
         let request = CreateResponse {
@@ -165,12 +210,15 @@ impl Model {
             tool_choice: (!turn.allow_tools)
                 .then_some(ToolChoiceParam::Option(ToolChoiceOptions::None)),
             prompt_cache_key: turn.cache_key,
-            reasoning: turn.reasoning_effort.map(|effort| Reasoning {
-                effort: Some(effort),
+            // summaries are what the ui shows while the model thinks, so they're asked for even when
+            // the effort is left to the provider
+            reasoning: Some(Reasoning {
+                effort: turn.reasoning_effort,
                 summary: Some(ReasoningSummary::Auto),
                 ..Default::default()
             }),
             include: Some(vec![IncludeEnum::ReasoningEncryptedContent]),
+            service_tier: turn.fast.then_some(ServiceTierResponses::Priority),
             store: Some(false),
             ..Default::default()
         };
@@ -276,6 +324,8 @@ mod tests {
             provider = "local"
             upstream = "gpt-6.1-sol"
             context_window = 400000
+            reasoning_efforts = ["low", "high", "max"]
+            fast = true
 
             [[models]]
             id = "plain"
@@ -296,6 +346,20 @@ mod tests {
             models.get("plain").unwrap().context_window(),
             DEFAULT_CONTEXT_WINDOW
         );
+        assert_eq!(fast.check_effort("max").unwrap(), ReasoningEffort::Max);
+        let unsupported = fast.check_effort("minimal").unwrap_err().to_string();
+        assert_eq!(unsupported, "fast supports reasoning effort low, high, max");
+        assert!(fast.check_effort("warp").is_err());
+        let plain = models.get("plain").unwrap();
+        assert_eq!(plain.reasoning_efforts(), None);
+        assert!(fast.supports_fast() && !plain.supports_fast());
+        assert_eq!(
+            plain.check_effort("minimal").unwrap(),
+            ReasoningEffort::Minimal
+        );
+
+        let invalid = raw.replace(r#"["low", "high", "max"]"#, r#"["low", "warp"]"#);
+        assert!(Models::from_toml(&invalid).is_err());
     }
 
     // needs the responses api configured in trex.toml: cargo test -- --ignored
@@ -322,6 +386,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Medium),
             allow_tools: true,
             cache_key: None,
+            fast: true,
         };
 
         let mut stream = models

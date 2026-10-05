@@ -1,3 +1,4 @@
+mod attachments;
 mod auth;
 pub mod error;
 pub mod events;
@@ -33,6 +34,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use crate::runs::Runs;
 
 const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const DOCS_PAGE: &str = include_str!("docs.html");
 
 pub struct AppState {
@@ -88,7 +90,15 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(sessions::create, sessions::list))
         .routes(routes!(sessions::get, sessions::delete))
         .routes(routes!(sessions::items))
-        .routes(routes!(sessions::create_message))
+        .routes({
+            // attachments arrive inline as base64, far beyond the default json limit
+            let (schemas, paths, method) = routes!(sessions::create_message);
+            (
+                schemas,
+                paths,
+                method.layer(DefaultBodyLimit::max(MAX_MESSAGE_BYTES)),
+            )
+        })
         .routes(routes!(sessions::create_answers))
         .routes(routes!(sessions::cancel))
         .routes(routes!(events::stream_events))
@@ -96,6 +106,7 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(sessions::approve_access))
         .routes(routes!(sessions::reject_access))
         .routes(routes!(library::list))
+        .routes(routes!(attachments::download))
         .route(
             "/library/files/{*path}",
             get(library::download)
@@ -170,6 +181,11 @@ struct Model {
     name: String,
     /// Tokens; the conversation is compacted at 80% of it.
     context_window: u64,
+    /// The reasoning effort levels a session may pick; null when the model accepts any.
+    #[schema(example = json!(["low", "medium", "high", "xhigh", "max"]))]
+    reasoning_efforts: Option<Vec<String>>,
+    /// Whether sessions can turn on fast mode.
+    fast: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -198,6 +214,8 @@ async fn models(State(state): State<Arc<AppState>>) -> Json<List<Model>> {
             object: "model",
             name: model.name().to_owned(),
             context_window: model.context_window(),
+            reasoning_efforts: model.reasoning_efforts().map(<[String]>::to_vec),
+            fast: model.supports_fast(),
         })
         .collect();
     Json(List::new(data, false))
@@ -256,6 +274,7 @@ mod tests {
                 "/v1/sessions/{id}/access_requests/{request_id}/approve",
                 "/v1/sessions/{id}/access_requests/{request_id}/reject",
                 "/v1/library",
+                "/v1/attachments/{id}",
                 "/v1/library/files/{path}",
             ]
         );

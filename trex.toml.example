@@ -11,3 +11,5 @@ name = "GPT 6.1 Sol"    # optional, shown in the model picker, defaults to id
 provider = "local"
 # upstream = "..."      # model name sent to the provider, defaults to id
 # context_window = 400000  # tokens, defaults to 128000; compaction starts at 80%
+# reasoning_efforts = ["low", "medium", "high"]  # levels sessions may pick; any when omitted
+# fast = true              # sessions may use the priority service tier (faster, more credits)

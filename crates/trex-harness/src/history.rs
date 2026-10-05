@@ -19,6 +19,8 @@ const CHECKPOINT_INTRO: &str = "The conversation above this point was compacted 
 Below are the user's most recent messages, oldest first, then a summary of the work so far. \
 Continue from where it left off; if a task was in progress, keep working on it without asking the user to repeat themselves.";
 const TRANSCRIPT_RESULT_CHARS: usize = 2_000;
+const PLAN_TOOL: &str = "update_plan";
+const PLAN_REMINDER_HEADER: &str = "[plan reminder]";
 const OMITTED: &str = "[... earlier entries omitted ...]";
 
 pub fn user_message(text: &str) -> InputItem {
@@ -159,7 +161,7 @@ fn transcript_entry(value: &Value) -> Option<String> {
     }
 }
 
-fn message_text(value: &Value) -> String {
+pub fn message_text(value: &Value) -> String {
     match &value["content"] {
         Value::String(text) => text.clone(),
         Value::Array(parts) => parts
@@ -223,6 +225,45 @@ pub fn close_dangling_calls(history: &mut Vec<InputItem>) {
     history.extend(closing);
 }
 
+// the unfinished steps of the model's latest plan, unless it was already reminded of that plan
+pub fn unfinished_plan(history: &[InputItem]) -> Option<Vec<String>> {
+    for item in history.iter().rev() {
+        let value = serde_json::to_value(item).ok()?;
+        let is_reminder = value["role"] == "developer"
+            && value["content"]
+                .as_str()
+                .is_some_and(|content| content.starts_with(PLAN_REMINDER_HEADER));
+        if is_reminder {
+            return None;
+        }
+        if value["type"] == "function_call" && value["name"] == PLAN_TOOL {
+            let arguments: Value = serde_json::from_str(value["arguments"].as_str()?).ok()?;
+            let steps: Vec<String> = arguments["plan"]
+                .as_array()?
+                .iter()
+                .filter(|step| step["status"] != "completed")
+                .filter_map(|step| step["step"].as_str().map(str::to_owned))
+                .collect();
+            return (!steps.is_empty()).then_some(steps);
+        }
+    }
+    None
+}
+
+pub fn plan_reminder(steps: &[String]) -> InputItem {
+    let steps: Vec<String> = steps.iter().map(|step| format!("- {step}")).collect();
+    InputItem::EasyMessage(EasyInputMessage {
+        r#type: MessageType::Message,
+        role: Role::Developer,
+        content: EasyInputContent::Text(format!(
+            "{PLAN_REMINDER_HEADER}\nYou were about to finish, but your plan still has unfinished steps:\n{}\n\
+             Finish them now. If any are no longer needed or can't be done, update the plan to say so, then reply.",
+            steps.join("\n")
+        )),
+        phase: None,
+    })
+}
+
 // a run that ended with the model's reply has nothing left to do, which matters when one is resumed
 pub fn ends_with_reply(history: &[InputItem]) -> bool {
     history.last().is_some_and(|item| {
@@ -283,6 +324,39 @@ mod tests {
 
         assert_eq!(history.len(), 4);
         assert_eq!(output_of(&history[3]), ("new".into(), INTERRUPTED.into()));
+    }
+
+    fn plan(steps: &[(&str, &str)]) -> InputItem {
+        let plan: Vec<Value> = steps
+            .iter()
+            .map(|(step, status)| json!({"step": step, "status": status}))
+            .collect();
+        let arguments = json!({"explanation": null, "plan": plan}).to_string();
+        serde_json::from_value(json!({"type": "function_call", "arguments": arguments, "call_id": "p1", "name": PLAN_TOOL})).unwrap()
+    }
+
+    #[test]
+    fn reminds_once_about_an_unfinished_plan() {
+        let mut history = vec![
+            user_message("build it"),
+            plan(&[("write code", "completed"), ("package it", "pending")]),
+            output_item("p1".into(), "plan updated".into()),
+            assistant("done"),
+        ];
+        let steps = unfinished_plan(&history).unwrap();
+        assert_eq!(steps, ["package it"]);
+        history.push(plan_reminder(&steps));
+        history.push(assistant("still done"));
+        assert_eq!(unfinished_plan(&history), None, "one reminder per plan");
+
+        history.push(plan(&[
+            ("write code", "completed"),
+            ("package it", "completed"),
+        ]));
+        assert_eq!(unfinished_plan(&history), None);
+        history.push(plan(&[("ship", "in_progress")]));
+        assert_eq!(unfinished_plan(&history).unwrap(), ["ship"]);
+        assert_eq!(unfinished_plan(&[user_message("hi")]), None);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use trex_sandbox::ExecEvent;
 
-use super::{Tool, ToolContext, truncate};
+use super::{Tool, ToolContext, process, truncate};
 use crate::event::{Event, OutputStream};
 
 const BASH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -18,6 +18,7 @@ pub struct Bash;
 #[derive(Deserialize)]
 struct Args {
     command: String,
+    background: Option<bool>,
 }
 
 impl Tool for Bash {
@@ -25,8 +26,9 @@ impl Tool for Bash {
         FunctionTool {
             name: "bash".into(),
             description: Some(
-                "Run a bash command in the sandbox and return its stdout, stderr and exit code. \
-                 Use read_file, write_file and edit_file for file contents instead of cat, echo or sed. \
+                "Run a bash command in the sandbox and return its stdout, stderr and exit code. Commands time out \
+                 after 120 seconds; set background for servers, watchers and longer jobs, then use process_output. \
+                 Use read_file, write_file, edit_file and apply_patch for file contents instead of cat, echo or sed. \
                  Network access is limited to an allowlist; if a host is blocked, tell the user which host you need \
                  and why, since they can approve it, instead of retrying or working around the block."
                     .into(),
@@ -34,9 +36,10 @@ impl Tool for Bash {
             parameters: Some(json!({
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "The bash command to run."}
+                    "command": {"type": "string", "description": "The bash command to run."},
+                    "background": {"type": ["boolean", "null"], "description": "Start the command in the background and return at once with a process id."}
                 },
-                "required": ["command"],
+                "required": ["command", "background"],
                 "additionalProperties": false,
             })),
             strict: Some(true),
@@ -51,6 +54,9 @@ impl Tool for Bash {
     ) -> BoxFuture<'a, anyhow::Result<String>> {
         Box::pin(async move {
             let args: Args = serde_json::from_value(args)?;
+            if args.background == Some(true) {
+                return process::start(&ctx, &args.command).await;
+            }
             let argv = vec!["bash".to_owned(), "-c".to_owned(), args.command];
             let mut stream = ctx
                 .openshell

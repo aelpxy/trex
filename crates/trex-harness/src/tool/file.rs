@@ -1,13 +1,18 @@
-use anyhow::bail;
+use anyhow::{Context, bail};
 use async_openai::types::responses::FunctionTool;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use similar::TextDiff;
 
 use super::{Tool, ToolContext, truncate};
+use crate::event::{Event, FileChange};
 
 const DEFAULT_READ_LINES: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
+// a diff is for showing the change to the user, so a huge one is cut short
+const MAX_DIFF_BYTES: usize = 64 * 1024;
+const MISSING_EXIT_CODE: i32 = 3;
 
 pub struct ReadFile;
 pub struct WriteFile;
@@ -102,7 +107,21 @@ impl Tool for WriteFile {
     ) -> BoxFuture<'a, anyhow::Result<String>> {
         Box::pin(async move {
             let args: WriteArgs = serde_json::from_value(args)?;
+            let previous = read_optional(&ctx, &args.path).await?;
             write(&ctx, &args.path, args.content.as_bytes()).await?;
+            let change = match previous {
+                Some(_) => FileChange::Updated,
+                None => FileChange::Added,
+            };
+            let previous = previous.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+            file_changed(
+                &ctx,
+                &args.path,
+                change,
+                previous.as_deref(),
+                Some(&args.content),
+            )
+            .await?;
             Ok(format!(
                 "wrote {} bytes to {}",
                 args.content.len(),
@@ -152,6 +171,14 @@ impl Tool for EditFile {
                 args.replace_all.unwrap_or(false),
             )?;
             write(&ctx, &args.path, edited.as_bytes()).await?;
+            file_changed(
+                &ctx,
+                &args.path,
+                FileChange::Updated,
+                Some(&content),
+                Some(&edited),
+            )
+            .await?;
             Ok(format!(
                 "replaced {count} occurrence{} in {}",
                 if count == 1 { "" } else { "s" },
@@ -161,7 +188,7 @@ impl Tool for EditFile {
     }
 }
 
-async fn read(ctx: &ToolContext<'_>, path: &str) -> anyhow::Result<String> {
+pub(super) async fn read(ctx: &ToolContext<'_>, path: &str) -> anyhow::Result<String> {
     match String::from_utf8(read_bytes(ctx, path).await?) {
         Ok(content) => Ok(content),
         Err(_) => bail!("{path} is not a utf-8 text file"),
@@ -192,6 +219,76 @@ pub(super) async fn write(ctx: &ToolContext<'_>, path: &str, content: &[u8]) -> 
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(())
+}
+
+// none when the file doesn't exist, which is not an error for tools that create files
+pub(super) async fn read_optional(
+    ctx: &ToolContext<'_>,
+    path: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let script = format!(r#"[ -e "$1" ] || exit {MISSING_EXIT_CODE}; cat -- "$1""#);
+    let argv = ["sh", "-c", &script, "sh", path].map(String::from).to_vec();
+    let output = ctx
+        .openshell
+        .output(ctx.sandbox().await?, argv, Vec::new())
+        .await?;
+    match output.exit_code {
+        Some(0) => Ok(Some(output.stdout)),
+        Some(MISSING_EXIT_CODE) => Ok(None),
+        _ => bail!("{}", String::from_utf8_lossy(&output.stderr).trim()),
+    }
+}
+
+pub(super) async fn remove(ctx: &ToolContext<'_>, path: &str) -> anyhow::Result<()> {
+    let argv = ["rm", "--", path].map(String::from).to_vec();
+    let output = ctx
+        .openshell
+        .output(ctx.sandbox().await?, argv, Vec::new())
+        .await?;
+    if output.exit_code != Some(0) {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
+pub(super) async fn file_changed(
+    ctx: &ToolContext<'_>,
+    path: &str,
+    change: FileChange,
+    old: Option<&str>,
+    new: Option<&str>,
+) -> anyhow::Result<()> {
+    let from = match &change {
+        FileChange::Moved { from } => from.as_str(),
+        _ => path,
+    };
+    let diff = unified_diff(from, path, old.unwrap_or(""), new.unwrap_or(""));
+    ctx.events
+        .send(Event::FileChanged {
+            path: path.to_owned(),
+            change,
+            diff,
+        })
+        .await
+        .context("event receiver dropped")
+}
+
+fn unified_diff(from: &str, to: &str, old: &str, new: &str) -> String {
+    let diff = TextDiff::from_lines(old, new)
+        .unified_diff()
+        .header(
+            &format!("a/{}", from.trim_start_matches('/')),
+            &format!("b/{}", to.trim_start_matches('/')),
+        )
+        .to_string();
+    if diff.len() <= MAX_DIFF_BYTES {
+        return diff;
+    }
+    let mut cut = MAX_DIFF_BYTES;
+    while !diff.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n[diff truncated]\n", &diff[..cut])
 }
 
 fn number_lines(content: &str, offset: usize, limit: usize) -> String {

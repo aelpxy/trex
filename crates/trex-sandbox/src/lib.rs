@@ -335,6 +335,25 @@ impl OpenShell {
         command: Vec<String>,
         stdin: Vec<u8>,
     ) -> anyhow::Result<ExecStream> {
+        match self.exec_once(sandbox, command.clone(), &stdin).await {
+            Err(status)
+                if status.code() == tonic::Code::FailedPrecondition
+                    && status.message().contains("not ready") =>
+            {
+                // the sandbox can leave Ready mid-run, e.g. stopped while idle or briefly restarting
+                self.start(sandbox).await?;
+                Ok(self.exec_once(sandbox, command, &stdin).await?)
+            }
+            result => Ok(result?),
+        }
+    }
+
+    async fn exec_once(
+        &self,
+        sandbox: &Sandbox,
+        command: Vec<String>,
+        stdin: &[u8],
+    ) -> Result<ExecStream, tonic::Status> {
         let start = proto::ExecSandboxRequest {
             sandbox: sandbox.name.clone(),
             workspace_scope: Some(proto::workspace_selector(&sandbox.workspace)),
@@ -728,9 +747,9 @@ mod tests {
         let written = run("mkdir -p /sandbox/project && echo kept > /sandbox/project/note.txt && pip install --quiet six && echo ok").await.unwrap();
         openshell.start(&sandbox).await.unwrap();
         openshell.stop(&sandbox).await.unwrap();
-        let while_stopped = run("echo up").await;
+        // an exec on a stopped sandbox starts it first
         let started = Instant::now();
-        openshell.start(&sandbox).await.unwrap();
+        let while_stopped = run("echo up").await.unwrap();
         let start_time = started.elapsed();
         let read = run("cat /sandbox/project/note.txt && python3 -c 'import six; print(\"six\")'")
             .await
@@ -740,7 +759,7 @@ mod tests {
         openshell.delete_workspace(user).await.unwrap();
 
         assert_eq!(String::from_utf8_lossy(&written.stdout).trim(), "ok");
-        assert!(while_stopped.map_or(true, |output| output.exit_code != Some(0)));
+        assert_eq!(String::from_utf8_lossy(&while_stopped.stdout), "up\n");
         assert_eq!(
             String::from_utf8_lossy(&read.stdout),
             "kept\nsix\n",

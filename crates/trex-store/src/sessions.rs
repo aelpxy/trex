@@ -10,7 +10,7 @@ use crate::Store;
 // sqlx only accepts static sql, so the shared column list is spliced in at compile time
 macro_rules! columns {
     () => {
-        "id, user_id, model, reasoning_effort, sandbox, sandbox_stopped, status, pending_question, last_error, \
+        "id, user_id, model, reasoning_effort, fast, sandbox, sandbox_stopped, status, pending_question, last_error, \
          EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at, EXTRACT(EPOCH FROM updated_at)::BIGINT AS updated_at"
     };
 }
@@ -28,6 +28,7 @@ pub struct Session {
     pub user_id: Uuid,
     pub model: String,
     pub reasoning_effort: Option<String>,
+    pub fast: bool,
     pub sandbox: Option<String>,
     pub sandbox_stopped: bool,
     pub status: SessionStatus,
@@ -114,6 +115,7 @@ impl FromRow<'_, PgRow> for Session {
             user_id: row.try_get("user_id")?,
             model: row.try_get("model")?,
             reasoning_effort: row.try_get("reasoning_effort")?,
+            fast: row.try_get("fast")?,
             sandbox: row.try_get("sandbox")?,
             sandbox_stopped: row.try_get("sandbox_stopped")?,
             status: SessionStatus::parse(&status)
@@ -132,9 +134,10 @@ impl Store {
         user: Uuid,
         model: &str,
         reasoning_effort: Option<&str>,
+        fast: bool,
     ) -> anyhow::Result<Session> {
         let sql = concat!(
-            "INSERT INTO sessions (id, user_id, model, reasoning_effort) VALUES ($1, $2, $3, $4) RETURNING ",
+            "INSERT INTO sessions (id, user_id, model, reasoning_effort, fast) VALUES ($1, $2, $3, $4, $5) RETURNING ",
             columns!()
         );
         sqlx::query_as(sql)
@@ -142,6 +145,7 @@ impl Store {
             .bind(user)
             .bind(model)
             .bind(reasoning_effort)
+            .bind(fast)
             .fetch_one(&self.pg)
             .await
             .context("failed to create session")
@@ -355,21 +359,21 @@ impl Store {
     }
 
     // only a running session takes messages into its queue; otherwise the caller starts a run
-    pub async fn queue_message(&self, user: Uuid, id: Uuid, content: &str) -> anyhow::Result<bool> {
+    pub async fn queue_message(&self, user: Uuid, id: Uuid, item: &Value) -> anyhow::Result<bool> {
         let result = sqlx::query(
-            "UPDATE sessions SET queued_messages = queued_messages || JSONB_BUILD_ARRAY($3::TEXT), updated_at = NOW() \
+            "UPDATE sessions SET queued_messages = queued_messages || JSONB_BUILD_ARRAY($3::JSONB), updated_at = NOW() \
              WHERE id = $1 AND user_id = $2 AND status = 'running'",
         )
         .bind(id)
         .bind(user)
-        .bind(content)
+        .bind(item)
         .execute(&self.pg)
         .await
         .context("failed to queue message")?;
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn take_queued_messages(&self, user: Uuid, id: Uuid) -> anyhow::Result<Vec<String>> {
+    pub async fn take_queued_messages(&self, user: Uuid, id: Uuid) -> anyhow::Result<Vec<Value>> {
         let queued: Option<Value> = sqlx::query_scalar(
             "UPDATE sessions s SET queued_messages = '[]'::JSONB \
              FROM (SELECT id, queued_messages FROM sessions WHERE id = $1 AND user_id = $2 FOR UPDATE) old \
@@ -497,10 +501,11 @@ mod tests {
         let (alice, mallory) = (Uuid::now_v7(), Uuid::now_v7());
 
         let session = store
-            .create_session(alice, "gpt-6.1-sol", Some("low"))
+            .create_session(alice, "gpt-6.1-sol", Some("low"), true)
             .await
             .unwrap();
         assert_eq!(session.status, SessionStatus::Idle);
+        assert!(session.fast);
         assert!(store.session(mallory, session.id).await.unwrap().is_none());
         assert!(
             store
@@ -561,19 +566,19 @@ mod tests {
 
         assert!(
             store
-                .queue_message(alice, session.id, "first")
+                .queue_message(alice, session.id, &json!("first"))
                 .await
                 .unwrap()
         );
         assert!(
             store
-                .queue_message(alice, session.id, "second")
+                .queue_message(alice, session.id, &json!({"n": 2}))
                 .await
                 .unwrap()
         );
         assert!(
             !store
-                .queue_message(mallory, session.id, "evil")
+                .queue_message(mallory, session.id, &json!("evil"))
                 .await
                 .unwrap()
         );
@@ -593,7 +598,7 @@ mod tests {
         );
         assert_eq!(
             store.take_queued_messages(alice, session.id).await.unwrap(),
-            ["first", "second"]
+            [json!("first"), json!({"n": 2})]
         );
         assert!(
             store
@@ -658,7 +663,7 @@ mod tests {
         );
         assert!(
             !store
-                .queue_message(alice, session.id, "late")
+                .queue_message(alice, session.id, &json!("late"))
                 .await
                 .unwrap(),
             "only running sessions queue"

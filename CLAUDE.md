@@ -57,6 +57,8 @@ name = "GPT 6.1 Sol"    # optional, display name for pickers, defaults to id
 provider = "local"
 upstream = "..."        # optional, model name sent upstream, defaults to id
 context_window = 400000 # optional, tokens, defaults to 128000; compaction starts at 80%
+reasoning_efforts = ["low", "medium", "high"] # optional, levels sessions may pick; any when omitted
+fast = true             # optional, sessions may use the priority service tier (service_tier: priority)
 ```
 
 Env vars:
@@ -78,23 +80,28 @@ Auth is temporary: every `/v1` request names its user in `X-Trex-User: <uuid>` u
 
 Docs: `GET /docs` (Scalar, loaded from its CDN by `api/docs.html`) renders `GET /openapi.json`, which utoipa generates from the handlers. Every handler has a `#[utoipa::path]` (summary line, `operation_id`, tag, params, responses with `ErrorResponse` for errors) and is registered with `routes!` in `api::routes()`, so the router and the spec can't drift; `spec_documents_every_route` lists the expected paths. Request and response bodies are typed structs deriving `ToSchema`, never `json!`.
 
-- `GET /v1/models`: `{id, name}` in `trex.toml` order
-- `POST /v1/sessions` `{model, reasoning_effort?}`, `GET /v1/sessions?limit&starting_after`, `GET|DELETE /v1/sessions/{id}`
+- `GET /v1/models`: `{id, name, context_window, reasoning_efforts, fast}` in `trex.toml` order; `POST /v1/sessions` rejects an effort the model doesn't list
+- `POST /v1/sessions` `{model, reasoning_effort?, fast?}`, `GET /v1/sessions?limit&starting_after`, `GET|DELETE /v1/sessions/{id}`
 - `GET /v1/sessions/{id}/items`: the conversation as trex items (`message`, `tool_call`, `tool_result`, `reasoning`, `compaction`)
-- `POST /v1/sessions/{id}/messages` `{content, interrupt?}` starts a run (202); while one is running the message is queued (`queued: true`) and `interrupt` stops the agent's current step to read it
+- `POST /v1/sessions/{id}/messages` `{content, interrupt?, attachments?: [{data (base64 data url) | library_path, filename?}]}` starts a run (202); while one is running the message is queued (`queued: true`) and `interrupt` stops the agent's current step to read it
 - `POST /v1/sessions/{id}/answers` `{answers: [{selected, text}]}` resumes a `needs_input` session (202); 409 otherwise
 - `POST /v1/sessions/{id}/cancel`
 - `GET /v1/sessions/{id}/access_requests`, `POST .../access_requests/{request_id}/approve|reject`
 - `GET /v1/sessions/{id}/events`: SSE; resumes from `Last-Event-ID`, `?from=start` replays retained events, otherwise starts at the live tail
 - `GET /v1/library`, `GET|PUT|DELETE /v1/library/files/{path}`
+- `GET /v1/attachments/{id}`: a message attachment (ids come from `message` items' `attachments`)
 
-Events (`event:` equals the payload `type`): `run.started`, `run.resumed`, `sandbox.creating`, `sandbox.starting`, `sandbox.ready`, `text.delta`, `reasoning.delta`, `tool.call`, `tool.output`, `tool.result`, `usage`, `access.requested`, `question`, `model.retrying`, `context.compacting`, `context.compacted`, `message.received`, `run.interrupted`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
+Events (`event:` equals the payload `type`): `run.started`, `run.resumed`, `sandbox.creating`, `sandbox.starting`, `sandbox.ready`, `text.delta`, `reasoning.delta`, `tool.call`, `tool.output`, `tool.result`, `usage`, `access.requested`, `question`, `model.retrying`, `context.compacting`, `context.compacted`, `message.received`, `run.interrupted`, `plan.updated`, `file.changed`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
 
 Agent loop robustness (`crates/trex-harness/src/agent.rs`):
 
 - Model requests are retried with exponential backoff (5 attempts) on dropped or stalled streams (300s idle timeout), 408/429/5xx, and `server_error`/`rate_limit_exceeded` responses, on top of the client's own connection retries. Tools only run after a response completes, so a retry has no side effects; `model.retrying` tells the UI to discard the partial turn.
 - Compaction is trex's own, so it works with any provider (native Responses compaction doesn't shrink the context on our endpoint). When a turn's tokens reach 80% of the model's `context_window`, or a request fails with `context_length_exceeded`, the model writes a handoff summary (same prefix with `tool_choice: none`, so it hits the prompt cache; a trimmed text transcript if even that overflows). It is appended as a developer-role checkpoint message (`history::checkpoint`) holding the recent user messages and the summary. History stays append-only: requests send items from the latest checkpoint (`history::context_start`), and the items API shows it as a `compaction` item.
 - Every request carries the session id as `prompt_cache_key`.
+- Edits: `apply_patch` takes Codex's patch format (`*** Begin Patch`, Add/Update/Delete/Move, `@@` chunks), plans every hunk before writing anything (all or nothing), and matches context exactly, then ignoring trailing, then surrounding whitespace. Every file tool (`apply_patch`, `write_file`, `edit_file`) emits `file.changed` with a unified diff (`similar`, capped at 64 KiB).
+- Background processes: `bash` with `background: true` starts the command under a `setsid` wrapper and returns a process id; output, exit code and control files live in `/tmp/.processes/<id>/`, so they survive trex restarts and any later run can read them (`process_output`, which can wait up to 60s, and lists processes without an id). OpenShell sandboxes each exec so one can't signal another's processes: `stop_process` drops a `stop` file and the wrapper kills its own process group. Processes die when the sandbox idles out.
+- Attachments (`crates/trex-harness/src/attachment.rs`): images (PNG/JPEG/GIF/WebP), PDFs and text files, typed by their bytes, never the client's mime type. They're stored content-addressed at `users/{uuid}/attachments/{sha256}` (outside the library listing) and history items refer to them as `attachment://{sha256}#{mime}` in `input_image.image_url` / `input_file.file_data`; `attachment::resolve` swaps in data urls right before each model request, so history stays small. User messages carry them as content parts; `view_image` returns a sandbox image to the model the same way (tools return `ToolOutput::Content` via `Tool::call_content`).
+- Plans: `update_plan` keeps a checklist (`plan.updated`). If the model tries to finish while its latest plan has unfinished steps, a `[plan reminder]` developer message is appended once per plan and the run continues. Developer messages are hidden from the items API except checkpoints.
 
 Steering: messages sent during a run are queued in `sessions.queued_messages`; the agent takes them before every step (`agent::Inbox`) and when it would finish. A run only finishes while the queue is empty (conditional update), so a message sent as it ends continues it; cancelled and failed runs save leftover messages to history. An interrupt (`agent::Steering::interrupts`, in-memory per instance) drops the current step: partial output is discarded, unfinished tool calls are closed as interrupted (tool outputs are saved as each one finishes).
 

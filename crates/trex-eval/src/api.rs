@@ -82,12 +82,32 @@ impl Api {
         content: &str,
         interrupt: bool,
     ) -> anyhow::Result<Value> {
+        self.send_with(session, content, interrupt, json!([])).await
+    }
+
+    pub async fn send_with(
+        &self,
+        session: &str,
+        content: &str,
+        interrupt: bool,
+        attachments: Value,
+    ) -> anyhow::Result<Value> {
+        let body = json!({"content": content, "interrupt": interrupt, "attachments": attachments});
         self.call(
             Method::POST,
             &format!("/sessions/{session}/messages"),
-            Some(json!({"content": content, "interrupt": interrupt})),
+            Some(body),
         )
         .await
+    }
+
+    pub async fn attachment(&self, id: &str) -> anyhow::Result<Vec<u8>> {
+        let response = self
+            .request(Method::GET, &format!("/attachments/{id}"))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.bytes().await?.to_vec())
     }
 
     pub async fn answer(&self, session: &str, answers: Value) -> anyhow::Result<()> {

@@ -1,4 +1,4 @@
-use std::{fs, path::Path as FsPath, sync::Arc};
+use std::{fmt::Write, fs, path::Path as FsPath, sync::Arc};
 
 use anyhow::Context;
 use futures::TryStreamExt;
@@ -6,6 +6,7 @@ use object_store::{
     ObjectStore, ObjectStoreExt, aws::AmazonS3Builder, local::LocalFileSystem, memory::InMemory,
     path::Path,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub struct S3Config {
@@ -93,6 +94,32 @@ impl Library {
             .with_context(|| format!("failed to delete {path}"))
     }
 
+    // attachments are content-addressed and kept apart from the files the user browses
+    pub async fn put_attachment(&self, user: Uuid, content: Vec<u8>) -> anyhow::Result<String> {
+        let mut hash = String::with_capacity(64);
+        for byte in Sha256::digest(&content) {
+            write!(hash, "{byte:02x}").expect("writing to a string cannot fail");
+        }
+        self.store
+            .put(&attachment_key(user, &hash)?, content.into())
+            .await
+            .context("failed to store attachment")?;
+        Ok(hash)
+    }
+
+    pub async fn get_attachment(&self, user: Uuid, hash: &str) -> anyhow::Result<Vec<u8>> {
+        let object = self
+            .store
+            .get(&attachment_key(user, hash)?)
+            .await
+            .with_context(|| format!("failed to read attachment {hash}"))?;
+        let bytes = object
+            .bytes()
+            .await
+            .with_context(|| format!("failed to read attachment {hash}"))?;
+        Ok(bytes.to_vec())
+    }
+
     pub async fn list(&self, user: Uuid) -> anyhow::Result<Vec<LibraryFile>> {
         let root = root(user);
         let prefix = format!("{root}/");
@@ -141,6 +168,18 @@ pub fn is_not_found(error: &anyhow::Error) -> bool {
     })
 }
 
+fn attachment_key(user: Uuid, hash: &str) -> anyhow::Result<Path> {
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(InvalidPath(format!("invalid attachment {hash:?}")).into());
+    }
+    Ok(Path::from_iter([
+        "users",
+        &user.to_string(),
+        "attachments",
+        hash,
+    ]))
+}
+
 fn root(user: Uuid) -> Path {
     Path::from_iter(["users", &user.to_string(), "library"])
 }
@@ -167,6 +206,34 @@ fn key(user: Uuid, path: &str) -> anyhow::Result<Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stores_attachments_by_content() {
+        let library = Library::in_memory();
+        let (alice, mallory) = (Uuid::now_v7(), Uuid::now_v7());
+        let hash = library
+            .put_attachment(alice, b"pixels".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(hash.len(), 64);
+        assert_eq!(
+            library
+                .put_attachment(alice, b"pixels".to_vec())
+                .await
+                .unwrap(),
+            hash
+        );
+        assert_eq!(
+            library.get_attachment(alice, &hash).await.unwrap(),
+            b"pixels"
+        );
+        assert!(library.get_attachment(mallory, &hash).await.is_err());
+        assert!(library.get_attachment(alice, "../library/x").await.is_err());
+        assert!(
+            library.list(alice).await.unwrap().is_empty(),
+            "attachments stay out of the library"
+        );
+    }
 
     #[test]
     fn rejects_escaping_paths() {

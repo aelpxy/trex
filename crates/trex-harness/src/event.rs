@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use serde::Deserialize;
 use trex_sandbox::AccessRequest;
 
 use crate::question::Question;
@@ -44,6 +45,16 @@ pub enum Event {
     },
     Compacting,
     Compacted,
+    // a tool created, changed or removed a file in the sandbox; `diff` is a unified diff
+    FileChanged {
+        path: String,
+        change: FileChange,
+        diff: String,
+    },
+    PlanUpdated {
+        explanation: Option<String>,
+        steps: Vec<PlanStep>,
+    },
     // a message the user sent mid-run, now appended to history
     MessageReceived {
         content: String,
@@ -70,4 +81,25 @@ pub struct Usage {
 pub enum OutputStream {
     Stdout,
     Stderr,
+}
+
+#[derive(Deserialize)]
+pub struct PlanStep {
+    pub step: String,
+    pub status: StepStatus,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+pub enum FileChange {
+    Added,
+    Updated,
+    Deleted,
+    Moved { from: String },
 }
