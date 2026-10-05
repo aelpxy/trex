@@ -1,0 +1,10 @@
+.git
+target
+frontend/node_modules
+frontend/build
+frontend/.react-router
+data
+certs
+.env
+trex.toml
+deploy

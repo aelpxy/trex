@@ -37,7 +37,8 @@ function isBusy(part: Part | undefined) {
   return false;
 }
 
-function PartView({ part, onRespond, onRetry }: { part: Part; onRespond: Respond; onRetry?: () => void }) {
+// `waiting` is set while an access request in the reply is unanswered, which holds up its tool
+function PartView({ part, onRespond, onRetry, waiting }: { part: Part; onRespond: Respond; onRetry?: () => void; waiting?: boolean }) {
   switch (part.type) {
     case "text":
       return <Markdown>{part.text}</Markdown>;
@@ -46,7 +47,7 @@ function PartView({ part, onRespond, onRetry }: { part: Part; onRespond: Respond
     case "status":
       return <RunStatus part={part} />;
     case "tool":
-      return <ToolCall part={part} />;
+      return <ToolCall part={part} waiting={waiting} />;
     case "plan":
       return <PlanCard part={part} />;
     case "error":
@@ -123,13 +124,14 @@ function RegenerateButton({ onRegenerate }: { onRegenerate: () => Promise<void> 
 
 function AssistantMessageView({ message, onRespond, onRetry, onRegenerate }: { message: AssistantMessage } & MessageProps) {
   const text = message.state === "running" ? "" : replyText(message);
-  const showThinking = message.state === "running" && (message.writing !== undefined || !isBusy(message.parts.at(-1)));
+  const waiting = message.parts.some((part) => part.type === "access" && part.state === "pending");
+  const showThinking = message.state === "running" && !waiting && (message.writing !== undefined || !isBusy(message.parts.at(-1)));
 
   return (
     <div className="space-y-3">
       {blocksOf(message.parts).map((block, at, blocks) => {
-        if (block.kind === "part") return <PartView key={partKey(block.part, block.index)} part={block.part} onRespond={onRespond} onRetry={onRetry} />;
-        const steps = block.parts.map((part, offset) => <PartView key={partKey(part, block.first + offset)} part={part} onRespond={onRespond} />);
+        if (block.kind === "part") return <PartView key={partKey(block.part, block.index)} part={block.part} onRespond={onRespond} onRetry={onRetry} waiting={waiting} />;
+        const steps = block.parts.map((part, offset) => <PartView key={partKey(part, block.first + offset)} part={part} onRespond={onRespond} waiting={waiting} />);
         // the steps the agent is on right now stay open so they can be followed
         const live = message.state === "running" && at === blocks.length - 1;
         if (live || block.parts.length < 2) return <div key={`steps-${block.first}`} className="space-y-3">{steps}</div>;

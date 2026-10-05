@@ -1,7 +1,7 @@
 import { Collapsible } from "@base-ui/react/collapsible";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@base-ui/react/button";
-import { LuActivity, LuAppWindow, LuChevronRight, LuCircleCheck, LuCircleX, LuClock, LuFileCode, LuFilePen, LuFileText, LuGlobe, LuImage, LuLibrary, LuLoaderCircle, LuPanelRightOpen, LuSearch, LuSquareTerminal } from "react-icons/lu";
+import { LuActivity, LuAppWindow, LuChevronRight, LuCircleCheck, LuCircleX, LuClock, LuFileCode, LuFilePen, LuFileText, LuGlobe, LuImage, LuLibrary, LuLoaderCircle, LuPanelRightOpen, LuSearch, LuShieldAlert, LuSquareTerminal } from "react-icons/lu";
 
 import { diffRows, diffStats } from "~/components/diff/diff";
 import { DiffView } from "~/components/diff/diff-view";
@@ -99,8 +99,12 @@ function StateIcon({ state }: { state: ToolPart["state"] }) {
   return <LuCircleCheck size={14} className="text-muted" />;
 }
 
-export function ToolCall({ part }: { part: ToolPart }) {
+// the tools that pause on a blocked connection until the user answers its access request
+const NETWORK_TOOLS = new Set(["shell", "browse"]);
+
+export function ToolCall({ part, waiting = false }: { part: ToolPart; waiting?: boolean }) {
   const shell = part.name === "shell";
+  const held = waiting && part.state === "running" && NETWORK_TOOLS.has(part.name);
   const edit = part.name === "edit_file";
   const file = FILE_TOOLS.has(part.name);
   const subject = shell ? part.input.command : (part.input.path ?? part.input.detail);
@@ -117,8 +121,17 @@ export function ToolCall({ part }: { part: ToolPart }) {
           {part.summary && <span className="shrink-0 font-mono text-[11px] text-muted">{part.summary}</span>}
           {edit && part.input.path && <EditSummary path={part.input.path} before={part.input.before ?? ""} after={part.input.after ?? ""} />}
           {part.endedAt && <span className="shrink-0 text-[11px] text-muted tabular-nums">{formatDuration(part.endedAt - part.startedAt)}</span>}
-          <span className="sr-only">{STATE_LABEL[part.state]}</span>
-          <StateIcon state={part.state} />
+          {held ? (
+            <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted">
+              <LuShieldAlert size={14} />
+              Waiting for your approval
+            </span>
+          ) : (
+            <>
+              <span className="sr-only">{STATE_LABEL[part.state]}</span>
+              <StateIcon state={part.state} />
+            </>
+          )}
           <LuChevronRight size={13} className="shrink-0 text-muted transition-transform duration-150 group-data-panel-open:rotate-90" />
         </Collapsible.Trigger>
         {file && part.name !== "image" && part.input.path && (
@@ -144,7 +157,7 @@ export function ToolCall({ part }: { part: ToolPart }) {
                 <AttachmentImage key={hash} hash={hash} alt={`Screenshot of ${part.input.detail ?? "the page"}`} />
               ))}
               <pre className={`max-h-72 overflow-auto font-mono text-[11px] leading-5 whitespace-pre-wrap ${part.state === "error" ? "text-danger" : "text-muted"}`}>
-                {withoutImages(part.output) || (part.state === "running" ? "Opening the page…" : "No output")}
+                {withoutImages(part.output) || (held ? "The page needs network access. Approve or reject the request below to continue." : part.state === "running" ? "Opening the page…" : "No output")}
               </pre>
             </div>
           ) : part.name === "image" && part.state === "done" && part.input.path ? (

@@ -3,3 +3,9 @@
 /.env
 /trex.toml
 /data
+
+# production secrets and data, kept on the deploy host only
+deploy/.env
+deploy/trex.toml
+deploy/certs/
+deploy/data/

@@ -1,0 +1,88 @@
+name: trex
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: trex
+      POSTGRES_DB: trex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres:/var/lib/postgresql
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "trex", "-d", "trex"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  valkey:
+    image: docker.io/valkey/valkey:alpine
+    restart: always
+    command:
+      [
+        "valkey-server",
+        "--appendonly",
+        "yes",
+        "--requirepass",
+        "${VALKEY_PASSWORD:?set VALKEY_PASSWORD in .env}",
+      ]
+    volumes:
+      - valkey:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "valkey-cli",
+          "-a",
+          "${VALKEY_PASSWORD}",
+          "--no-auth-warning",
+          "ping",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  trex:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: localhost/trex:latest
+    restart: always
+    network_mode: host
+    userns_mode: keep-id
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    volumes:
+      - ./trex.toml:/etc/trex/trex.toml:ro,Z
+      - ./certs/openshell:/etc/trex/openshell:ro,Z
+      - ./data/library:/var/lib/trex/library:Z
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  cloudflared:
+    image: docker.io/cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: always
+    network_mode: host
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - trex
+
+volumes:
+  postgres:
+  valkey:
