@@ -51,14 +51,6 @@ impl Api {
         Ok(Self { http, base, token })
     }
 
-    pub fn admin(base: String, token: String) -> Self {
-        Self {
-            http: Client::new(),
-            base,
-            token,
-        }
-    }
-
     pub fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
         self.http
             .request(method, format!("{}/v1{path}", self.base))

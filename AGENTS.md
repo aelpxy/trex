@@ -40,7 +40,6 @@ Loaded once in `crates/trex-server/src/config.rs` into `Config` from env vars (`
 - `TREX_SANDBOX_IMAGE` (default `localhost/trex-sandbox:latest`), `TREX_SANDBOX_POLICY` (default `sandbox-policy.yaml`), `TREX_SANDBOX_IDLE_SECS` (default `300`)
 - `TREX_LIBRARY_DIR` (default `data/library`) or `TREX_S3_BUCKET` + `TREX_S3_ENDPOINT`/`_REGION`/`_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY`/`_FORCE_PATH_STYLE` for any S3-compatible provider
 - `TREX_PREVIEW_ADDR` (default `127.0.0.1:8081`), `TREX_PREVIEW_URL` (default `http://{id}.preview.localhost:8081`; `{id}` must start the host)
-- `TREX_ADMIN_TOKEN`: optional secret that enables `/v1/admin`; never log it
 
 `trex.toml` is the operator's model catalog (`Models::from_toml`). It holds provider api keys, so it's gitignored; `trex.toml.example` is the template:
 
@@ -57,16 +56,17 @@ upstream = "..."        # optional model name sent upstream, defaults to id
 context_window = 400000 # optional, defaults to 128000; compaction starts at 80%
 reasoning_efforts = ["low", "medium", "high"] # optional levels sessions may pick; any when omitted
 fast = true             # optional, allows the priority service tier
-price = { input = 1000, cached_input = 100, output = 4000 } # optional credits per million tokens; fast_multiplier defaults to 2
+price = { input = 1_250_000, cached_input = 125_000, output = 10_000_000 } # optional credits per million tokens; fast_multiplier defaults to 2
 
 [plans.free]            # optional; without plans, credits are tracked but not enforced
 name = "Free"
-monthly_credits = 100000 # the balance is topped up to this once a month
+monthly_credits = 5_000_000 # $5; the balance is topped up to this once a month
 ```
 
 ## Tenancy and accounts
 
 - The workspace is the tenant. Sessions, projects, the library, sandboxes, usage and credits belong to a workspace; users are members (`workspace_members`, one personal workspace each for now). Every store function on tenant data takes the workspace id and filters by it.
+- Users have a `role`, `user` or `admin`; admins use `/v1/admin` and the Admin page. Grant or revoke it with `trex admin grant|revoke <email>` (runs against the configured database and exits).
 - Auth is email + password (argon2id, hashed on a blocking thread). Signup and login return a bearer token (`trex_` + 64 hex, 30 days; only its sha256 is stored). `api::auth::Auth` resolves the user and workspace (`Trex-Workspace: ws_...` header, or the user's first) and handlers use `Auth.workspace` as the tenant; `api::auth::Account` is for endpoints that aren't workspace scoped. Email verification and password reset are not built yet (`users.email_verified_at` exists for it).
 - OpenShell: one OpenShell workspace per trex workspace (`workspace_name(uuid)` = `u-` + 17 hex chars of sha256, labelled `trex-workspace=<uuid>`, or the legacy `trex-user=<uuid>`, verified on every `ensure_workspace`). trex's mTLS identity is a gateway platform admin, so trex enforces tenancy: never build a `Sandbox { workspace, name }` for a request from anything but its own workspace.
 
@@ -80,7 +80,7 @@ monthly_credits = 100000 # the balance is topped up to this once a month
 - **Runs** (`runs.rs`): one per session, claimed with a conditional update. Each holds a lease (`sessions.run_id` + `run_heartbeat_at`, renewed every 10s); every instance resumes runs whose heartbeat is over 30s old (`run.resumed`). A run that loses its lease stops without touching the session; a resumed run whose history already ends with a reply just finishes.
 - **Steering**: messages sent mid-run are queued in `sessions.queued_messages`; the agent takes them before every step and when it would finish (`agent::Inbox`). A run only finishes while the queue is empty, so a message sent as it ends continues it; cancelled and failed runs save leftover messages. An interrupt (`agent::Steering::interrupts`, in-memory per instance) drops the current step and closes unfinished tool calls as interrupted.
 - **Plans**: `update_plan` keeps a checklist (`plan.updated`); finishing with unfinished steps appends a `[plan reminder]` developer message once per plan. Developer messages are hidden from the items API except checkpoints.
-- **Credits** (`credits.rs`): each response is charged `ceil((uncached × input + cached × cached_input + output × output) × fast_multiplier? / 1M)` from the model's `price`, recorded with its ledger entry in one transaction (`Store::charge_usage`). With plans configured, `credits::require` refills the monthly allowance and refuses new messages at zero (402 `insufficient_credits_error`); a running agent checks `agent::Budget` before each request after its first and stops with `run.failed` `code: insufficient_credits`. Title generation isn't charged.
+- **Credits** (`credits.rs`) are US dollars in millionths: 1 credit = $0.000001, so `1_000_000` is $1. Each response is charged `ceil((uncached × input + cached × cached_input + output × output) × fast_multiplier? / 1M)` from the model's `price`, recorded with its ledger entry in one transaction (`Store::charge_usage`). With plans configured, `credits::require` refills the monthly allowance and refuses new messages at zero (402 `insufficient_credits_error`); a running agent checks `agent::Budget` before each request after its first and stops with `run.failed` `code: insufficient_credits`. Title generation isn't charged.
 
 ## Tools
 
@@ -122,7 +122,7 @@ Docs: `GET /docs` (Scalar) renders `GET /openapi.json`, generated by utoipa. Eve
 - `POST /v1/sessions/{id}/previews` `{port}` returns a preview `url`
 - `GET /v1/sessions/{id}/files`, `GET|PUT|DELETE /v1/sessions/{id}/files/{path}`, `POST .../files/move`
 - Library: `GET /v1/library?prefix`, `GET|PUT|DELETE /v1/library/files/{path}`, `POST /v1/library/move` (never overwrites); `GET /v1/attachments/{id}`
-- Credits: `GET /v1/credits`, `GET /v1/credits/ledger`; admin (with `TREX_ADMIN_TOKEN`): `POST /v1/admin/workspaces/{id}/credits|plan`
+- Credits: `GET /v1/plans`, `GET /v1/credits`, `GET /v1/credits/ledger`; admin (users with `role: admin`): `GET /v1/admin/workspaces`, `POST /v1/admin/workspaces/{id}/credits|plan`
 
 Events: `run.started`, `run.resumed`, `sandbox.creating`, `sandbox.starting`, `sandbox.ready`, `sandbox.replaced`, `text.delta`, `reasoning.delta`, `tool.call.started`, `tool.call.delta`, `tool.call`, `tool.output`, `tool.result`, `file.changed`, `plan.updated`, `preview.opened`, `usage`, `access.requested`, `question`, `model.retrying`, `context.compacting`, `context.compacted`, `message.received`, `run.interrupted`, `session.updated`, then one of `run.completed`, `run.needs_input`, `run.cancelled`, `run.failed`.
 

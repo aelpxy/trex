@@ -8,16 +8,21 @@ mod runs;
 
 use std::sync::Arc;
 
+use anyhow::bail;
 use tokio::{net::TcpListener, signal};
 use trex_harness::tool::Tools;
 use trex_sandbox::OpenShell;
-use trex_store::Store;
+use trex_store::{Store, accounts::UserRole};
 
 use crate::{api::AppState, config::Config, runs::Runs};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        return command(&config, &args).await;
+    }
     logging::init(config.log_format);
 
     let openshell =
@@ -44,7 +49,6 @@ async fn main() -> anyhow::Result<()> {
         openshell,
         models,
         plans: config.plans,
-        admin_token: config.admin_token,
         tools: Tools::standard()?,
         library: config.library,
         sandbox_image: config.sandbox_image,
@@ -73,6 +77,26 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown())
         .await?;
 
+    Ok(())
+}
+
+const USAGE: &str = "usage: trex [admin grant|revoke <email>]";
+
+// one-off operator commands; running without arguments starts the server
+async fn command(config: &Config, args: &[String]) -> anyhow::Result<()> {
+    let [group, action, email] = args else {
+        bail!(USAGE);
+    };
+    let role = match (group.as_str(), action.as_str()) {
+        ("admin", "grant") => UserRole::Admin,
+        ("admin", "revoke") => UserRole::User,
+        _ => bail!(USAGE),
+    };
+    let store = Store::connect(&config.database_url, &config.redis_url).await?;
+    if !store.set_user_role(email, role).await? {
+        bail!("no user has the email {email}");
+    }
+    println!("{email} is now {}", role.as_str());
     Ok(())
 }
 

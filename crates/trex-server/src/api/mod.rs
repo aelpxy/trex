@@ -49,7 +49,6 @@ pub struct AppState {
     pub openshell: OpenShell,
     pub models: Models,
     pub plans: Plans,
-    pub admin_token: Option<String>,
     pub tools: Tools,
     pub library: Library,
     pub sandbox_image: String,
@@ -101,8 +100,10 @@ fn routes() -> (Router<Arc<AppState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(account::logout))
         .routes(routes!(account::me, account::update_me))
         .routes(routes!(account::change_password))
+        .routes(routes!(credits::plans))
         .routes(routes!(credits::get))
         .routes(routes!(credits::ledger))
+        .routes(routes!(admin::list_workspaces))
         .routes(routes!(admin::adjust_credits))
         .routes(routes!(admin::set_plan))
         .routes(routes!(models))
@@ -187,7 +188,7 @@ impl Modify for BearerToken {
         let scheme = HttpBuilder::new()
             .scheme(HttpAuthScheme::Bearer)
             .description(Some(
-                "A token from POST /v1/auth/signup or /v1/auth/login, or TREX_ADMIN_TOKEN for /v1/admin.",
+                "A token from POST /v1/auth/signup or /v1/auth/login; /v1/admin needs a user with the admin role.",
             ))
             .build();
         components.add_security_scheme("token", SecurityScheme::Http(scheme));
@@ -330,8 +331,10 @@ mod tests {
                 "/v1/auth/logout",
                 "/v1/me",
                 "/v1/me/password",
+                "/v1/plans",
                 "/v1/credits",
                 "/v1/credits/ledger",
+                "/v1/admin/workspaces",
                 "/v1/admin/workspaces/{id}/credits",
                 "/v1/admin/workspaces/{id}/plan",
                 "/v1/models",

@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 
 const CREDITS_EMAIL: &str = "eval-credits@trex.local";
+const ADMIN_EMAIL: &str = "eval-admin@trex.local";
 
 use crate::{
     api::{Api, Watch},
@@ -1153,7 +1154,8 @@ async fn projects_and_titles(cx: Arc<Ctx>) -> anyhow::Result<()> {
 
 async fn stops_when_out_of_credits(cx: Arc<Ctx>) -> anyhow::Result<()> {
     let api = Api::account(cx.server.url(), CREDITS_EMAIL, crate::EVAL_PASSWORD).await?;
-    let admin = Api::admin(cx.server.url(), cx.server.admin_token.clone());
+    let admin = Api::account(cx.server.url(), ADMIN_EMAIL, crate::EVAL_PASSWORD).await?;
+    cx.server.grant_admin(ADMIN_EMAIL).await?;
     let me = api.get("/me").await?;
     let workspace = me["workspaces"][0]["id"]
         .as_str()

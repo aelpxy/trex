@@ -3,19 +3,21 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{FromRequestParts, Path, State},
-    http::{header, request::Parts},
+    http::request::Parts,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use trex_store::accounts::UserRole;
+
 use super::{
-    AppState,
-    auth::hash_token,
+    AppState, List,
+    auth::Account,
     error::{ApiError, ErrorResponse},
     ids::{self, WORKSPACE},
 };
 
-// the operator, authenticated by TREX_ADMIN_TOKEN; without one the admin endpoints are off
+// a signed-in user with the admin role; admins are made with `trex admin grant <email>`
 pub struct Admin;
 
 impl FromRequestParts<Arc<AppState>> for Admin {
@@ -25,21 +27,68 @@ impl FromRequestParts<Arc<AppState>> for Admin {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let Some(expected) = &state.admin_token else {
-            return Err(ApiError::Permission("the admin api is disabled".into()));
-        };
-        let given = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .unwrap_or_default();
-        // comparing hashes keeps the comparison time independent of the secret
-        if hash_token(given.trim()) != hash_token(expected) {
-            return Err(ApiError::Permission("not an admin token".into()));
+        let account = Account::from_request_parts(parts, state).await?;
+        let role = state
+            .store
+            .user(account.user)
+            .await?
+            .map(|(user, _)| user.role);
+        if role != Some(UserRole::Admin) {
+            return Err(ApiError::Permission("only admins can do this".into()));
         }
         Ok(Self)
     }
+}
+
+/// A workspace, as admins see it.
+#[derive(Serialize, ToSchema)]
+pub struct AdminWorkspace {
+    #[schema(example = "ws_0199b3c1d6a07c3e8b1f2a4d5e6f7a8b")]
+    id: String,
+    #[schema(example = "workspace")]
+    object: &'static str,
+    name: String,
+    plan: String,
+    credits: i64,
+    /// The owner's email, when it has one.
+    owner_email: Option<String>,
+    /// Unix seconds.
+    created_at: i64,
+}
+
+/// List all workspaces
+///
+/// Every workspace on the server, newest first.
+#[utoipa::path(
+    get,
+    operation_id = "list_all_workspaces",
+    path = "/admin/workspaces",
+    tag = "admin",
+    responses(
+        (status = 200, body = List<AdminWorkspace>),
+        (status = 403, response = ErrorResponse),
+    ),
+)]
+pub async fn list_workspaces(
+    State(state): State<Arc<AppState>>,
+    _: Admin,
+) -> Result<Json<List<AdminWorkspace>>, ApiError> {
+    let data = state
+        .store
+        .all_workspaces()
+        .await?
+        .into_iter()
+        .map(|workspace| AdminWorkspace {
+            id: ids::encode(WORKSPACE, workspace.id),
+            object: "workspace",
+            name: workspace.name,
+            plan: workspace.plan,
+            credits: workspace.credits,
+            owner_email: workspace.owner_email,
+            created_at: workspace.created_at,
+        })
+        .collect();
+    Ok(Json(List::new(data, false)))
 }
 
 #[derive(Deserialize, ToSchema)]

@@ -82,8 +82,17 @@ pub struct User {
     object: &'static str,
     email: String,
     name: String,
+    /// `admin` users can use the admin endpoints.
+    role: Role,
     /// Unix seconds.
     created_at: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    User,
+    Admin,
 }
 
 /// Chats, projects, the library and credits belong to a workspace. Requests act in the
@@ -373,6 +382,10 @@ fn user_object(user: &accounts::User) -> User {
         object: "user",
         email: user.email.clone(),
         name: user.name.clone(),
+        role: match user.role {
+            accounts::UserRole::User => Role::User,
+            accounts::UserRole::Admin => Role::Admin,
+        },
         created_at: user.created_at,
     }
 }

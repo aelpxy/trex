@@ -22,8 +22,6 @@ pub struct Config {
     pub redis_url: String,
     pub models: Models,
     pub plans: Plans,
-    // enables the /v1/admin endpoints; a secret, so it is never logged
-    pub admin_token: Option<String>,
     pub sandbox_image: String,
     pub sandbox_policy: Policy,
     pub sandbox_idle_timeout: Duration,
@@ -122,10 +120,6 @@ impl Config {
         let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {path}"))?;
         let models = Models::from_toml(&raw).with_context(|| format!("invalid {path}"))?;
         let plans = Plans::from_toml(&raw).with_context(|| format!("invalid plans in {path}"))?;
-        let admin_token = env::var("TREX_ADMIN_TOKEN")
-            .ok()
-            .filter(|token| !token.is_empty());
-
         Ok(Self {
             addr,
             preview_addr,
@@ -137,7 +131,6 @@ impl Config {
             redis_url,
             models,
             plans,
-            admin_token,
             sandbox_image,
             sandbox_policy,
             sandbox_idle_timeout,

@@ -13,6 +13,41 @@ pub struct User {
     pub id: Uuid,
     pub email: String,
     pub name: String,
+    pub role: UserRole,
+    pub created_at: i64,
+}
+
+// admins run the server: they manage every workspace's credits and plans
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserRole {
+    User,
+    Admin,
+}
+
+impl UserRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Admin => "admin",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        if value == "admin" {
+            Self::Admin
+        } else {
+            Self::User
+        }
+    }
+}
+
+// a workspace as admins see it, across all users
+pub struct WorkspaceSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub plan: String,
+    pub credits: i64,
+    pub owner_email: Option<String>,
     pub created_at: i64,
 }
 
@@ -31,6 +66,7 @@ impl FromRow<'_, PgRow> for User {
             id: row.try_get("id")?,
             email: row.try_get("email")?,
             name: row.try_get("name")?,
+            role: UserRole::parse(row.try_get::<&str, _>("role")?),
             created_at: row.try_get("created_at")?,
         })
     }
@@ -60,7 +96,7 @@ impl Store {
         let mut tx = self.pg.begin().await.context("failed to create user")?;
         let user: User = match sqlx::query_as(
             "INSERT INTO users (id, email, name, password_hash) VALUES ($1, $2, $3, $4) \
-             RETURNING id, email, name, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at",
+             RETURNING id, email, name, role, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at",
         )
         .bind(Uuid::now_v7())
         .bind(email)
@@ -95,7 +131,7 @@ impl Store {
     // the user and their password hash, for logging in
     pub async fn user_by_email(&self, email: &str) -> anyhow::Result<Option<(User, String)>> {
         let row = sqlx::query(
-            "SELECT id, email, name, password_hash, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at \
+            "SELECT id, email, name, role, password_hash, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at \
              FROM users WHERE LOWER(email) = LOWER($1)",
         )
         .bind(email)
@@ -108,7 +144,7 @@ impl Store {
 
     pub async fn user(&self, id: Uuid) -> anyhow::Result<Option<(User, String)>> {
         let row = sqlx::query(
-            "SELECT id, email, name, password_hash, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at \
+            "SELECT id, email, name, role, password_hash, EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at \
              FROM users WHERE id = $1",
         )
         .bind(id)
@@ -117,6 +153,44 @@ impl Store {
         .context("failed to load user")?;
         row.map(|row| Ok((User::from_row(&row)?, row.try_get("password_hash")?)))
             .transpose()
+    }
+
+    // false when no user has that email
+    pub async fn set_user_role(&self, email: &str, role: UserRole) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE users SET role = $2, updated_at = NOW() WHERE LOWER(email) = LOWER($1)",
+        )
+        .bind(email)
+        .bind(role.as_str())
+        .execute(&self.pg)
+        .await
+        .context("failed to set user role")?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // every workspace, newest first, for admins
+    pub async fn all_workspaces(&self) -> anyhow::Result<Vec<WorkspaceSummary>> {
+        let rows = sqlx::query(
+            "SELECT w.id, w.name, w.plan, w.credits, EXTRACT(EPOCH FROM w.created_at)::BIGINT AS created_at, \
+             (SELECT u.email FROM workspace_members m JOIN users u ON u.id = m.user_id \
+              WHERE m.workspace_id = w.id ORDER BY m.role = 'owner' DESC, u.created_at LIMIT 1) AS owner_email \
+             FROM workspaces w ORDER BY w.created_at DESC",
+        )
+        .fetch_all(&self.pg)
+        .await
+        .context("failed to list workspaces")?;
+        rows.iter()
+            .map(|row| {
+                Ok(WorkspaceSummary {
+                    id: row.try_get("id")?,
+                    name: row.try_get("name")?,
+                    plan: row.try_get("plan")?,
+                    credits: row.try_get("credits")?,
+                    owner_email: row.try_get("owner_email")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
     }
 
     pub async fn update_user(

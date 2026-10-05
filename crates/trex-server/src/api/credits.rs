@@ -24,6 +24,7 @@ const MAX_LIMIT: i64 = 100;
 pub struct Credits {
     #[schema(example = "credits")]
     object: &'static str,
+    /// Credits are millionths of a US dollar: 1,000,000 is $1.
     balance: i64,
     plan: Option<Plan>,
     /// Whether messages are refused at zero; off when the server has no plans configured.
@@ -45,7 +46,7 @@ pub struct LedgerEntry {
     id: String,
     #[schema(example = "credit_entry")]
     object: &'static str,
-    /// Positive for grants and top-ups, negative for usage.
+    /// In credits (millionths of a US dollar); positive for grants and top-ups, negative for usage.
     amount: i64,
     /// The balance right after this entry.
     balance: i64,
@@ -64,6 +65,39 @@ pub struct LedgerQuery {
     limit: Option<i64>,
     /// An entry id; returns older entries.
     starting_after: Option<String>,
+}
+
+/// List plans
+///
+/// The plans this server offers, sorted by monthly credits; empty when credits aren't enforced.
+#[utoipa::path(
+    get,
+    operation_id = "list_plans",
+    path = "/plans",
+    tag = "credits",
+    responses((status = 200, body = List<Plan>), (status = 401, response = ErrorResponse)),
+)]
+pub async fn plans(
+    State(state): State<Arc<AppState>>,
+    Auth { .. }: Auth,
+) -> Result<Json<List<Plan>>, ApiError> {
+    let mut data: Vec<Plan> = state
+        .plans
+        .ids()
+        .filter_map(|id| {
+            state.plans.get(id).map(|plan| Plan {
+                id: id.to_owned(),
+                name: plan.name.clone(),
+                monthly_credits: plan.monthly_credits,
+            })
+        })
+        .collect();
+    data.sort_by(|a, b| {
+        a.monthly_credits
+            .cmp(&b.monthly_credits)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(Json(List::new(data, false)))
 }
 
 /// Get credits

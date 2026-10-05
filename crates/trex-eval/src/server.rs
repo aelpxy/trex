@@ -12,7 +12,6 @@ use tokio::{
     sync::Mutex,
     time::{Instant, sleep},
 };
-use uuid::Uuid;
 
 pub const MODEL: &str = "gpt-6.1-sol";
 // the same model with a tiny window, so a short task has to compact its context
@@ -42,7 +41,6 @@ pub struct Server {
     dir: PathBuf,
     port: u16,
     preview_port: u16,
-    pub admin_token: String,
     child: Mutex<Option<Child>>,
 }
 
@@ -69,7 +67,6 @@ impl Server {
             dir,
             port,
             preview_port,
-            admin_token: format!("eval-admin-{}", Uuid::now_v7().simple()),
             child: Mutex::new(None),
         };
         server.restart().await?;
@@ -78,6 +75,22 @@ impl Server {
 
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    // makes an existing account an admin, the way an operator would
+    pub async fn grant_admin(&self, email: &str) -> anyhow::Result<()> {
+        let status = Command::new(self.root.join("target/debug/trex"))
+            .current_dir(&self.root)
+            .args(["admin", "grant", email])
+            .env("TREX_CONFIG", self.dir.join("trex.toml"))
+            .stdout(Stdio::null())
+            .status()
+            .await
+            .context("failed to run trex admin grant")?;
+        if !status.success() {
+            bail!("trex admin grant {email} failed");
+        }
+        Ok(())
     }
 
     // previews are served here, picked by the host header's first label
@@ -119,7 +132,6 @@ impl Server {
             .env("TREX_SANDBOX_IDLE_SECS", SANDBOX_IDLE_SECS)
             .env("TREX_LOG_FORMAT", "text")
             .env("RUST_LOG", "info")
-            .env("TREX_ADMIN_TOKEN", &self.admin_token)
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log))
             .kill_on_drop(true)
